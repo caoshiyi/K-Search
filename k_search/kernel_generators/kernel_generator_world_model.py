@@ -610,7 +610,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     try:
                         import tempfile
 
-                        art_name = f"{task.name}_r{round_num}_{solution.name}_code"
+                        art_name = f"r{round_num}_code"
                         artifact = wandb.Artifact(
                             name=art_name,
                             type="generated-code",
@@ -698,10 +698,30 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
 
                 if wandb is not None and getattr(wandb, "run", None) is not None:
                     try:
+                        # Log current round score as well (helps debug regressions / oscillations).
+                        round_sn = None
+                        try:
+                            round_sn = (
+                                round_eval.metrics.get("score_name")
+                                if isinstance(getattr(round_eval, "metrics", None), dict)
+                                else None
+                            )
+                        except Exception:
+                            round_sn = None
+                        round_key = (
+                            f"{task.name}/generate/{round_sn}"
+                            if isinstance(round_sn, str) and round_sn
+                            else f"{task.name}/generate/round_score"
+                        )
+                        wandb.log(
+                            {round_key: (float(round_score) if (all_passed and round_score > 0) else None)},
+                            step=round_num,
+                        )
+
                         # Log best-so-far score (single scalar). Before we have any PASSED solution,
                         # `best_eval` is None, so we log None under a stable key.
                         key = (
-                            f"{task.name}/generate/{best_eval.metrics['score_name']}"
+                            f"{task.name}/generate/best_{best_eval.metrics['score_name']}"
                             if best_eval is not None
                             else f"{task.name}/generate/best_score"
                         )

@@ -1062,6 +1062,72 @@ Reference Implementation:
                     by_wl[wl_uuid] = lat_f
             except Exception:
                 continue
+
+        # If we couldn't find matching baseline traces for the current hardware (common when the
+        # dataset traces were collected on a different GPU), run a one-off baseline benchmark now
+        # so vs_base comparisons during the generator loop match final eval semantics.
+        if by_wl:
+            return by_wl
+
+        try:
+            from flashinfer_bench import Benchmark, BenchmarkConfig, TraceSet
+            from flashinfer_bench import EvaluationStatus
+
+            definition = self._require_definition()
+            base_sol = None
+            try:
+                base_sol = self._traceset.get_solution(str(baseline_solution))
+            except Exception:
+                base_sol = None
+            if base_sol is None:
+                return {}
+            if getattr(base_sol, "definition", None) != str(definition_name):
+                return {}
+
+            root_for_runner = getattr(self._traceset, "root", None)
+            temp_traceset = TraceSet(
+                root=root_for_runner,
+                definitions={str(definition_name): definition},
+                solutions={str(definition_name): [base_sol]},
+                workloads={str(definition_name): list(selected_workloads)},
+                traces={str(definition_name): []},
+            )
+            cfg = self._eval_config or FlashInferBenchEvalConfig()
+            bench_cfg = BenchmarkConfig(
+                warmup_runs=int(cfg.warmup_runs),
+                iterations=int(cfg.iterations),
+                num_trials=int(cfg.num_trials),
+                rtol=float(cfg.rtol),
+                atol=float(cfg.atol),
+                use_isolated_runner=bool(cfg.use_isolated_runner),
+                parallel_workloads=bool(cfg.parallel_workloads),
+                max_parallel_workloads=int(cfg.max_parallel_workloads),
+            )
+            result_traceset = Benchmark(temp_traceset, bench_cfg).run_all(dump_traces=False)
+            traces = self.extract_traces(result_traceset)
+            for t in traces:
+                try:
+                    if getattr(t, "solution", None) != getattr(base_sol, "name", None):
+                        continue
+                    ev = getattr(t, "evaluation", None)
+                    if ev is None or getattr(ev, "status", None) != EvaluationStatus.PASSED:
+                        continue
+                    wl_uuid = getattr(getattr(t, "workload", None), "uuid", None)
+                    if not isinstance(wl_uuid, str) or not wl_uuid:
+                        continue
+                    perf = getattr(ev, "performance", None)
+                    lat = getattr(perf, "latency_ms", None) if perf is not None else None
+                    if lat is None:
+                        continue
+                    lat_f = float(lat)
+                    prev = by_wl.get(wl_uuid)
+                    if prev is None or lat_f < prev:
+                        by_wl[wl_uuid] = lat_f
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
         return by_wl
 
     # -------- Evaluation --------
@@ -1215,17 +1281,14 @@ Reference Implementation:
             except Exception:
                 backend_solutions.append(sol)
 
-        # Include baseline solution in the eval run (if configured) so vs_base can be computed
-        # without touching dataset traces.
+        # Baseline for vs_base(x):
+        # Mirror upstream/previous behavior: read baseline latencies from existing dataset traces,
+        # filtered by matching hardware, rather than benchmarking the baseline during final eval.
+        #
+        # Rationale: final-eval solutions may fail to compile/run; reading baseline from dataset
+        # keeps vs_base well-defined and stable.
         baseline_name = str(self._init_baseline_solution_name or "").strip() if self._init_baseline_solution_name else ""
-        baseline_backend = None
-        if baseline_name and baseline_name not in requested_names:
-            try:
-                baseline_backend = self._traceset.get_solution(baseline_name)
-            except Exception:
-                baseline_backend = None
-            if baseline_backend is not None:
-                backend_solutions.append(baseline_backend)
+        baseline_hw_key = self.current_hardware_key()
 
         # Keep dataset root so runner can read workload blobs; dump_traces controls persistence.
         root_for_runner = getattr(self._traceset, "root", None)
@@ -1264,28 +1327,38 @@ Reference Implementation:
             except Exception:
                 continue
 
-        # Baseline latencies keyed by (wl_uuid, hw_key).
+        # Baseline latencies keyed by (wl_uuid, hw_key) from dataset traces.
         baseline_lat_by_key: dict[tuple[str, str | None], float] = {}
         if baseline_name:
-            for wl_uuid, ts in (by_sol_wl.get(baseline_name, {}) or {}).items():
-                for t in ts:
+            # Only consider workloads in this final-eval run.
+            wl_set = {str(getattr(getattr(wt, "workload", None), "uuid", "") or "") for wt in all_wls}
+            wl_set = {x for x in wl_set if x}
+            for t in self._list_traces(definition_name=def_name):
+                try:
+                    if getattr(t, "solution", None) != baseline_name:
+                        continue
+                    wl_uuid = getattr(getattr(t, "workload", None), "uuid", None)
+                    if not (isinstance(wl_uuid, str) and wl_uuid in wl_set):
+                        continue
                     if not self.is_passed_trace(t):
                         continue
-                    try:
-                        ev = getattr(t, "evaluation", None)
-                        perf = getattr(ev, "performance", None) if ev is not None else None
-                        lat = getattr(perf, "latency_ms", None) if perf is not None else None
-                        if lat is None:
-                            continue
-                        hw = getattr(getattr(ev, "environment", None), "hardware", None) if ev is not None else None
-                        hw_key = hw.lower() if isinstance(hw, str) else None
-                        k = (wl_uuid, hw_key)
-                        lat_f = float(lat)
-                        prev = baseline_lat_by_key.get(k)
-                        if prev is None or lat_f < prev:
-                            baseline_lat_by_key[k] = lat_f
-                    except Exception:
+                    ev = getattr(t, "evaluation", None)
+                    perf = getattr(ev, "performance", None) if ev is not None else None
+                    lat = getattr(perf, "latency_ms", None) if perf is not None else None
+                    if lat is None:
                         continue
+                    hw = getattr(getattr(ev, "environment", None), "hardware", None) if ev is not None else None
+                    hw_key = hw.lower() if isinstance(hw, str) else None
+                    # Hardware match: if we know current hw, only accept matching baseline traces.
+                    if baseline_hw_key is not None and hw_key != baseline_hw_key:
+                        continue
+                    k = (wl_uuid, hw_key)
+                    lat_f = float(lat)
+                    prev = baseline_lat_by_key.get(k)
+                    if prev is None or lat_f < prev:
+                        baseline_lat_by_key[k] = lat_f
+                except Exception:
+                    continue
 
         # Workloads meta for report readability.
         workloads_meta: list[dict[str, Any]] = []

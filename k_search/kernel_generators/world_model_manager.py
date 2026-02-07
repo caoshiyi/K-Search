@@ -23,17 +23,6 @@ from .world_model import (
 
 LLMCall = Callable[[str], str]
 
-
-def _definition_name_from_obj(definition: Any) -> str:
-    try:
-        n = getattr(definition, "name", None)
-        if isinstance(n, str) and n.strip():
-            return n.strip()
-    except Exception:
-        pass
-    return str(definition or "").strip()
-
-
 def _extract_reference_from_definition_text(definition_text: str) -> str:
     """
     Best-effort extraction of the reference implementation from a rendered definition text.
@@ -121,10 +110,9 @@ class WorldModelManager:
 
     def ensure_initialized(
         self,
-        definition: Any | None = None,
         *,
-        definition_name: Optional[str] = None,
-        definition_text: Optional[str] = None,
+        definition_name: str,
+        definition_text: str,
         reference_text: Optional[str] = None,
         current_code_excerpt: Optional[str] = None,
         eval_result: Optional[EvalResult] = None,
@@ -134,19 +122,12 @@ class WorldModelManager:
     ) -> Optional[str]:
         if not self._cfg.enabled:
             return None
-        name = str(definition_name or _definition_name_from_obj(definition) or "").strip()
+        name = str(definition_name or "").strip()
         if not name:
             return None
-        if definition_text is None:
-            raise ValueError("ensure_initialized requires definition_text (no definition object fallback)")
+        definition_text = str(definition_text or "")
         if reference_text is None:
-            try:
-                ref0 = getattr(definition, "reference", None) if definition is not None else None
-                reference_text = str(ref0 or "").strip()
-            except Exception:
-                reference_text = ""
-            if not reference_text:
-                reference_text = _extract_reference_from_definition_text(definition_text or "")
+            reference_text = _extract_reference_from_definition_text(definition_text or "")
 
         existing = self.get(name)
         if existing:
@@ -246,19 +227,6 @@ class WorldModelManager:
             return parsed
         return None
 
-    def _maybe_embed_reference_into_root_notes(self, *, definition: Any, world_model_json: str) -> str:
-        """
-        Backward-compatible wrapper (older call sites pass a Definition-like object).
-        """
-        try:
-            ref = str(getattr(definition, "reference", "") or "").strip()
-        except Exception:
-            ref = ""
-        return self._maybe_embed_reference_into_root_notes_from_text(
-            reference_text=ref,
-            world_model_json=world_model_json,
-        )
-
     def _maybe_embed_reference_into_root_notes_from_text(
         self, *, reference_text: str, world_model_json: str
     ) -> str:
@@ -297,9 +265,8 @@ class WorldModelManager:
     def refine(
         self,
         *,
-        definition: Any | None = None,
-        definition_name: Optional[str] = None,
-        definition_text: Optional[str] = None,
+        definition_name: str,
+        definition_text: str,
         reference_text: Optional[str] = None,
         chosen_action_text: Optional[str],
         current_code_excerpt: Optional[str],
@@ -312,7 +279,7 @@ class WorldModelManager:
             return None
         # Policy: refine ONLY on new successful eval datapoints with performance fields.
         # Failed runs (or missing perf): do not update and do not force initialization.
-        name = str(definition_name or _definition_name_from_obj(definition) or "").strip()
+        name = str(definition_name or "").strip()
         if not name:
             return None
         prev_existing = self.get(name)
@@ -330,23 +297,11 @@ class WorldModelManager:
         except Exception:
             return prev_existing
 
-        if definition_text is None:
-            raise ValueError("refine requires definition_text (no definition object fallback)")
+        definition_text = str(definition_text or "")
         if reference_text is None:
-            try:
-                ref0 = getattr(definition, "reference", None) if definition is not None else None
-                reference_text = str(ref0 or "").strip()
-            except Exception:
-                reference_text = ""
-            if not reference_text:
-                reference_text = _extract_reference_from_definition_text(definition_text or "")
+            reference_text = _extract_reference_from_definition_text(definition_text or "")
 
-        prev = self.ensure_initialized(
-            definition,
-            definition_name=name,
-            definition_text=definition_text,
-            reference_text=reference_text,
-        )
+        prev = self.ensure_initialized(definition_name=name, definition_text=definition_text, reference_text=reference_text)
 
         # Identify the node we just attached a PASSED solution to (the active leaf at refine start).
         # We enforce that this solved node gets at least one OPEN child action node (a continuation step),
@@ -565,7 +520,8 @@ class WorldModelManager:
                 ps = srp.get("solution_id")
                 parent_sol = str(ps).strip() if isinstance(ps, str) and ps.strip() else None
 
-            safe_def = "".join(ch if (ch.isalnum() or ch in "_-") else "_" for ch in str(definition.name or ""))[:48] or "def"
+            # `refine()` may be called with definition=None; use resolved name for stable ids.
+            safe_def = "".join(ch if (ch.isalnum() or ch in "_-") else "_" for ch in str(name or ""))[:48] or "def"
             rid = "r" + str(round_index) if round_index is not None else "rX"
             # Ensure uniqueness.
             counter = 0
@@ -715,7 +671,7 @@ class WorldModelManager:
             lines: list[str] = []
             # Show paths, not just ids.
             try:
-                active_path = self.get_tree_path_text(definition=definition, node_id=active_id)
+                active_path = self.get_tree_path_text(definition_name=name, node_id=active_id)
                 if active_path.strip():
                     lines.append("- active_path:")
                     lines.append(active_path)
@@ -724,7 +680,7 @@ class WorldModelManager:
             if best_nid:
                 lines.append(f"- best_node: node_id={best_nid} perf={_perf_str_from_eval(best_eval or {})}")
                 try:
-                    best_path = self.get_tree_path_text(definition=definition, node_id=best_nid)
+                    best_path = self.get_tree_path_text(definition_name=name, node_id=best_nid)
                     if best_path.strip():
                         lines.append("- best_path:")
                         lines.append(best_path)
@@ -780,7 +736,7 @@ class WorldModelManager:
             edits = try_parse_decision_tree_edit_ops(raw)
             if edits is not None:
                 candidate = self._apply_decision_tree_ops(
-                    definition_name=definition.name,
+                    definition_name=name,
                     world_model_json=candidate,
                     edits=edits,
                     round_index=round_index,
@@ -819,9 +775,8 @@ class WorldModelManager:
     def propose_action_nodes(
         self,
         *,
-        definition: Any | None = None,
-        definition_name: Optional[str] = None,
-        definition_text: Optional[str] = None,
+        definition_name: str,
+        definition_text: str,
         reference_text: Optional[str] = None,
         current_code_excerpt: Optional[str],
         current_tree_path: Optional[str],
@@ -835,26 +790,14 @@ class WorldModelManager:
         """
         if not self._cfg.enabled:
             return None
-        name = str(definition_name or _definition_name_from_obj(definition) or "").strip()
+        name = str(definition_name or "").strip()
         if not name:
             return None
-        if definition_text is None:
-            raise ValueError("propose_action_nodes requires definition_text (no definition object fallback)")
+        definition_text = str(definition_text or "")
         if reference_text is None:
-            try:
-                ref0 = getattr(definition, "reference", None) if definition is not None else None
-                reference_text = str(ref0 or "").strip()
-            except Exception:
-                reference_text = ""
-            if not reference_text:
-                reference_text = _extract_reference_from_definition_text(definition_text or "")
+            reference_text = _extract_reference_from_definition_text(definition_text or "")
 
-        prev = self.ensure_initialized(
-            definition,
-            definition_name=name,
-            definition_text=definition_text,
-            reference_text=reference_text,
-        )
+        prev = self.ensure_initialized(definition_name=name, definition_text=definition_text, reference_text=reference_text)
         if not prev:
             return prev
 
@@ -988,9 +931,8 @@ class WorldModelManager:
     def note_action_too_hard(
         self,
         *,
-        definition: Any | None = None,
-        definition_name: Optional[str] = None,
-        definition_text: Optional[str] = None,
+        definition_name: str,
+        definition_text: str,
         reference_text: Optional[str] = None,
         chosen_action_text: str | None,
         current_code_excerpt: str | None,
@@ -1008,26 +950,14 @@ class WorldModelManager:
         """
         if not self._cfg.enabled:
             return None
-        name = str(definition_name or _definition_name_from_obj(definition) or "").strip()
+        name = str(definition_name or "").strip()
         if not name:
             return None
-        if definition_text is None:
-            raise ValueError("note_action_too_hard requires definition_text (no definition object fallback)")
+        definition_text = str(definition_text or "")
         if reference_text is None:
-            try:
-                ref0 = getattr(definition, "reference", None) if definition is not None else None
-                reference_text = str(ref0 or "").strip()
-            except Exception:
-                reference_text = ""
-            if not reference_text:
-                reference_text = _extract_reference_from_definition_text(definition_text or "")
+            reference_text = _extract_reference_from_definition_text(definition_text or "")
 
-        prev = self.ensure_initialized(
-            definition,
-            definition_name=name,
-            definition_text=definition_text,
-            reference_text=reference_text,
-        )
+        prev = self.ensure_initialized(definition_name=name, definition_text=definition_text, reference_text=reference_text)
         if not prev:
             return prev
         frontier_text = self._render_open_frontier_nodes_for_prompt(world_model_json=prev, max_items=10)
@@ -1062,9 +992,7 @@ class WorldModelManager:
             self.set(name, candidate)
         return candidate
 
-    def choose_next_action_node_id(
-        self, *, definition: Any | None = None, definition_name: Optional[str] = None
-    ) -> Optional[str]:
+    def choose_next_action_node_id(self, *, definition_name: str) -> Optional[str]:
         """
         Deterministically pick the next open action node to execute.
 
@@ -1076,7 +1004,7 @@ class WorldModelManager:
 
         Ranking: action.score_0_to_1 (desc), then difficulty_1_to_5 (asc), then overall_rating_0_to_10 (desc).
         """
-        name = str(definition_name or _definition_name_from_obj(definition) or "").strip()
+        name = str(definition_name or "").strip()
         if not name:
             return None
         wm = self.get(name)
@@ -1248,11 +1176,9 @@ class WorldModelManager:
         nid = str(cands_eff[0].get("node_id") or "").strip()
         return nid or None
 
-    # Backward-compatible name (kept because older code paths still call it).
-    def choose_next_action_leaf_id(
-        self, *, definition: Any | None = None, definition_name: Optional[str] = None
-    ) -> Optional[str]:
-        return self.choose_next_action_node_id(definition=definition, definition_name=definition_name)
+    # Backward-compatible alias (no Definition object support).
+    def choose_next_action_leaf_id(self, *, definition_name: str) -> Optional[str]:
+        return self.choose_next_action_node_id(definition_name=definition_name)
 
     def _count_open_action_nodes(self, *, world_model_json: str) -> int:
         obj = load_world_model_obj(world_model_json or "")
@@ -1615,8 +1541,7 @@ class WorldModelManager:
     def attach_solution_to_active_leaf(
         self,
         *,
-        definition: Any | None = None,
-        definition_name: Optional[str] = None,
+        definition_name: str,
         solution_id: str,
         solution_name: str,
         eval_result: EvalResult,
@@ -1626,7 +1551,7 @@ class WorldModelManager:
         Attach a solution reference to the current active leaf node in the decision tree.
         This is deterministic and enables backtracking to any node's solution.
         """
-        name = str(definition_name or _definition_name_from_obj(definition) or "").strip()
+        name = str(definition_name or "").strip()
         if not name:
             return None
         wm = self.get(name)
@@ -1665,10 +1590,10 @@ class WorldModelManager:
         return updated
 
     def get_active_leaf_solution_ref(
-        self, *, definition: Any | None = None, definition_name: Optional[str] = None
+        self, *, definition_name: str
     ) -> dict:
         """Return the active leaf node's solution_ref (may be empty)."""
-        name = str(definition_name or _definition_name_from_obj(definition) or "").strip()
+        name = str(definition_name or "").strip()
         if not name:
             return {}
         wm = self.get(name)
@@ -1689,10 +1614,10 @@ class WorldModelManager:
         return {}
 
     def get_active_leaf_id(
-        self, *, definition: Any | None = None, definition_name: Optional[str] = None
+        self, *, definition_name: str
     ) -> str:
         """Return the active leaf node id (falls back to root)."""
-        name = str(definition_name or _definition_name_from_obj(definition) or "").strip()
+        name = str(definition_name or "").strip()
         if not name:
             return "root"
         wm = self.get(name)
@@ -1705,10 +1630,10 @@ class WorldModelManager:
         return str(dt.get("active_leaf_id", "") or dt.get("root_id", "") or "root")
 
     def set_active_leaf_id(
-        self, *, definition: Any | None = None, definition_name: Optional[str] = None, node_id: str
+        self, *, definition_name: str, node_id: str
     ) -> Optional[str]:
         """Deterministically set the decision tree's active leaf id (no LLM)."""
-        name = str(definition_name or _definition_name_from_obj(definition) or "").strip()
+        name = str(definition_name or "").strip()
         if not name:
             return None
         wm = self.get(name)
@@ -1727,13 +1652,13 @@ class WorldModelManager:
         return updated
 
     def get_tree_path_text(
-        self, *, definition: Any | None = None, definition_name: Optional[str] = None, node_id: Optional[str] = None
+        self, *, definition_name: str, node_id: Optional[str] = None
     ) -> str:
         """
         Return a compact text path root -> ... -> node_id (or active leaf), suitable for prompts.
         Includes decision/choice only (no heavy fields).
         """
-        name = str(definition_name or _definition_name_from_obj(definition) or "").strip()
+        name = str(definition_name or "").strip()
         if not name:
             return ""
         wm = self.get(name)
@@ -1785,11 +1710,9 @@ class WorldModelManager:
                     parts.append(f"{nid}: {c}")
         return "\n".join(f"- {p}" for p in parts).strip()
 
-    def get_solution_ref_for_node(
-        self, *, definition: Any | None = None, definition_name: Optional[str] = None, node_id: str
-    ) -> dict:
+    def get_solution_ref_for_node(self, *, definition_name: str, node_id: str) -> dict:
         """Return a specific node's solution_ref (may be empty)."""
-        name = str(definition_name or _definition_name_from_obj(definition) or "").strip()
+        name = str(definition_name or "").strip()
         if not name:
             return {}
         wm = self.get(name)
@@ -1809,11 +1732,10 @@ class WorldModelManager:
                 return sr if isinstance(sr, dict) else {}
         return {}
 
-    def run(
+    def run(  # pragma: no cover
         self,
         *,
         current_code_excerpt: str,
-        definition: Any,
         current_active_node_id: str,
         eval_result: Optional[EvalResult],
         baseline_targets_text: Optional[str] = None,
@@ -1859,10 +1781,8 @@ class WorldModelManager:
                 by_id[str(n["node_id"])] = n
         return by_id
 
-    def get_node_obj(
-        self, *, definition: Any | None = None, definition_name: Optional[str] = None, node_id: str
-    ) -> Optional[dict]:
-        name = str(definition_name or _definition_name_from_obj(definition) or "").strip()
+    def get_node_obj(self, *, definition_name: str, node_id: str) -> Optional[dict]:
+        name = str(definition_name or "").strip()
         if not name:
             return None
         wm = self.get(name)
@@ -2028,7 +1948,7 @@ class WorldModelManager:
     def _ensure_action_child_nodes(
         self,
         *,
-        definition: Any,
+        definition_name: str,
         world_model_json: str,
         base_solution_id_by_node_id: dict[str, Optional[str]],
         candidates: list[ActionCandidate],
@@ -2054,7 +1974,7 @@ class WorldModelManager:
                 by_id[str(n["node_id"])] = n
         rid = f"r{int(round_index)}" if isinstance(round_index, int) else "rX"
         mapping: dict[str, str] = {}
-        safe_def = "".join(ch if (ch.isalnum() or ch in "_-") else "_" for ch in str(definition.name or ""))[:48] or "def"
+        safe_def = "".join(ch if (ch.isalnum() or ch in "_-") else "_" for ch in str(definition_name or ""))[:48] or "def"
         for c in candidates:
             aid = str(c.action_id or "").strip()
             if not aid:
@@ -2104,6 +2024,6 @@ class WorldModelManager:
             by_id[nid] = new_node
 
         updated = dump_world_model_obj(obj)
-        self.set(definition.name, updated)
+        self.set(str(definition_name), updated)
         return mapping
 

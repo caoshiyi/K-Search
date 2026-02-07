@@ -1,0 +1,7 @@
+__pycache__/
+logs/
+.ksearch-output/
+gpu_mode/
+wandb/
+openevolve_output/
+*.log

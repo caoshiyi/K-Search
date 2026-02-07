@@ -102,8 +102,6 @@ def generate_and_evaluate(
     Generate exactly one solution for the task, then run final evaluation.
     """
     
-    # Generator
-    from k_search.kernel_generators.kernel_generator import KernelGenerator
     # Optional Weights & Biases support
     try:
         import wandb  # type: ignore
@@ -302,11 +300,6 @@ def main():
         type=int,
         default=5,
         help="World-model mode: end an action cycle after this many consecutive non-improving rounds (>=1).",
-    )
-    parser.add_argument(
-        "--per-workload-feedback",
-        action="store_true",
-        help="Include per-workload performance feedback in optimization prompts (more verbose, can help targeted tuning)",
     )
     # W&B options
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")

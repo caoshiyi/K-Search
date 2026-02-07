@@ -357,6 +357,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             parent_is_root = parent_id == "root"
             base_raw_code = ""
             base_score: float = -1.0  # comparable to cycle_best_score (task-defined score)
+            base_eval: Optional[EvalResult] = None
             if self._solution_db is not None:
                 sr = self._wm.get_solution_ref_for_node(definition_name=task.name, node_id=parent_id)
                 sid = sr.get("solution_id") if isinstance(sr, dict) else None
@@ -364,6 +365,29 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 try:
                     ev = sr.get("eval") if isinstance(sr, dict) else None
                     if isinstance(ev, dict):
+                        # Best-effort reconstruct EvalResult so we can surface base perf in prompts.
+                        try:
+                            base_eval = EvalResult(
+                                status=str(ev.get("status", "") or ""),
+                                latency_ms=(float(ev["latency_ms"]) if isinstance(ev.get("latency_ms"), (int, float)) else None),
+                                reference_latency_ms=(
+                                    float(ev["reference_latency_ms"])
+                                    if isinstance(ev.get("reference_latency_ms"), (int, float))
+                                    else None
+                                ),
+                                mean_vs_baseline_factor=(
+                                    float(ev["mean_vs_baseline_factor"])
+                                    if isinstance(ev.get("mean_vs_baseline_factor"), (int, float))
+                                    else None
+                                ),
+                                speedup_factor=(
+                                    float(ev["speedup_factor"]) if isinstance(ev.get("speedup_factor"), (int, float)) else None
+                                ),
+                                log_excerpt=str(ev.get("log_excerpt", "") or ""),
+                                metrics=(ev.get("metrics") if isinstance(ev.get("metrics"), dict) else {}),
+                            )
+                        except Exception:
+                            base_eval = None
                         m = ev.get("metrics") if isinstance(ev.get("metrics"), dict) else None
                         sc = m.get("score") if isinstance(m, dict) else None
                         base_score = float(sc) if isinstance(sc, (int, float)) else -1.0
@@ -447,13 +471,6 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         prompt = get_prompt_from_definition_text(self.language, definition_text, self.target_gpu)
                     elif parent_is_root or not base_raw_code:
                         has_passed_in_cycle = cycle_best_solution is not None
-                        perf_summary_lines: list[str] = []
-                        if last_eval is not None:
-                            perf_summary_lines.extend(last_eval.perf_summary_lines(prefix="last_attempt"))
-                        if cycle_best_eval is not None:
-                            perf_summary_lines.extend(cycle_best_eval.perf_summary_lines(prefix="cycle_best"))
-                        perf_summary = "\n".join(perf_summary_lines).strip()
-
                         # Reference base shown in prompts: prefer whichever is better by score (base_score vs cycle_best_score).
                         # If parent is root (no base score), fall back to cycle_best if present.
                         base_for_debug = "(no base code; start from spec)"
@@ -465,6 +482,21 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             and (base_score <= 0 or cycle_best_score > base_score)
                         ):
                             base_for_debug = cycle_best_raw
+
+                        # Perf summary should match the code we include as `base_code` in the prompt.
+                        base_perf_eval: Optional[EvalResult] = None
+                        if isinstance(base_for_debug, str) and base_for_debug.strip():
+                            if base_for_debug == cycle_best_raw and cycle_best_eval is not None:
+                                base_perf_eval = cycle_best_eval
+                            elif base_for_debug == base_raw_code and base_eval is not None:
+                                base_perf_eval = base_eval
+
+                        perf_summary_lines: list[str] = []
+                        if last_eval is not None:
+                            perf_summary_lines.extend(last_eval.perf_summary_lines(prefix="last_attempt"))
+                        if base_perf_eval is not None:
+                            perf_summary_lines.extend(base_perf_eval.perf_summary_lines(prefix="base"))
+                        perf_summary = "\n".join(perf_summary_lines).strip()
                         if not has_passed_in_cycle:
                             prompt = get_debug_and_improve_from_spec_prompt_from_text(
                                 self.language,
@@ -492,13 +524,6 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             )
                     else:
                         has_passed_in_cycle = cycle_best_solution is not None
-                        perf_summary_lines: list[str] = []
-                        if last_eval is not None:
-                            perf_summary_lines.extend(last_eval.perf_summary_lines(prefix="last_attempt"))
-                        if cycle_best_eval is not None:
-                            perf_summary_lines.extend(cycle_best_eval.perf_summary_lines(prefix="cycle_best"))
-                        perf_summary = "\n".join(perf_summary_lines).strip()
-
                         # Reference base shown in prompts: prefer whichever is better by score (base_score vs cycle_best_score).
                         base_for_debug = base_raw_code
                         if (
@@ -507,6 +532,20 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             and (base_score <= 0 or cycle_best_score > base_score)
                         ):
                             base_for_debug = cycle_best_raw
+
+                        base_perf_eval: Optional[EvalResult] = None
+                        if isinstance(base_for_debug, str) and base_for_debug.strip():
+                            if base_for_debug == cycle_best_raw and cycle_best_eval is not None:
+                                base_perf_eval = cycle_best_eval
+                            elif base_for_debug == base_raw_code and base_eval is not None:
+                                base_perf_eval = base_eval
+
+                        perf_summary_lines: list[str] = []
+                        if last_eval is not None:
+                            perf_summary_lines.extend(last_eval.perf_summary_lines(prefix="last_attempt"))
+                        if base_perf_eval is not None:
+                            perf_summary_lines.extend(base_perf_eval.perf_summary_lines(prefix="base"))
+                        perf_summary = "\n".join(perf_summary_lines).strip()
                         if not has_passed_in_cycle:
                             prompt = get_debug_generated_code_prompt_from_text(
                                 self.language,

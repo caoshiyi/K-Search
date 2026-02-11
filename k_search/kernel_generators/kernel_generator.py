@@ -32,7 +32,7 @@ class KernelGenerator:
         target_gpu: str = "H100",
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        reasoning_effort: str = "high",  # only used for openai reasoning models
+        reasoning_effort: str = "medium",  # only used for openai reasoning models
     ):
         """
         Args:
@@ -101,19 +101,26 @@ class KernelGenerator:
 
         # For non-CUDA languages (triton, python), clean up markdown and hex floats
         if "```" in code:
-            if code.startswith("```"):
-                lines = code.split("\n")
-                if lines[0].startswith("```"):
-                    lines = lines[1:]
-                code = "\n".join(lines)
+            # Prefer parsing the first fenced block anywhere in the response. This mirrors the
+            # CUDA path's "structured output" parsing and is robust to models emitting extra text.
+            m = re.search(r"```[a-zA-Z0-9_+-]*\n([\s\S]*?)\n```", str(code or ""))
+            if m:
+                code = (m.group(1) or "").strip()
+            else:
+                # Back-compat fallback: strip leading/trailing fences if present, then remove stray backticks.
+                if code.startswith("```"):
+                    lines = code.split("\n")
+                    if lines[0].startswith("```"):
+                        lines = lines[1:]
+                    code = "\n".join(lines)
 
-            if code.endswith("```"):
-                lines = code.split("\n")
-                if lines and lines[-1].strip() == "```":
-                    lines = lines[:-1]
-                code = "\n".join(lines)
+                if code.endswith("```"):
+                    lines = code.split("\n")
+                    if lines and lines[-1].strip() == "```":
+                        lines = lines[:-1]
+                    code = "\n".join(lines)
 
-            code = code.replace("```", "")
+                code = code.replace("```", "")
 
         hex_float_pattern = r"0x[0-9a-fA-F]*\.[0-9a-fA-F]*p[-+]?\d+"
         hex_floats = re.findall(hex_float_pattern, code)
@@ -182,17 +189,32 @@ class KernelGenerator:
         assert last_err is not None
         raise last_err
 
-    def _create_solution_from_code(self, code, definition: Any, round_num: int) -> Solution:
+    def _create_solution_from_code(
+        self,
+        *,
+        cleaned_code: Any,
+        raw_code: Any,
+        task: Task,
+        round_num: int,
+    ) -> Solution:
         """
-        Create a flashinfer-bench `Solution` from generated code.
+        Create a k-search `Solution` from generated code.
 
-        `definition` may be a flashinfer-bench Definition object OR a plain definition name string.
+        Tasks may override via an optional hook:
+          - make_solution_from_generated_code(cleaned_code=..., raw_code=..., round_num=..., model_name=..., target_gpu=..., language=...)
         """
-        def_name = getattr(definition, "name", None)
-        if not isinstance(def_name, str) or not def_name.strip():
-            def_name = str(definition or "").strip()
-        if not def_name:
-            def_name = "__unknown__"
+        hook = getattr(task, "make_solution_from_generated_code", None)
+        if callable(hook):
+            return hook(
+                cleaned_code=cleaned_code,
+                raw_code=raw_code,
+                round_num=int(round_num),
+                model_name=str(self.model_name),
+                target_gpu=str(self.target_gpu),
+                language=str(self.language),
+            )
+
+        def_name = str(getattr(task, "name", "") or "").strip() or "__unknown__"
 
         # Include reasoning effort in name and description for GPT-5 models
         if self.model_name.startswith("gpt-5") or self.model_name.startswith("o3"):
@@ -207,19 +229,19 @@ class KernelGenerator:
             )
 
         # Handle different code formats based on language
-        if self.language.lower() == "cuda" and isinstance(code, dict):
+        if self.language.lower() == "cuda" and isinstance(cleaned_code, dict):
             # For CUDA, we have multiple files
             sources = []
-            for filename, content in code.items():
+            for filename, content in cleaned_code.items():
                 sources.append(SourceFile(path=filename, content=content))
 
             entry_point = "main.cpp::run"
         else:
             # For single-file languages (triton, python)
-            if isinstance(code, dict):
-                code = next(iter(code.values()))
-
-            sources = [SourceFile(path="main.py", content=code)]
+            code_txt = raw_code if isinstance(raw_code, str) and raw_code.strip() else cleaned_code
+            if isinstance(code_txt, dict):
+                code_txt = next(iter(code_txt.values()))
+            sources = [SourceFile(path="main.py", content=str(code_txt or ""))]
             entry_point = "main.py::run"
 
         solution = Solution(
@@ -249,7 +271,19 @@ class KernelGenerator:
         - Keep optimizing for max_opt_rounds even if PASSED
         - Use multiple workloads' feedback per round
         """
-        definition_text = str(getattr(task, "get_definition_text", lambda: "")() or "").strip()
+        get_def = getattr(task, "get_definition_text", None)
+        if callable(get_def):
+            definition_text = str(get_def(language=str(self.language)) or "").strip()
+            if not definition_text:
+                raise RuntimeError(
+                    f"Task '{getattr(task, 'name', '')}' returned empty definition text; "
+                    "cannot build prompts without a definition."
+                )
+        else:
+            raise RuntimeError(
+                f"Task '{getattr(task, 'name', '')}' does not provide get_definition_text(); "
+                "cannot build prompts without a definition."
+            )
         baseline_targets_text = str(getattr(task, "get_baseline_targets_text", lambda: "")() or "").strip()
 
         def _append_baseline_hint(p: str) -> str:
@@ -261,6 +295,18 @@ class KernelGenerator:
                 + baseline_targets_text
                 + "\n- Optimize for overall mean latency across the listed workloads while maintaining correctness."
             )
+
+        def _per_task_requirement_text(*, phase: str) -> str:
+            hook = getattr(task, "get_per_task_requirement_text", None)
+            if callable(hook):
+                try:
+                    return str(
+                        hook(language=str(self.language), target_gpu=str(self.target_gpu), phase=str(phase or ""))
+                        or ""
+                    ).strip()
+                except Exception:
+                    return ""
+            return ""
 
         current_code = None
         current_raw_code = None
@@ -278,7 +324,17 @@ class KernelGenerator:
             seed_solution = base_sol
             current_code, current_raw_code = code_from_solution(self.language, base_sol)
         else:
-            prompt = get_prompt_from_definition_text(self.language, definition_text, self.target_gpu)
+            gen_prompt_fn = getattr(task, "get_generation_prompt", None)
+            if callable(gen_prompt_fn):
+                prompt = str(gen_prompt_fn(language=str(self.language), target_gpu=str(self.target_gpu)) or "")
+            else:
+                per_req = _per_task_requirement_text(phase="generate")
+                prompt = get_prompt_from_definition_text(
+                    self.language,
+                    definition_text,
+                    self.target_gpu,
+                    per_task_requirement=per_req,
+                )
             prompt = _append_baseline_hint(prompt)
             print(prompt)
             code_result = self._generate_code_from_prompt(prompt)
@@ -297,7 +353,12 @@ class KernelGenerator:
             if round_num == 1 and seed_solution is not None:
                 solution = seed_solution
             else:
-                solution = self._create_solution_from_code(current_code, task.name, round_num)
+                solution = self._create_solution_from_code(
+                    cleaned_code=current_code,
+                    raw_code=current_raw_code,
+                    task=task,
+                    round_num=int(round_num),
+                )
 
             print("Evaluating solution...")
             eval_result = task.run_benchmark(solution=solution, dump_traces=False, round_num=int(round_num))
@@ -371,6 +432,29 @@ class KernelGenerator:
             # W&B: log best-so-far only
             if wandb is not None and getattr(wandb, "run", None) is not None:
                 try:
+                    # Also log this round's score (even if not passed; store None for clarity).
+                    try:
+                        round_score_name = None
+                        try:
+                            round_score_name = (
+                                eval_result.metrics.get("score_name")
+                                if isinstance(getattr(eval_result, "metrics", None), dict)
+                                else None
+                            )
+                        except Exception:
+                            round_score_name = None
+                        round_key = (
+                            f"{task.name}/generate/{round_score_name}"
+                            if isinstance(round_score_name, str) and round_score_name
+                            else f"{task.name}/generate/round_score"
+                        )
+                        wandb.log(
+                            {round_key: (float(round_score) if all_passed and round_score > 0 else None)},
+                            step=round_num,
+                        )
+                    except Exception:
+                        pass
+
                     score_name = None
                     score_val = None
                     if best_eval is not None:
@@ -381,9 +465,9 @@ class KernelGenerator:
                         )
                         score_val = best_eval.score() if getattr(best_eval, "is_passed", lambda: False)() else None
                     key = (
-                        f"{task.name}/generate/{score_name}"
+                        f"{task.name}/generate/best_{score_name}"
                         if isinstance(score_name, str) and score_name
-                        else f"{task.name}/generate/score"
+                        else f"{task.name}/generate/best_score"
                     )
                     wandb.log(
                         {key: (float(score_val) if isinstance(score_val, (int, float)) and float(score_val) > 0 else None)},
@@ -445,19 +529,34 @@ class KernelGenerator:
                 except Exception:
                     previous_round_summary_for_prompt = None
 
-                if trace_logs:
+                # Always use the optimization prompt template for the next round.
+                # Tasks may provide empty trace logs on PASS; we still want to carry forward
+                # previous round summary / best-so-far / current code context deterministically.
+                opt_prompt_fn = getattr(task, "get_optimization_prompt", None)
+                if callable(opt_prompt_fn):
+                    opt_prompt = str(
+                        opt_prompt_fn(
+                            language=str(self.language),
+                            target_gpu=str(self.target_gpu),
+                            trace_logs=str(trace_logs or ""),
+                            current_code=str(current_raw_code or ""),
+                            current_best=current_best_for_prompt,
+                            previous_round_summary=previous_round_summary_for_prompt,
+                        )
+                        or ""
+                    )
+                else:
+                    per_req = _per_task_requirement_text(phase="optimize")
                     opt_prompt = get_optimization_prompt_from_definition_text(
                         self.language,
                         definition_text=definition_text,
-                        trace_logs=trace_logs,
+                        trace_logs=str(trace_logs or ""),
                         current_code=str(current_raw_code or ""),
                         target_gpu=self.target_gpu,
                         current_best=current_best_for_prompt,
                         previous_round_summary=previous_round_summary_for_prompt,
+                        per_task_requirement=per_req,
                     )
-                else:
-                    # Fall back to definition-only prompt if we have no feedback logs.
-                    opt_prompt = get_prompt_from_definition_text(self.language, definition_text, self.target_gpu)
                 opt_prompt = _append_baseline_hint(opt_prompt)
                 print(opt_prompt)
                 print(f"Generating optimized code for round {round_num + 1}...")

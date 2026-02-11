@@ -13,7 +13,15 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from k_search.tasks.task_base import BuildSpec, EvalResult, Solution, SourceFile, SupportedLanguages
+from k_search.tasks.task_base import (
+    BuildSpec,
+    EvalResult,
+    Solution,
+    SourceFile,
+    SupportedLanguages,
+    load_ksearch_solution_json,
+    solution_from_json_dict,
+)
 from k_search.tasks.gpu_mode.code_utils import normalize_cuda_sources
 from k_search.tasks.gpu_mode.evaluator import evaluate_trimul_submission
 from k_search.tasks.gpu_mode.trimul.spec import TRIMUL_SPEC_TEXT_CUDA, TRIMUL_SPEC_TEXT_TRITON
@@ -38,6 +46,7 @@ class GpuModeTriMulTask:
         mode: str = "benchmark",
         keep_tmp: bool = False,
         task_dir: str | Path | None = None,
+        artifacts_dir: str | None = None,
         name: str = "gpumode_trimul",
     ) -> None:
         self._name = str(name or "gpumode_trimul")
@@ -46,6 +55,7 @@ class GpuModeTriMulTask:
             keep_tmp=bool(keep_tmp),
             task_dir=(Path(task_dir).expanduser().resolve() if task_dir is not None else DEFAULT_TRIMUL_TASK_DIR),
         )
+        self._ksearch_artifacts_dir: str | None = (str(artifacts_dir) if artifacts_dir is not None else None)
         self._solutions: dict[str, Solution] = {}
         # Last-round cache for prompt feedback (best-effort; generator reads via getattr).
         self._last_round_trace_logs_for_prompt: str = ""
@@ -57,10 +67,19 @@ class GpuModeTriMulTask:
     def name(self) -> str:
         return self._name
 
-    def get_definition_text(self) -> str:
-        # Default to the submission.py-style interface (Triton/Python). CUDA callers should use
-        # `get_definition_text_for_language(language="cuda")`.
-        return f"{TRIMUL_SPEC_TEXT_TRITON}\n"
+    def get_definition_text(self, language: str | None = None) -> str:
+        """
+        Return the language-specific task specification text.
+
+        Note: the Task Protocol requires `get_definition_text()` with no args; we keep
+        `language` optional for convenience in scripts/CLIs.
+        """
+        lang = str(language or "").strip().lower()
+        if not lang:
+            lang = "triton"
+        if lang not in ("triton", "cuda"):
+            raise ValueError(f"Unsupported language for gpumode_trimul definition text: {lang!r}")
+        return f"{self.get_definition_text_for_language(language=lang)}\n"
 
     # Optional helper (not part of the Task Protocol): generators/CLIs can use this
     # to get language-specific prompt text.
@@ -135,7 +154,6 @@ class GpuModeTriMulTask:
             "Analysis checklist (keep it short):\n"
             "- Identify avoidable large intermediates / extra full-tensor reads+writes.\n"
             "- Identify extra kernel launches / passes over the same data.\n"
-            "- Note any non-coalesced or highly-strided accesses and reduction patterns that may be slow.\n"
             "- Note dtype conversions / precision choices that may hurt speed or correctness.\n"
             "Then implement the optimized version.\n"
         )
@@ -199,7 +217,26 @@ class GpuModeTriMulTask:
         self._solutions[str(sol.name)] = sol
 
     def get_solution(self, solution_name: str) -> Solution | None:
-        return self._solutions.get(str(solution_name))
+        name = str(solution_name)
+        if name in self._solutions:
+            return self._solutions.get(name)
+        # Allow resolving from k-search artifacts Solution JSON (by path or by name).
+        try:
+            d = load_ksearch_solution_json(
+                solution_ref=name,
+                definition_name=str(self.name or ""),
+                artifacts_dir=self._ksearch_artifacts_dir,
+            )
+            sol = solution_from_json_dict(d)
+            if str(sol.definition or "") != str(self.name or ""):
+                return None
+            # Cache for subsequent lookups.
+            self._solutions[str(sol.name)] = sol
+            return sol
+        except FileNotFoundError:
+            return None
+        except Exception:
+            return None
 
     def code_for_world_model_from_raw(self, *, raw: Any, language: str) -> str:
         lang = str(language or "").strip().lower()

@@ -233,13 +233,13 @@ def generate_and_evaluate(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate kernels with GPT/Gemini (OpenAI-compatible) and evaluate via flashinfer-bench.")
-    parser.add_argument("--local", required=True, help="Path to flashinfer-trace dataset root")
+    parser = argparse.ArgumentParser(description="Generate kernels with GPT/Gemini (OpenAI-compatible) and evaluate via task backends.")
+    parser.add_argument("--local", required=False, default=None, help="Path to flashinfer-trace dataset root (flashinfer only)")
     parser.add_argument(
         "--task-source",
-        choices=["flashinfer"],
+        choices=["flashinfer", "gpumode"],
         default="flashinfer",
-        help="Task backend to use (currently only: flashinfer).",
+        help="Task backend to use.",
     )
     parser.add_argument(
         "--task-path",
@@ -306,6 +306,11 @@ def main():
     parser.add_argument("--wandb-project", default=os.getenv("WANDB_PROJECT"), help="W&B project")
     parser.add_argument("--run-name", default=os.getenv("RUN_NAME"), help="W&B run name")
 
+    # GPUMode options
+    parser.add_argument("--gpumode-mode", default="benchmark", help="GPUMode eval mode (e.g., benchmark/test/leaderboard/profile)")
+    parser.add_argument("--gpumode-keep-tmp", action="store_true", help="Keep GPUMode temp working dir for debugging")
+    parser.add_argument("--gpumode-task-dir", default=None, help="Override GPUMode task dir (defaults to vendored trimul task)")
+
     args = parser.parse_args()
 
     api_key = args.api_key or os.getenv("LLM_API_KEY")
@@ -313,10 +318,12 @@ def main():
         raise ValueError("API key is required (pass --api-key or set LLM_API_KEY)")
 
     task_source = str(args.task_source or "flashinfer")
-    task_path = str(args.task_path or args.local)
+    task_path = str(args.task_path or (args.local or ""))
     if task_source == "flashinfer":
         from k_search.tasks.flashinfer_bench_task import FlashInferBenchTask
 
+        if not task_path:
+            raise ValueError("--local or --task-path is required for --task-source=flashinfer")
         if not args.definition:
             raise ValueError("--definition is required")
         def_name = str(args.definition)
@@ -336,6 +343,16 @@ def main():
             feedback_workloads=args.feedback_workloads,
             feedback_trace_policy=args.feedback_trace_policy,
             num_feedback_workloads=5,
+            artifacts_dir=args.artifacts_dir,
+        )
+    elif task_source == "gpumode":
+        from k_search.tasks.gpu_mode_task import GpuModeTriMulTask
+
+        task = GpuModeTriMulTask(
+            mode=str(args.gpumode_mode or "benchmark"),
+            keep_tmp=bool(args.gpumode_keep_tmp),
+            task_dir=(str(args.gpumode_task_dir) if args.gpumode_task_dir else None),
+            artifacts_dir=args.artifacts_dir,
         )
     else:
         raise ValueError(f"Unsupported task_source: {task_source}")

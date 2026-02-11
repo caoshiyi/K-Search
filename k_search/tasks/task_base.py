@@ -11,6 +11,8 @@ import hashlib
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, Optional, Protocol
+from pathlib import Path
+import json
 
 
 @dataclass
@@ -297,7 +299,7 @@ class Task(Protocol):
     @property
     def name(self) -> str: ...
 
-    def get_definition_text(self) -> str: ...
+    def get_definition_text(self, language: str | None = None) -> str: ...
 
     def get_solution(self, solution_name: str) -> Solution | None: ...
 
@@ -317,5 +319,74 @@ class Task(Protocol):
     # - get_last_round_trace_logs_for_prompt() -> str
     # - get_last_round_passed_count() -> int
     # - get_last_round_total_workloads() -> int
+
+
+def load_ksearch_solution_json(
+    *,
+    solution_ref: str,
+    definition_name: str,
+    artifacts_dir: str | None,
+) -> dict[str, Any]:
+    """
+    Load a persisted k-search Solution JSON.
+
+    `solution_ref` can be:
+    - an absolute/relative path to a .json file, OR
+    - a solution name, resolved under the k-search artifacts dir:
+        <artifacts>/<task_name>/solutions/<definition_name>/<solution_name>.json
+    """
+    ref = str(solution_ref or "").strip()
+    if not ref:
+        raise ValueError("Empty solution_ref")
+
+    p = Path(ref).expanduser()
+    if p.suffix.lower() == ".json" and p.exists():
+        return json.loads(p.read_text(encoding="utf-8"))
+
+    from k_search.utils.paths import get_ksearch_artifacts_dir
+
+    root = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=str(definition_name or "")).resolve()
+    sol_path = root / "solutions" / str(definition_name or "__unknown__") / f"{ref}.json"
+    if not sol_path.exists():
+        raise FileNotFoundError(f"Solution JSON not found: {sol_path}")
+    return json.loads(sol_path.read_text(encoding="utf-8"))
+
+
+def solution_from_json_dict(d: dict[str, Any]) -> Solution:
+    """
+    Convert a persisted Solution JSON dict into a `k_search.tasks.task_base.Solution`.
+    """
+    if not isinstance(d, dict):
+        raise TypeError("Solution JSON must be a dict")
+    spec = d.get("spec") if isinstance(d.get("spec"), dict) else {}
+    lang_s = str(spec.get("language", "") or "").strip().lower()
+    lang_map = {
+        "python": SupportedLanguages.PYTHON,
+        "triton": SupportedLanguages.TRITON,
+        "cuda": SupportedLanguages.CUDA,
+        "cpp": SupportedLanguages.CPP,
+    }
+    lang = lang_map.get(lang_s, SupportedLanguages.PYTHON)
+
+    sources_raw = d.get("sources") if isinstance(d.get("sources"), list) else []
+    sources: list[SourceFile] = []
+    for sf in sources_raw:
+        if not isinstance(sf, dict):
+            continue
+        sources.append(SourceFile(path=str(sf.get("path", "") or ""), content=str(sf.get("content", "") or "")))
+
+    return Solution(
+        name=str(d.get("name", "") or ""),
+        definition=str(d.get("definition", "") or ""),
+        author=str(d.get("author", "") or ""),
+        description=(str(d.get("description", "") or "") or None),
+        spec=BuildSpec(
+            language=lang,
+            target_hardware=list(spec.get("target_hardware", []) or []),
+            entry_point=str(spec.get("entry_point", "") or ""),
+            dependencies=list(spec.get("dependencies", []) or []),
+        ),
+        sources=sources,
+    )
 
 

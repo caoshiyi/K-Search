@@ -77,10 +77,10 @@ Correctness:
 TRIMUL_SPEC_TEXT_TRITON = """GPUMode TriMul (Triton submission)
 Task:
 - Optimize the *forward* pass of the outgoing Triangle Multiplicative Update (TriMul).
-- You may use *mixed precision* internally (e.g. bf16/fp16 for matmuls), but the returned tensor must be dtype float32 and numerically match the reference within the stated tolerances.
-- You do not have to implement everything in Triton (you may call PyTorch ops where appropriate). Triton is most useful when you can fuse multiple ops into fewer kernels, which can reduce memory traffic and kernel launch overhead.
-- Include a short comment at the top summarizing bottlenecks in the previous round implementation.
-  - Look for: avoidable large intermediates / extra full-tensor reads+writes; extra kernel launches / passes over the same data; layout choices causing strided/non-coalesced access (especially around reductions); per-call overhead (e.g. repeated concatenation/casting); dtype/precision pitfalls.
+- Primary goal:
+  - **Fuse** operators to minimize large intermediate tensors, global-memory traffic, and kernel launch overhead.
+  - Use a **mixed precision** strategy where appropriate (e.g. fp16 for math and storage, fp32 for accumulations). Only the returned tensor **must be float32**.
+  - You do **not** need to re-implement everything in Triton. You may choose to have some of the operations done in pytorch -- to leverage cuBLAS etc. However, you must implement at least part of the operations in a kernel.
 - Include a short comment at the top summarizing your new implementation.
 - For each round, you can see your current best solution and the previous round's summary, therefore you can implement the kernel step by step.
 
@@ -109,6 +109,20 @@ Output:
 
 Correctness:
 - Must match reference within typical tolerances: rtol=2e-2, atol=2e-2.
+
+**Problem Constraints:**
+- B ∈ {1,2}, S ∈ {128,256,512,1024}, hidden_dim (H) = 128, dim (D) ∈ {128,384,768}
+- The input distribution will be sampled from a standard Normal distribution, or a heavy-tailed Cauchy distribution (gamma = 2).
+- There will either be no mask, or a randomly sampled mask over the inputs.
+
+Test Cases for runtime (optimize runtime for these):
+- {"seqlen": 256, "bs": 2, "dim": 128, "hidden_dim": 128, "nomask": True, "distribution": "normal"}
+- {"seqlen": 768, "bs": 1, "dim": 128, "hidden_dim": 128, "nomask": True, "distribution": "cauchy"}
+- {"seqlen": 256, "bs": 2, "dim": 384, "hidden_dim": 128, "nomask": False, "distribution": "normal"}
+- {"seqlen": 512, "bs": 1, "dim": 128, "hidden_dim": 128, "nomask": True, "distribution": "normal"}
+- {"seqlen": 1024, "bs": 1, "dim": 128, "hidden_dim": 128, "nomask": True, "distribution": "cauchy"}
+- {"seqlen": 768, "bs": 1, "dim": 384, "hidden_dim": 128, "nomask": False, "distribution": "normal"}
+- {"seqlen": 1024, "bs": 1, "dim": 384, "hidden_dim": 128, "nomask": True, "distribution": "normal"}
 
 Remarks:
 - This problem is tricky because you have to choose whether to load / deal with either the channel dimensions c,c_z that the LayerNorms require (otherwise you have to do a synchronize to compute the statistics like mean / variance) or the sequence dimension N.

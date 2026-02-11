@@ -144,7 +144,19 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 max_excerpt_chars=self._world_model_max_chars,
             )
 
-        definition_text = str(getattr(task, "get_definition_text", lambda: "")() or "").strip()
+        get_def = getattr(task, "get_definition_text", None)
+        if callable(get_def):
+            definition_text = str(get_def(language=str(self.language)) or "").strip()
+            if not definition_text:
+                raise RuntimeError(
+                    f"Task '{getattr(task, 'name', '')}' returned empty definition text; "
+                    "cannot build world-model prompts without a definition."
+                )
+        else:
+            raise RuntimeError(
+                f"Task '{getattr(task, 'name', '')}' does not provide get_definition_text(); "
+                "cannot build world-model prompts without a definition."
+            )
 
         # Optional W&B support
         try:
@@ -243,7 +255,19 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         - attempts 2..N: debug_and_improve using logs from the previous attempt
         - cycle end: attach+refine best PASSED in this cycle; else mark action too hard
         """
-        definition_text = str(getattr(task, "get_definition_text", lambda: "")() or "").strip()
+        get_def = getattr(task, "get_definition_text", None)
+        if callable(get_def):
+            definition_text = str(get_def(language=str(self.language)) or "").strip()
+            if not definition_text:
+                raise RuntimeError(
+                    f"Task '{getattr(task, 'name', '')}' returned empty definition text; "
+                    "cannot build world-model prompts without a definition."
+                )
+        else:
+            raise RuntimeError(
+                f"Task '{getattr(task, 'name', '')}' does not provide get_definition_text(); "
+                "cannot build world-model prompts without a definition."
+            )
         baseline_targets_text = str(getattr(task, "get_baseline_targets_text", lambda: "")() or "").strip()
 
         try:
@@ -272,6 +296,17 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 + baseline_targets_text
                 + "\n- Optimize for overall mean latency across the listed workloads while maintaining correctness."
             )
+
+        def _code_format_text() -> str:
+            hook = getattr(task, "get_code_format_text", None)
+            if not callable(hook):
+                return ""
+            try:
+                return str(
+                    hook(language=str(self.language), target_gpu=str(self.target_gpu)) or ""
+                ).strip()
+            except Exception:
+                return ""
 
         def _emit_kernel_cu(cleaned: object) -> None:
             """Print the generated CUDA kernel.cu to stdout (bounded for readability)."""
@@ -447,7 +482,10 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     f"no_improve_over_base={no_improve_over_base_streak}/{stagnation_window}"
                 )
                 if not chosen_action_text:
-                    prompt = get_prompt_from_definition_text(self.language, definition_text, self.target_gpu)
+                    raise RuntimeError(
+                        "World-model generator expected a chosen action, but chosen_action_text is empty. "
+                        f"(round={round_num} attempt={attempt_idx})"
+                    )
                 elif attempt_idx == 1:
                     # If the action's parent has an attached solution (including root when continuing),
                     # start from that base_code; otherwise fall back to spec+action.
@@ -457,6 +495,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             definition_text=definition_text,
                             base_code=base_raw_code,
                             action_text=chosen_action_text,
+                            code_format=_code_format_text(),
                             target_gpu=self.target_gpu,
                         )
                     else:
@@ -464,12 +503,11 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             self.language,
                             definition_text=definition_text,
                             action_text=chosen_action_text,
+                            code_format=_code_format_text(),
                             target_gpu=self.target_gpu,
                         )
                 else:
-                    if not getattr(task, "has_last_round_feedback_trace", lambda: False)():
-                        prompt = get_prompt_from_definition_text(self.language, definition_text, self.target_gpu)
-                    elif parent_is_root or not base_raw_code:
+                    if parent_is_root or not base_raw_code:
                         has_passed_in_cycle = cycle_best_solution is not None
                         # Reference base shown in prompts: prefer whichever is better by score (base_score vs cycle_best_score).
                         # If parent is root (no base score), fall back to cycle_best if present.
@@ -504,6 +542,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
                                 current_code=str(current_raw_code or ""),
                                 action_text=str(chosen_action_text or ""),
+                                code_format=_code_format_text(),
                                 debug_round=min(attempt_idx, max_dai),
                                 max_rounds=max_dai,
                                 target_gpu=self.target_gpu,
@@ -516,6 +555,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 definition_text=definition_text,
                                 trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
                                 current_code=str(current_raw_code or ""),
+                                code_format=_code_format_text(),
                                 debug_round=min(attempt_idx, max_dai),
                                 max_rounds=max_dai,
                                 target_gpu=self.target_gpu,
@@ -554,6 +594,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 base_code=base_for_debug,
                                 buggy_code=str(current_raw_code or ""),
                                 action_text=str(chosen_action_text or ""),
+                                code_format=_code_format_text(),
                                 debug_round=min(attempt_idx, max_dai),
                                 max_rounds=max_dai,
                                 target_gpu=self.target_gpu,
@@ -566,6 +607,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
                                 base_code=base_for_debug,
                                 current_code=str(current_raw_code or ""),
+                                code_format=_code_format_text(),
                                 debug_round=min(attempt_idx, max_dai),
                                 max_rounds=max_dai,
                                 target_gpu=self.target_gpu,
@@ -589,7 +631,12 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 current_wm_code = _wm_guardrail(str(current_wm_code or ""))
 
                 _stage(f"create Solution object from current code (round {round_num})")
-                solution = self._create_solution_from_code(current_code, task.name, round_num)
+                solution = self._create_solution_from_code(
+                    cleaned_code=current_code,
+                    raw_code=current_raw_code,
+                    task=task,
+                    round_num=int(round_num),
+                )
                 last_solution = solution
                 _stage(f"evaluate solution (round {round_num})")
                 round_eval = task.run_benchmark(

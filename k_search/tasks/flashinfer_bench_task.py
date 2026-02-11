@@ -92,6 +92,7 @@ class FlashInferBenchTask:
         *,
         traceset: Any,
         definition: Any | None = None,
+        artifacts_dir: str | None = None,
         feedback_trace_policy: str = "first",
         feedback_trace_selector: Any | None = None,
         num_feedback_workloads: int | None = None,
@@ -101,6 +102,8 @@ class FlashInferBenchTask:
     ):
         # We intentionally keep this typed as Any so the generator can be type-agnostic later.
         self._task_path: str | None = None  # set by factories when constructed from a dataset path
+        # k-search artifacts dir used to resolve `--continue-from-solution` by name/path.
+        self._ksearch_artifacts_dir: str | None = (str(artifacts_dir) if artifacts_dir is not None else None)
         self._traceset = traceset
         self._definition = definition
         self._feedback_trace_selector = (
@@ -181,6 +184,7 @@ class FlashInferBenchTask:
         *,
         dataset_path: str,
         definition_name: str,
+        artifacts_dir: str | None = None,
         feedback_trace_policy: str = "first",
         num_feedback_workloads: int | None = None,
         feedback_workloads: Optional[list[str]] = None,
@@ -197,6 +201,7 @@ class FlashInferBenchTask:
         obj = cls(
             traceset=ts,
             definition=definition,
+            artifacts_dir=artifacts_dir,
             feedback_trace_policy=str(feedback_trace_policy or "first"),
             num_feedback_workloads=num_feedback_workloads,
             feedback_workloads=feedback_workloads,
@@ -224,6 +229,7 @@ class FlashInferBenchTask:
         feedback_workloads: Optional[list[str]],
         feedback_trace_policy: str,
         num_feedback_workloads: int,
+        artifacts_dir: str | None = None,
     ) -> "FlashInferBenchTask":
         """
         Convenience factory for scripts/CLI so task-specific init logic lives in the task module.
@@ -246,6 +252,7 @@ class FlashInferBenchTask:
             feedback_workloads=feedback_workloads,
             baseline_solution_name=baseline_solution,
             eval_config=eval_cfg,
+            artifacts_dir=artifacts_dir,
         )
 
     def get_config_for_logging(self) -> Dict[str, Any]:
@@ -449,7 +456,7 @@ class FlashInferBenchTask:
         self._baseline_prepared = True
 
 
-    def get_definition_text(self) -> str:
+    def get_definition_text(self, language: str | None = None) -> str:
         """
         Task-owned definition rendering. Prompts are task-agnostic and only consume this text.
         """
@@ -531,6 +538,33 @@ Reference Implementation:
         except Exception:
             # Best effort: do not block prompting.
             return "(no logs)"
+
+    def get_per_task_requirement_text(self, *, language: str, target_gpu: str, phase: str = "") -> str:
+        """
+        Optional hook for generators: task-specific requirements that get injected into the
+        generic CUDA prompt templates via `{per_task_requirement}`.
+        """
+        try:
+            from k_search.tasks.flashinfer_bench.prompts import per_task_requirement_text
+
+            return str(
+                per_task_requirement_text(language=str(language), target_gpu=str(target_gpu), phase=str(phase or ""))
+                or ""
+            ).strip()
+        except Exception:
+            return ""
+
+    def get_code_format_text(self, *, language: str, target_gpu: str) -> str:
+        """
+        Optional hook for world-model prompts: language-specific code format guidance
+        (e.g., CUDA XML file layout, Triton wrapper/output rules).
+        """
+        try:
+            from k_search.tasks.flashinfer_bench.prompts import code_format_text
+
+            return str(code_format_text(language=str(language), target_gpu=str(target_gpu)) or "").strip()
+        except Exception:
+            return ""
 
     @staticmethod
     def format_workload_axes_inline_for_prompt(wl_trace: Any) -> str:
@@ -637,8 +671,10 @@ Reference Implementation:
     def _list_traces(self, *, definition_name: str) -> list[Any]:
         return list(getattr(self._traceset, "traces", {}).get(definition_name, []) or [])
 
-    def get_solution(self, solution_name: str) -> TaskSolution | None:
-        # TraceSet.get_solution is the canonical API in flashinfer-bench.
+    def get_solution_from_flashinferbench(self, solution_name: str) -> TaskSolution | None:
+        """
+        Legacy solution lookup: resolve by name from the flashinfer-bench TraceSet (dataset path).
+        """
         try:
             sol = self._traceset.get_solution(solution_name)
         except Exception:
@@ -649,6 +685,36 @@ Reference Implementation:
             return self._from_backend_solution(sol)
         except Exception:
             return None
+
+    def get_solution(self, solution_name: str) -> TaskSolution | None:
+        """
+        Resolve a solution for continue-from-solution.
+
+        Priority:
+        1) k-search artifacts Solution JSON (by path or by name under artifacts dir)
+        2) legacy flashinfer-bench TraceSet.get_solution(name)
+        """
+        # 1) k-search artifacts JSON
+        try:
+            from k_search.tasks.task_base import load_ksearch_solution_json, solution_from_json_dict
+
+            sol_dict = load_ksearch_solution_json(
+                solution_ref=str(solution_name),
+                definition_name=str(self.name or ""),
+                artifacts_dir=self._ksearch_artifacts_dir,
+            )
+            sol_obj = solution_from_json_dict(sol_dict)
+            # Ensure we only accept solutions for this definition.
+            if str(sol_obj.definition or "") != str(self.name or ""):
+                return None
+            return sol_obj
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+
+        # 2) legacy dataset lookup
+        return self.get_solution_from_flashinferbench(solution_name)
 
     def to_backend_solution(self, solution: TaskSolution) -> Any:
         """Convert a task_base.Solution to the backend (flashinfer-bench) Solution."""

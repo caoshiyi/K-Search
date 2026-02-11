@@ -128,7 +128,14 @@ def evaluate_trimul_submission(
 
     run_key = None
     if mode == "leaderboard":
-        run_key = "leaderboard" if "leaderboard" in result.runs else None
+        # In upstream GPUMode harness, leaderboard runs `test` first and may early-exit before
+        # producing a leaderboard run payload. In that case, surface the test failure logs.
+        if "leaderboard" in result.runs:
+            run_key = "leaderboard"
+        elif "test" in result.runs:
+            run_key = "test"
+        else:
+            run_key = None
     elif mode in ("benchmark", "test", "profile"):
         run_key = mode if mode in result.runs else None
 
@@ -211,9 +218,10 @@ def evaluate_trimul_submission(
                     blocks.append(combined)
                 log_excerpt = "\n\n".join([b for b in blocks if b.strip()]).strip()[:8000]
             else:
-                # Passed run: keep excerpt minimal (usually empty).
-                log_excerpt = combined[:8000] if combined else ""
-            if run_success and run_passed:
+                # Passed run: keep excerpt empty so prompts focus on perf only.
+                # (stderr/stdout may contain harmless warnings; we intentionally do not feed them back.)
+                log_excerpt = ""
+            if run_success and run_passed and run_key in ("benchmark", "leaderboard"):
                 try:
                     means_s = _extract_benchmark_means_s(run.result)
                     per_bench_us = [m * 1e6 for m in means_s]

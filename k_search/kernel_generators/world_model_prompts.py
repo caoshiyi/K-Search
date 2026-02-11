@@ -24,21 +24,7 @@ Known-Good Base Implementation (start from this; do not include any other previo
 Chosen Next Action (apply this action):
 {action_text}
 
-The wrapper function MUST handle complete device management:
-- Move CPU tensors to GPU if needed (use .cuda() when torch.cuda.is_available())
-- Raise clear errors if CUDA is not available for GPU tensors
-- Call the triton kernel with GPU tensors
-- Move results back to original device of input tensors
-- Handle both args and kwargs properly
-- Preserve original tensor devices and restore them for outputs
-
-IMPORTANT: Use only valid Python/Triton syntax:
-- NO hexadecimal float literals (0x1.234p5) - use decimal equivalents
-- NO C/CUDA specific syntax - this is Python/Triton code
-- Use math.log(2), math.pi, math.e instead of hex literals
-- All code must be valid Python that passes ast.parse()
-
-You MUST expose a "run" entry point function that can be called to execute the kernel.
+{code_format}
 
 Rules:
 - Implement ONLY the chosen action; keep everything else as close as possible to the base implementation.
@@ -68,34 +54,7 @@ Rules:
 - Preserve correctness and the same PyTorch binding / entry points.
 - Return only the full updated XML blocks (no explanations, no markdown).
 
-IMPORTANT: Generate code in XML format with exactly 3 files with these strict names:
-
-<header_file name="kernel.h">
-- All CUDA kernel function declarations
-- Host function declarations
-- Any necessary struct/type definitions
-- Include guards and necessary headers
-</header_file>
-
-<cuda_file name="kernel.cu">
-- All __global__ kernel implementations
-- All __device__ helper functions
-- CUDA-specific optimizations and memory patterns
-- Proper error checking and memory management
-</cuda_file>
-
-<cpp_file name="main.cpp">
-- Host function that launches kernels
-- Memory allocation and data transfer management
-- Device management and error handling
-- Entry point function named "run" that can be called to execute the implementation
-- Handle both args and kwargs properly
-- Move CPU data to GPU, execute kernels, and return results to CPU
-- MUST include PyTorch C++ extension bindings using PYBIND11_MODULE
-- The "run" function must be exposed to Python through the binding
-- Include proper tensor type conversion between PyTorch tensors and CUDA pointers
-- Include all necessary PyTorch headers: #include <torch/extension.h>
-</cpp_file>
+{code_format}
 
 {hints}
 
@@ -125,21 +84,7 @@ Chosen Next Action (still targeting; do not expand scope):
 
 Debug-and-improve round: {debug_round}/{max_rounds}
 
-The wrapper function MUST handle complete device management:
-- Move CPU tensors to GPU if needed (use .cuda() when torch.cuda.is_available())
-- Raise clear errors if CUDA is not available for GPU tensors
-- Call the triton kernel with GPU tensors
-- Move results back to original device of input tensors
-- Handle both args and kwargs properly
-- Preserve original tensor devices and restore them for outputs
-
-IMPORTANT: Use only valid Python/Triton syntax:
-- NO hexadecimal float literals (0x1.234p5) - use decimal equivalents
-- NO C/CUDA specific syntax - this is Python/Triton code
-- Use math.log(2), math.pi, math.e instead of hex literals
-- All code must be valid Python that passes ast.parse()
-
-You MUST expose a "run" entry point function that can be called to execute the kernel.
+{code_format}
 
 Rules:
 - If the current implementation FAILED: fix correctness/compile/runtime issues FIRST.
@@ -183,34 +128,7 @@ Rules:
 - Keep the implementation aligned with the base and the chosen action intent.
 - Return only the full corrected XML blocks (no explanations, no markdown).
 
-IMPORTANT: Generate code in XML format with exactly 3 files with these strict names:
-
-<header_file name="kernel.h">
-- All CUDA kernel function declarations
-- Host function declarations
-- Any necessary struct/type definitions
-- Include guards and necessary headers
-</header_file>
-
-<cuda_file name="kernel.cu">
-- All __global__ kernel implementations
-- All __device__ helper functions
-- CUDA-specific optimizations and memory patterns
-- Proper error checking and memory management
-</cuda_file>
-
-<cpp_file name="main.cpp">
-- Host function that launches kernels
-- Memory allocation and data transfer management
-- Device management and error handling
-- Entry point function named "run" that can be called to execute the implementation
-- Handle both args and kwargs properly
-- Move CPU data to GPU, execute kernels, and return results to CPU
-- MUST include PyTorch C++ extension bindings using PYBIND11_MODULE
-- The "run" function must be exposed to Python through the binding
-- Include proper tensor type conversion between PyTorch tensors and CUDA pointers
-- Include all necessary PyTorch headers: #include <torch/extension.h>
-</cpp_file>
+{code_format}
 
 {hints}
 
@@ -237,21 +155,7 @@ Recent Logs (only if FAILED):
 
 Improve round: {debug_round}/{max_rounds}
 
-The wrapper function MUST handle complete device management:
-- Move CPU tensors to GPU if needed (use .cuda() when torch.cuda.is_available())
-- Raise clear errors if CUDA is not available for GPU tensors
-- Call the triton kernel with GPU tensors
-- Move results back to original device of input tensors
-- Handle both args and kwargs properly
-- Preserve original tensor devices and restore them for outputs
-
-IMPORTANT: Use only valid Python/Triton syntax:
-- NO hexadecimal float literals (0x1.234p5) - use decimal equivalents
-- NO C/CUDA specific syntax - this is Python/Triton code
-- Use math.log(2), math.pi, math.e instead of hex literals
-- All code must be valid Python that passes ast.parse()
-
-You MUST expose a "run" entry point function that can be called to execute the kernel.
+{code_format}
 
 Rules:
 - If the current implementation FAILED: fix correctness/compile/runtime issues FIRST.
@@ -290,34 +194,7 @@ Rules:
 - Keep changes minimal; do not introduce extra unrelated optimizations.
 - Return only the full corrected XML blocks (no explanations, no markdown).
 
-IMPORTANT: Generate code in XML format with exactly 3 files with these strict names:
-
-<header_file name="kernel.h">
-- All CUDA kernel function declarations
-- Host function declarations
-- Any necessary struct/type definitions
-- Include guards and necessary headers
-</header_file>
-
-<cuda_file name="kernel.cu">
-- All __global__ kernel implementations
-- All __device__ helper functions
-- CUDA-specific optimizations and memory patterns
-- Proper error checking and memory management
-</cuda_file>
-
-<cpp_file name="main.cpp">
-- Host function that launches kernels
-- Memory allocation and data transfer management
-- Device management and error handling
-- Entry point function named "run" that can be called to execute the implementation
-- Handle both args and kwargs properly
-- Move CPU data to GPU, execute kernels, and return results to CPU
-- MUST include PyTorch C++ extension bindings using PYBIND11_MODULE
-- The "run" function must be exposed to Python through the binding
-- Include proper tensor type conversion between PyTorch tensors and CUDA pointers
-- Include all necessary PyTorch headers: #include <torch/extension.h>
-</cpp_file>
+{code_format}
 
 {hints}
 
@@ -329,6 +206,7 @@ def get_generate_code_from_action_prompt_from_text(
     definition_text: str,
     base_code: str,
     action_text: str,
+    code_format: str = "",
     target_gpu: str = "H100",
 ) -> str:
     """Task-agnostic variant: accepts rendered definition text."""
@@ -339,6 +217,7 @@ def get_generate_code_from_action_prompt_from_text(
             base_code=base_code,
             action_text=action_text,
             target_gpu=target_gpu,
+            code_format=str(code_format or "").strip(),
             hints=TRITON_OPTIMIZATION_HINTS,
         )
     if lang == "cuda":
@@ -347,6 +226,7 @@ def get_generate_code_from_action_prompt_from_text(
             base_code=base_code,
             action_text=action_text,
             target_gpu=target_gpu,
+            code_format=str(code_format or "").strip(),
             hints=CUDA_OPTIMIZATION_HINTS,
         )
     raise ValueError(f"Unsupported language for action prompt: {language}")
@@ -357,6 +237,7 @@ def get_generate_code_from_spec_with_action_prompt_from_text(
     *,
     definition_text: str,
     action_text: str,
+    code_format: str = "",
     target_gpu: str = "H100",
 ) -> str:
     """
@@ -372,6 +253,7 @@ def get_generate_code_from_spec_with_action_prompt_from_text(
                 base_code="(no base code; start from spec)",
                 action_text=action_text,
                 target_gpu=target_gpu,
+                code_format=str(code_format or "").strip(),
                 hints=TRITON_OPTIMIZATION_HINTS,
             )
         )
@@ -383,6 +265,7 @@ def get_generate_code_from_spec_with_action_prompt_from_text(
                 base_code="(no base code; start from spec)",
                 action_text=action_text,
                 target_gpu=target_gpu,
+                code_format=str(code_format or "").strip(),
                 hints=CUDA_OPTIMIZATION_HINTS,
             )
         )
@@ -396,6 +279,7 @@ def get_debug_and_improve_from_spec_prompt_from_text(
     trace_logs: str,
     current_code: str,
     action_text: str,
+    code_format: str = "",
     debug_round: int,
     max_rounds: int = 5,
     target_gpu: str = "H100",
@@ -409,6 +293,7 @@ def get_debug_and_improve_from_spec_prompt_from_text(
         base_code=base_code,
         buggy_code=current_code,
         action_text=action_text,
+        code_format=code_format,
         debug_round=debug_round,
         max_rounds=max_rounds,
         target_gpu=target_gpu,
@@ -424,6 +309,7 @@ def get_debug_generated_code_prompt_from_text(
     base_code: str,
     buggy_code: str,
     action_text: str,
+    code_format: str = "",
     debug_round: int,
     max_rounds: int = 5,
     target_gpu: str = "H100",
@@ -450,6 +336,7 @@ def get_debug_generated_code_prompt_from_text(
             debug_round=dr,
             max_rounds=mr,
             target_gpu=target_gpu,
+            code_format=str(code_format or "").strip(),
             hints=TRITON_OPTIMIZATION_HINTS,
         )
     if lang == "cuda":
@@ -463,6 +350,7 @@ def get_debug_generated_code_prompt_from_text(
             debug_round=dr,
             max_rounds=mr,
             target_gpu=target_gpu,
+            code_format=str(code_format or "").strip(),
             hints=CUDA_OPTIMIZATION_HINTS,
         )
     raise ValueError(f"Unsupported language for debug prompt: {language}")
@@ -474,6 +362,7 @@ def get_improve_from_spec_prompt_from_text(
     definition_text: str,
     trace_logs: str,
     current_code: str,
+    code_format: str = "",
     debug_round: int,
     max_rounds: int = 5,
     target_gpu: str = "H100",
@@ -486,6 +375,7 @@ def get_improve_from_spec_prompt_from_text(
         trace_logs=trace_logs,
         base_code=base_code,
         current_code=current_code,
+        code_format=code_format,
         debug_round=debug_round,
         max_rounds=max_rounds,
         target_gpu=target_gpu,
@@ -500,6 +390,7 @@ def get_improve_generated_code_prompt_from_text(
     trace_logs: str,
     base_code: str,
     current_code: str,
+    code_format: str = "",
     debug_round: int,
     max_rounds: int = 5,
     target_gpu: str = "H100",
@@ -525,6 +416,7 @@ def get_improve_generated_code_prompt_from_text(
             debug_round=dr,
             max_rounds=mr,
             target_gpu=target_gpu,
+            code_format=str(code_format or "").strip(),
             hints=TRITON_OPTIMIZATION_HINTS,
         )
     if lang == "cuda":
@@ -537,6 +429,7 @@ def get_improve_generated_code_prompt_from_text(
             debug_round=dr,
             max_rounds=mr,
             target_gpu=target_gpu,
+            code_format=str(code_format or "").strip(),
             hints=CUDA_OPTIMIZATION_HINTS,
         )
     raise ValueError(f"Unsupported language for improve prompt: {language}")

@@ -88,6 +88,7 @@ def generate_and_evaluate(
     save_solutions: bool,
     save_results: bool,
     continue_from_solution: Optional[str] = None,
+    continue_from_world_model: Optional[str] = None,
     num_eval_workload: Optional[int] = None,
     # W&B options
     enable_wandb: bool = False,
@@ -128,6 +129,7 @@ def generate_and_evaluate(
                 },
                 "max_opt_rounds": int(max_opt_rounds),
                 "continue_from_solution": continue_from_solution,
+                "continue_from_world_model": continue_from_world_model,
                 "enable_world_model": bool(enable_world_model),
                 "wm_stagnation_window": int(wm_stagnation_window),
                 "save_results": bool(save_results),
@@ -189,6 +191,7 @@ def generate_and_evaluate(
             max_opt_rounds=max_opt_rounds,
             wm_stagnation_window=int(wm_stagnation_window),
             continue_from_solution=continue_from_solution,
+            continue_from_world_model=continue_from_world_model,
         )
     else:
         solution = generator.generate(
@@ -287,6 +290,14 @@ def main():
     parser.add_argument("--num-eval-workload", type=int, default=None, help="If set, evaluate only this many workloads per definition; default uses all workloads")
     # Continue optimization options
     parser.add_argument("--continue-from-solution", default=None, help="Resume optimization from an existing solution name in the dataset")
+    parser.add_argument(
+        "--continue-from-world-model",
+        default=None,
+        help=(
+            "Resume world-model prompting state from a JSON file path. "
+            "Use 'auto' to load <artifacts>/<task>/world_model/world_model.json if present."
+        ),
+    )
     parser.add_argument("--feedback-workloads", nargs="+", default=None, help="Explicit workload UUIDs to use for optimization feedback rounds")
     # Nsight Compute
     parser.add_argument("--feedback-trace-policy", default="first", choices=["first", "random"], help="Policy for selecting feedback traces")
@@ -368,6 +379,7 @@ def main():
         save_results=not args.no_save_results,
         num_eval_workload=args.num_eval_workload,
         continue_from_solution=args.continue_from_solution,
+        continue_from_world_model=args.continue_from_world_model,
         enable_world_model=args.world_model,
         wm_stagnation_window=args.wm_stagnation_window,
         artifacts_dir=args.artifacts_dir,

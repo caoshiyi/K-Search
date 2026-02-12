@@ -26,6 +26,8 @@ from k_search.kernel_generators.world_model_manager import WorldModelConfig, Wor
 from k_search.tasks.task_base import EvalResult
 from k_search.kernel_generators.world_model import (
     Prediction,
+    dump_world_model_obj,
+    load_world_model_obj,
     render_chosen_action_node_block,
     render_open_action_nodes_block,
     render_world_model_section,
@@ -37,6 +39,52 @@ from k_search.utils.paths import get_ksearch_artifacts_dir
 
 class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
     """Baseline-aware generator variant that maintains and injects a persistent world model."""
+
+    def _default_world_model_path(self, *, task: Any) -> Optional[Path]:
+        try:
+            root = get_ksearch_artifacts_dir(
+                base_dir=self._artifacts_dir, task_name=str(getattr(task, "name", "") or "")
+            )
+            return root / "world_model" / "world_model.json"
+        except Exception:
+            return None
+
+    def _persist_world_model_snapshot(self, *, task: Any) -> None:
+        """Best-effort: persist the current WM JSON to disk so future runs can resume."""
+        try:
+            p = self._default_world_model_path(task=task)
+            if p is None:
+                return
+            wm_s = str(self._wm.get(str(getattr(task, "name", "") or "")) or "").strip()
+            if not wm_s:
+                return
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(wm_s, encoding="utf-8")
+        except Exception:
+            pass
+
+    def _resume_world_model_from_snapshot(self, *, task: Any, ref: str) -> None:
+        """
+        Load+normalize a world model JSON snapshot and set it into the in-memory WorldModelManager.
+        """
+        wm_ref = str(ref or "").strip()
+        if not wm_ref:
+            return
+        if wm_ref.lower() == "auto":
+            p = self._default_world_model_path(task=task)
+            if p is None or not p.exists():
+                raise FileNotFoundError(
+                    "continue-from-world-model=auto but default <artifacts>/<task>/world_model/world_model.json not found"
+                )
+        else:
+            p = Path(wm_ref).expanduser().resolve()
+            if not p.exists():
+                raise FileNotFoundError(f"World model JSON not found: {p}")
+        raw_wm = p.read_text(encoding="utf-8")
+        obj = load_world_model_obj(raw_wm or "")
+        if obj is None:
+            raise ValueError(f"Invalid world model JSON (could not parse/normalize): {p}")
+        self._wm.set(str(getattr(task, "name", "") or ""), dump_world_model_obj(obj))
 
     def __init__(
         self,
@@ -85,6 +133,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         wm_stagnation_window: int = 5,
         num_debug_and_improve_rounds: int = 5,
         continue_from_solution: Optional[str] = None,
+        continue_from_world_model: Optional[str] = None,
         # Workload selection is owned by the Task; configure it when constructing `task`.
     ) -> Any:
         """
@@ -158,6 +207,13 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 "cannot build world-model prompts without a definition."
             )
 
+        # Optional: resume world model from a JSON snapshot on disk.
+        wm_ref = str(continue_from_world_model or "").strip()
+        if wm_ref:
+            self._resume_world_model_from_snapshot(task=task, ref=wm_ref)
+            _emit(render_world_model_status(self._wm.get(task.name)))
+            self._persist_world_model_snapshot(task=task)
+
         # Optional W&B support
         try:
             import wandb  # type: ignore
@@ -210,6 +266,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     )
                     _emit("[WM] Initialized+seeded root from continue_from_solution (code+eval).")
                     _emit(render_world_model_status(self._wm.get(task.name)))
+                    self._persist_world_model_snapshot(task=task)
             except Exception:
                 pass
         else:
@@ -219,6 +276,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             dt = time.perf_counter() - t0
             _emit(render_world_model_status(wm))
             _emit(f"[STAGE] world model init latency: {dt:.2f}s")
+            self._persist_world_model_snapshot(task=task)
 
             # NOTE: We intentionally do NOT attach `baseline_solution` code to the WM tree.
             # Baseline is used for targets/vs_base evaluation, but should be hidden from the model.
@@ -798,6 +856,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         round_index=cycle_best_round,
                     )
                     _emit(render_world_model_status(self._wm.get(task.name)))
+                    self._persist_world_model_snapshot(task=task)
 
                 self._wm.refine(
                     definition_name=task.name,
@@ -810,6 +869,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     round_index=cycle_best_round,
                 )
                 _emit(render_world_model_status(self._wm.get(task.name)))
+                self._persist_world_model_snapshot(task=task)
             else:
                 _stage("cycle end: no PASSED solution; mark action too hard")
                 try:
@@ -830,6 +890,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         round_index=cycle_start_round + max(0, rounds_consumed - 1),
                     )
                     _emit(render_world_model_status(self._wm.get(task.name)))
+                    self._persist_world_model_snapshot(task=task)
                 except Exception:
                     pass
 

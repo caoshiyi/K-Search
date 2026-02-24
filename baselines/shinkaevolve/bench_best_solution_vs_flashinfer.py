@@ -2,11 +2,11 @@
 Benchmark one ShinkaEvolve "best" program vs a FlashInfer baseline (per-workload table).
 
 This is the ShinkaEvolve analogue of:
-  - examples/openevolve/bench_single_program_vs_flashinfer.py
+  - baselines/openevolve/bench_single_program_vs_flashinfer.py
 
 Usage example:
-  python3 -u examples/shinkaevolve/bench_best_solution_vs_flashinfer.py \
-    --evaluator-config examples/shinkaevolve/flashinfer_evaluator_config_mla_prefill.yaml \
+  python3 -u baselines/shinkaevolve/bench_best_solution_vs_flashinfer.py \
+    --evaluator-config baselines/shinkaevolve/flashinfer_evaluator_config_mla_prefill.yaml \
     --program-path results_20260120_080313/best/main.py
 """
 
@@ -276,7 +276,7 @@ def _solution_from_candidate(*, trace_set, eval_cfg, candidate: Dict[str, Any]):
     """
     Build a flashinfer-bench Solution from a ShinkaEvolve candidate dict.
 
-    Uses the same candidate contract as examples/shinkaevolve/flashinfer_initial.py.
+    Uses the same candidate contract as baselines/shinkaevolve/flashinfer_initial.py.
     """
     from flashinfer_bench.data import BuildSpec, Solution, SourceFile, SupportedLanguages
     from examples.shinkaevolve.flashinfer_shinka_evaluator import _parse_cuda_xml_files  # type: ignore

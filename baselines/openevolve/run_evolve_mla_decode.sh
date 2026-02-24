@@ -1,8 +1,8 @@
 REPO_ROOT="<PATH_TO_KSEARCH_REPO>"
 
-OE_CONFIG="${REPO_ROOT}/examples/openevolve/config_mla_decode.yaml"
-EVALUATOR_CONFIG="${REPO_ROOT}/examples/openevolve/flashinfer_evaluator_config_mla_decode.yaml"
-INITIAL_PROGRAM="${REPO_ROOT}/examples/openevolve/initial_empty.txt"
+OE_CONFIG="${REPO_ROOT}/baselines/openevolve/config_mla_decode.yaml"
+EVALUATOR_CONFIG="${REPO_ROOT}/baselines/openevolve/flashinfer_evaluator_config_mla_decode.yaml"
+INITIAL_PROGRAM="${REPO_ROOT}/baselines/openevolve/initial_empty.txt"
 
 export OPENAI_API_KEY="DUMMY_OPENAI_API_KEY"
 WANDB_PROJECT="${WANDB_PROJECT:-YOUR_WANDB_PROJECT}"
@@ -17,7 +17,7 @@ WANDB_RUN_NAME="${WANDB_RUN_NAME:-${WANDB_RUN_NAME_DEFAULT}}"
 LOG_FILE="${LOG_DIR}/${WANDB_RUN_NAME}.log"
 
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}" \
-python3 -u "${REPO_ROOT}/examples/openevolve/run_evolve.py" \
+python3 -u "${REPO_ROOT}/baselines/openevolve/run_evolve.py" \
   --config "${OE_CONFIG}" \
   --evaluator-config "${EVALUATOR_CONFIG}" \
   --initial-program "${INITIAL_PROGRAM}" \

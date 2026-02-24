@@ -1,5 +1,5 @@
 """
-Toy ShinkaEvolve evaluator for `examples/shinkaevolve/initial.py`.
+Toy ShinkaEvolve evaluator for `baselines/shinkaevolve/initial.py`.
 
 This follows the pattern shown in ShinkaEvolve's README:
 `evaluate.py` uses `shinka.core.run_shinka_eval(...)` to run the candidate

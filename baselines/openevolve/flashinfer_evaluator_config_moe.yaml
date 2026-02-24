@@ -1,10 +1,10 @@
-# Evaluator config for `examples/openevolve/flashinfer_oe_evaluator.py`
+# Evaluator config for `baselines/openevolve/flashinfer_oe_evaluator.py`
 #
 # Usage:
-#   python3 -u examples/openevolve/run_evolve.py \
-#     --config examples/openevolve/config_moe.yaml \
-#     --evaluator-config examples/openevolve/flashinfer_evaluator_config_moe.yaml \
-#     --initial-program examples/openevolve/initial_moe_kernel.txt
+#   python3 -u baselines/openevolve/run_evolve.py \
+#     --config baselines/openevolve/config_moe.yaml \
+#     --evaluator-config baselines/openevolve/flashinfer_evaluator_config_moe.yaml \
+#     --initial-program baselines/openevolve/initial_moe_kernel.txt
 
 # REQUIRED
 dataset_path: "<PATH_TO_FLASHINFER_TRACE_DATASET>"

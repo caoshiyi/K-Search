@@ -2,7 +2,7 @@
 Seed initial program for ShinkaEvolve MLA-decode evolution.
 
 This seeds `candidate_kernel()` with the OpenEvolve advanced MMA-based MLA decode kernel:
-  `examples/openevolve/initial_mla_decode_mma_advanced.txt`
+  `baselines/openevolve/initial_mla_decode_mma_advanced.txt`
 
 ShinkaEvolve will mutate the region between `EVOLVE-BLOCK-START/END`.
 """

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ShinkaEvolve analogue of `examples/openevolve/run_evolve_moe.sh`.
+# ShinkaEvolve analogue of `baselines/openevolve/run_evolve_moe.sh`.
 # It pins:
 #  - kernel definition
 #  - evaluation workload UUIDs
@@ -15,10 +15,10 @@ set -euo pipefail
 
 REPO_ROOT="<PATH_TO_KSEARCH_REPO>"
 
-EVALUATOR_CONFIG="${REPO_ROOT}/examples/shinkaevolve/flashinfer_evaluator_config_moe.yaml"
-INITIAL_PROGRAM="${REPO_ROOT}/examples/shinkaevolve/flashinfer_initial.py"
-EVAL_PROGRAM="${REPO_ROOT}/examples/shinkaevolve/evaluate_flashinfer.py"
-OE_CONFIG="${REPO_ROOT}/examples/shinkaevolve/config_moe.yaml"
+EVALUATOR_CONFIG="${REPO_ROOT}/baselines/shinkaevolve/flashinfer_evaluator_config_moe.yaml"
+INITIAL_PROGRAM="${REPO_ROOT}/baselines/shinkaevolve/flashinfer_initial.py"
+EVAL_PROGRAM="${REPO_ROOT}/baselines/shinkaevolve/evaluate_flashinfer.py"
+OE_CONFIG="${REPO_ROOT}/baselines/shinkaevolve/config_moe.yaml"
 
 cd "${REPO_ROOT}"
 
@@ -66,7 +66,7 @@ if [[ "${CHECK_OLLAMA}" == "1" ]]; then
 fi
 
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}" \
-python3 -u "${REPO_ROOT}/examples/shinkaevolve/run_evolve.py" \
+python3 -u "${REPO_ROOT}/baselines/shinkaevolve/run_evolve.py" \
   --initial-program "${INITIAL_PROGRAM}" \
   --eval-program "${EVAL_PROGRAM}" \
   --evaluator-config "${EVALUATOR_CONFIG}" \

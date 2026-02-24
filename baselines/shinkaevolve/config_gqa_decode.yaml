@@ -200,7 +200,7 @@ prompt:
   num_diverse_programs: 2
 
 database:
-  # NOTE: ShinkaEvolve overrides this via `examples/shinkaevolve/run_evolve_*.sh --db-path ...`.
+  # NOTE: ShinkaEvolve overrides this via `baselines/shinkaevolve/run_evolve_*.sh --db-path ...`.
   db_path: "./openevolve_output/flashinfer_gqa_decode"
   population_size: 25
   archive_size: 12

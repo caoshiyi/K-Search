@@ -1,7 +1,7 @@
-# Evaluator config for `examples/openevolve/flashinfer_oe_evaluator.py` (MLA prefill).
+# Evaluator config for `baselines/openevolve/flashinfer_oe_evaluator.py` (MLA prefill).
 #
 # Mirrors:
-#   `examples/openevolve/flashinfer_evaluator_config_mla_decode.yaml`
+#   `baselines/openevolve/flashinfer_evaluator_config_mla_decode.yaml`
 #
 # REQUIRED
 dataset_path: "<PATH_TO_FLASHINFER_TRACE_DATASET>"

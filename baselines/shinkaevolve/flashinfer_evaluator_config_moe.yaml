@@ -1,12 +1,12 @@
 # Evaluator config for ShinkaEvolve FlashInfer kernel evolution.
 #
 # This mirrors:
-#   `examples/openevolve/flashinfer_evaluator_config_moe.yaml`
+#   `baselines/openevolve/flashinfer_evaluator_config_moe.yaml`
 #
 # Consumed by:
-#   - `examples/shinkaevolve/evaluate_flashinfer.py --evaluator-config ...`
+#   - `baselines/shinkaevolve/evaluate_flashinfer.py --evaluator-config ...`
 # Forwarded into:
-#   - `examples/shinkaevolve/flashinfer_initial.py::run_experiment(**kwargs)`
+#   - `baselines/shinkaevolve/flashinfer_initial.py::run_experiment(**kwargs)`
 
 # REQUIRED
 dataset_path: "<PATH_TO_FLASHINFER_TRACE_DATASET>"

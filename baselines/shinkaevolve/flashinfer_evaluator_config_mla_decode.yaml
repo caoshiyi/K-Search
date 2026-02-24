@@ -1,10 +1,10 @@
 # Evaluator config for ShinkaEvolve FlashInfer kernel evolution (MLA decode).
 #
 # Mirrors:
-#   `examples/openevolve/flashinfer_evaluator_config_mla_decode.yaml`
+#   `baselines/openevolve/flashinfer_evaluator_config_mla_decode.yaml`
 #
 # Consumed by:
-#   `examples/shinkaevolve/evaluate_flashinfer.py --evaluator-config ...`
+#   `baselines/shinkaevolve/evaluate_flashinfer.py --evaluator-config ...`
 
 # REQUIRED
 # NOTE: set this to wherever your MLA trace set lives.

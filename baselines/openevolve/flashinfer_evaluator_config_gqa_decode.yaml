@@ -1,6 +1,6 @@
-# Evaluator config for `examples/openevolve/flashinfer_oe_evaluator.py`
+# Evaluator config for `baselines/openevolve/flashinfer_oe_evaluator.py`
 #
-# This file is consumed by `examples/openevolve/run_evolve.py --evaluator-config ...`
+# This file is consumed by `baselines/openevolve/run_evolve.py --evaluator-config ...`
 # and is passed into the evaluator object (no environment variables).
 
 # REQUIRED

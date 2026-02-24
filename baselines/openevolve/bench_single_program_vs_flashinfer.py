@@ -5,13 +5,13 @@ Supports candidates in two formats:
 - flashinfer-bench Solution JSON (e.g. oe_best_*.json saved by run_evolve.py)
 
 Example:
-  python3 -u examples/openevolve/bench_single_program_vs_flashinfer.py \
-    --evaluator-config examples/openevolve/flashinfer_evaluator_config_moe.yaml \
+  python3 -u baselines/openevolve/bench_single_program_vs_flashinfer.py \
+    --evaluator-config baselines/openevolve/flashinfer_evaluator_config_moe.yaml \
     --program-json openevolve_output/flashinfer_moe_fp8_ds_routing_topk8/programs/a6447285-1277-43a5-8ab3-40af841f459c.json \
     --baseline-solution-json data/min_flashinfer_trace/solutions/moe/moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048/flashinfer_wrapper_9sdjf3.json
 
-  python3 -u examples/openevolve/bench_single_program_vs_flashinfer.py \
-    --evaluator-config examples/openevolve/flashinfer_evaluator_config_moe.yaml \
+  python3 -u baselines/openevolve/bench_single_program_vs_flashinfer.py \
+    --evaluator-config baselines/openevolve/flashinfer_evaluator_config_moe.yaml \
     --candidate-solution-json data/min_flashinfer_trace/solutions/moe/moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048/oe_best_....json \
     --baseline-solution-json data/min_flashinfer_trace/solutions/moe/moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048/flashinfer_wrapper_9sdjf3.json
 """

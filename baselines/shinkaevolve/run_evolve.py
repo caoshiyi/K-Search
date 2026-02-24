@@ -1,12 +1,12 @@
 """
 Convenience launcher for ShinkaEvolve (FlashInfer kernel evolution).
 
-This mirrors `examples/openevolve/run_evolve.py` in spirit:
+This mirrors `baselines/openevolve/run_evolve.py` in spirit:
   - wires an evaluator script + initial program + evaluator-config YAML
   - runs a local evolution loop (best-effort) using ShinkaEvolve's Python API
 
 If ShinkaEvolve API names differ in your installed version, you can still run
-`shinka_launch` directly; see `examples/shinkaevolve/run_evolve.sh`.
+`shinka_launch` directly; see `baselines/shinkaevolve/run_evolve.sh`.
 """
 
 from __future__ import annotations
@@ -573,7 +573,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("ERROR: Could not import ShinkaEvolve Python API.")
         print("Install ShinkaEvolve:", "https://github.com/SakanaAI/ShinkaEvolve")
         print("Import error:", repr(e))
-        print("Fallback: run `shinka_launch` directly (see examples/shinkaevolve/run_evolve.sh).")
+        print("Fallback: run `shinka_launch` directly (see baselines/shinkaevolve/run_evolve.sh).")
         return 2
 
     # NOTE: We keep config construction minimal and pass our evaluator-config via extra_cmd_args.

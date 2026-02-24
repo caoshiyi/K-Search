@@ -2,7 +2,7 @@
 FlashInfer-Bench evaluator utilities for ShinkaEvolve.
 
 This module is the ShinkaEvolve analogue of:
-  - `examples/openevolve/flashinfer_oe_evaluator.py`
+  - `baselines/openevolve/flashinfer_oe_evaluator.py`
 
 Key differences vs OpenEvolve:
   - ShinkaEvolve evolves a Python program file (`program_path`) with an EVOLVE-BLOCK.

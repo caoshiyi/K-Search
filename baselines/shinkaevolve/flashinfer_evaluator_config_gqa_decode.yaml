@@ -1,10 +1,10 @@
 # Evaluator config for ShinkaEvolve FlashInfer kernel evolution (GQA decode).
 #
 # Mirrors:
-#   `examples/openevolve/flashinfer_evaluator_config_gqa_decode.yaml`
+#   `baselines/openevolve/flashinfer_evaluator_config_gqa_decode.yaml`
 #
 # Consumed by:
-#   `examples/shinkaevolve/evaluate_flashinfer.py --evaluator-config ...`
+#   `baselines/shinkaevolve/evaluate_flashinfer.py --evaluator-config ...`
 
 # REQUIRED
 dataset_path: "<PATH_TO_FLASHINFER_TRACE_DATASET>"

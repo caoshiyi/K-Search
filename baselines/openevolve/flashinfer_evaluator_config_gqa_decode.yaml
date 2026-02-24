@@ -1,0 +1,35 @@
+# Evaluator config for `examples/openevolve/flashinfer_oe_evaluator.py`
+#
+# This file is consumed by `examples/openevolve/run_evolve.py --evaluator-config ...`
+# and is passed into the evaluator object (no environment variables).
+
+# REQUIRED
+dataset_path: "<PATH_TO_FLASHINFER_TRACE_DATASET>"
+definition: "gqa_paged_decode_h32_kv4_d128_ps1"
+
+# OPTIONAL
+language: "cuda"         # triton | cuda | python
+target_gpu: "H100"
+
+# Workload selection for evaluation (fast feedback during evolution)
+# If `feedback_workloads` is provided, evaluator uses exactly those workloads.
+# Otherwise it samples `num_feedback_workloads` workloads randomly.
+feedback_workloads: [9c21179a-39f5-4d85-b71b-095b450be3ef, 85c1e8ef-e10a-4522-b3b8-0e1f2c77df39, 84405835-1008-48e2-9a3f-78863964b81e, f46ddc2e-1676-4619-bba9-b59cf1e784dc, 06b8480d-04de-46d7-a2cc-a74af941675b]
+num_feedback_workloads: 5
+
+# Benchmark knobs
+warmup_runs: 10
+iterations: 10
+num_trials: 1
+rtol: 1e-2
+atol: 1e-2
+timeout_seconds: 300
+parallel_workloads: true
+# max_parallel_workloads: 0   # 0 = auto (min(num_gpus, num_workloads))
+
+# If true, uses isolated runner subprocesses (more robust, potentially slower)
+use_isolated_runner: true
+
+# Optional: limit number of workloads for evaluation (0 or omitted = all)
+num_eval_workload: 0
+baseline_solution: "flashinfer_wrapper_78fd04"

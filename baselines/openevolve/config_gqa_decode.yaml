@@ -1,0 +1,222 @@
+max_iterations: 120
+checkpoint_interval: 5
+log_level: "INFO"
+
+# LLM configuration for Metal kernel optimization
+llm:
+  primary_model: "gemini-3-pro-preview"
+  primary_model_weight: 1
+  secondary_model: "gemini-3-flash-preview"
+  secondary_model_weight: 0
+  api_base: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  temperature: 0.6
+  top_p: 0.95
+  max_tokens: 80000
+  timeout: 900
+
+# Specialized prompt for Metal kernel optimization
+prompt:
+  system_message: |
+    You are a code generator. Generate a CUDA kernel implementation optimized for H100 GPU for the following specification.
+
+    Specification:
+    Name: gqa_paged_decode_h32_kv4_d128_ps1
+    Type: gqa_paged
+
+    Axes:
+      batch_size: variable (Total number of query tokens.)
+      num_qo_heads: constant = 32
+      num_kv_heads: constant = 4
+      head_dim: constant = 128
+      num_pages: variable
+      page_size: constant = 1
+      len_indptr: variable (Length of kv_indptr array.)
+      num_kv_indices: variable (Total number of KV page indices.)
+
+    Inputs:
+      q: [batch_size, num_qo_heads, head_dim] (DType.BFLOAT16)
+      k_cache: [num_pages, page_size, num_kv_heads, head_dim] (DType.BFLOAT16)
+      v_cache: [num_pages, page_size, num_kv_heads, head_dim] (DType.BFLOAT16)
+      kv_indptr: [len_indptr] (DType.INT32) - KV page offsets for each sequence.
+      kv_indices: [num_kv_indices] (DType.INT32) - Page IDs for KV cache lookups.
+      sm_scale: scalar (DType.FLOAT32) - Softmax scale. Default is (1/sqrt(head_dim)).
+
+    Outputs:
+      output: [batch_size, num_qo_heads, head_dim] (DType.BFLOAT16)
+      lse: [batch_size, num_qo_heads] (DType.FLOAT32) - The 2-based log-sum-exp of attention logits.
+
+    Constraints:
+      - len_indptr == batch_size + 1
+      - num_kv_indices == kv_indptr[-1].item()
+
+
+    Reference Implementation:
+    import torch
+    import math
+
+
+    @torch.no_grad()
+    def run(q, k_cache, v_cache, kv_indptr, kv_indices, sm_scale):
+        batch_size, num_qo_heads, head_dim = q.shape
+        _, page_size, num_kv_heads, _ = k_cache.shape
+        len_indptr = kv_indptr.shape[0]
+        num_kv_indices = kv_indices.shape[0]
+
+        # Check constants
+        assert num_qo_heads == 32
+        assert num_kv_heads == 4
+        assert head_dim == 128
+        assert page_size == 1
+
+        # Check constraints
+        assert len_indptr == batch_size + 1
+        assert num_kv_indices == kv_indptr[-1].item()
+
+        device = q.device
+
+        output = torch.zeros(
+            (batch_size, num_qo_heads, head_dim), dtype=torch.bfloat16, device=device
+        )
+        lse = torch.full(
+            (batch_size, num_qo_heads), -float("inf"), dtype=torch.float32, device=device
+        )
+
+        gqa_ratio = num_qo_heads // num_kv_heads
+
+        k_cache_flat = k_cache.squeeze(1).to(
+            torch.float32
+        )  # [num_pages, num_kv_heads, head_dim]
+        v_cache_flat = v_cache.squeeze(1).to(
+            torch.float32
+        )  # [num_pages, num_kv_heads, head_dim]
+
+        for b in range(batch_size):
+            page_start = int(kv_indptr[b].item())
+            page_end = int(kv_indptr[b + 1].item())
+
+            if page_start >= page_end:
+                # No KV cache for this batch element
+                output[b].zero_()
+                continue
+
+            # Pages are the token indices for page_size=1
+            token_indices = kv_indices[page_start:page_end].to(torch.long)
+            # Number of tokens is the number of pages for page_size=1
+            num_tokens = token_indices.shape[0]
+
+            if num_tokens == 0:
+                output[b].zero_()
+                continue
+
+            # Get Q, K, V for this batch
+            k_batch = k_cache_flat[token_indices]  # [num_tokens, num_kv_heads, head_dim]
+            v_batch = v_cache_flat[token_indices]  # [num_tokens, num_kv_heads, head_dim]
+            q_batch = q[b].to(torch.float32)  # [num_qo_heads, head_dim]
+
+            for h in range(num_qo_heads):
+                # Find corresponding KV head for GQA
+                kv_head = h // gqa_ratio
+
+                q_head = q_batch[h]  # [head_dim]
+                k_head = k_batch[:, kv_head]  # [num_tokens, head_dim]
+                v_head = v_batch[:, kv_head]  # [num_tokens, head_dim]
+
+                logits = torch.matmul(q_head, k_head.T)  # [num_tokens]
+                logits_scaled = logits * sm_scale
+
+                # Compute 2-base LSE
+                lse[b, h] = torch.logsumexp(logits_scaled, dim=-1) / math.log(2.0)
+
+                attn = torch.softmax(logits_scaled, dim=-1)  # [num_tokens]
+                out_head = torch.matmul(attn, v_head)  # [head_dim]
+                output[b, h] = out_head.to(torch.bfloat16)
+
+        return output, lse
+
+    Requirements:
+    - Write clean, efficient CUDA C++ code optimized for H100 architecture
+    - Use proper CUDA syntax and memory management optimized for H100
+    - Implement the exact functionality described in the specification
+    - The reference code provides the mathematical specification but is unoptimized - your CUDA implementation should match its computational accuracy while delivering high performance
+    - Use the definition's tensor shapes, dtypes, and axes information to guide memory access patterns and optimization strategies
+    - Optimize for H100 GPU characteristics (memory hierarchy, compute units, etc.)
+    - For fixed axis values, optimize specifically for those constants rather than general cases
+    - You may use 3rd party libraries (cuBLAS, cuDNN, CUTLASS) when beneficial, but custom implementations often perform better for specialized kernels with known axis constraints
+
+    IMPORTANT: Generate code in XML format with exactly 3 files with these strict names:
+
+    <header_file name="kernel.h">
+    - All CUDA kernel function declarations
+    - Host function declarations
+    - Any necessary struct/type definitions
+    - Include guards and necessary headers
+    </header_file>
+
+    <cuda_file name="kernel.cu">
+    - All __global__ kernel implementations
+    - All __device__ helper functions
+    - CUDA-specific optimizations and memory patterns
+    - Proper error checking and memory management
+    </cuda_file>
+
+    <cpp_file name="main.cpp">
+    - Host function that launches kernels
+    - Memory allocation and data transfer management
+    - Device management and error handling
+    - Entry point function named "run" that can be called to execute the implementation
+    - Handle both args and kwargs properly
+    - Move CPU data to GPU, execute kernels, and return results to CPU
+    - Include PyTorch C++ extension bindings using PYBIND11_MODULE
+    - The "run" function must be exposed to Python through the binding
+    - Include proper tensor type conversion between PyTorch tensors and CUDA pointers
+    - Include all necessary PyTorch headers: #include <torch/extension.h>
+    </cpp_file>
+
+    Code Generation Guidelines:
+    - Use modern CUDA features appropriate for H100
+    - Optimize memory coalescing and reduce bank conflicts
+    - Utilize shared memory effectively for data reuse
+    - Consider occupancy and register usage
+    - Implement proper error checking with cudaGetLastError()
+    - Use appropriate grid and block dimensions for the problem size
+    - Leverage constant memory for frequently accessed read-only data
+    - Use PyTorch tensor API (torch::Tensor) for all tensor arguments in the "run" function
+    - Convert PyTorch tensors to CUDA pointers using .data_ptr<float>() or similar methods
+    - Ensure proper CUDA stream synchronization and error handling
+
+    ** You MUST use MMA to utilize the tensor cores on H100! **
+
+    Generate the implementation:
+
+
+    Performance targets (lower is better):
+    - workload 9c21179a-39f5-4d85-b71b-095b450be3ef: target_latency_ms <= 0.018
+    - workload 85c1e8ef-e10a-4522-b3b8-0e1f2c77df39: target_latency_ms <= 0.045
+    - workload 84405835-1008-48e2-9a3f-78863964b81e: target_latency_ms <= 0.029
+    - workload f46ddc2e-1676-4619-bba9-b59cf1e784dc: target_latency_ms <= 0.081
+    - workload 06b8480d-04de-46d7-a2cc-a74af941675b: target_latency_ms <= 0.061
+    - Optimize for overall mean latency across the listed workloads while maintaining correctness.
+    
+  num_top_programs: 3
+  num_diverse_programs: 2
+
+# Database configuration
+database:
+  db_path: "./openevolve_output/flashinfer_gqa_decode_gemini3_run_1"
+  population_size: 25
+  archive_size: 12
+  num_islands: 3
+  elite_selection_ratio: 0.3
+  exploitation_ratio: 0.65
+  exploration_ratio: 0.35
+
+# Evaluator configuration
+evaluator:
+  timeout: 1200  # 20 minutes for Metal kernel compilation and testing
+  parallel_evaluations: 1
+  cascade_evaluation: false
+
+# Evolution settings
+diff_based_evolution: false
+allow_full_rewrites: true
+max_code_length: 90000

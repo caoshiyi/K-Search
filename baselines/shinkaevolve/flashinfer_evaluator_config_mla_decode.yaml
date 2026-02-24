@@ -1,0 +1,46 @@
+# Evaluator config for ShinkaEvolve FlashInfer kernel evolution (MLA decode).
+#
+# Mirrors:
+#   `examples/openevolve/flashinfer_evaluator_config_mla_decode.yaml`
+#
+# Consumed by:
+#   `examples/shinkaevolve/evaluate_flashinfer.py --evaluator-config ...`
+
+# REQUIRED
+# NOTE: set this to wherever your MLA trace set lives.
+dataset_path: "<PATH_TO_FLASHINFER_TRACE_DATASET>"
+definition: "mla_paged_decode_h16_ckv512_kpe64_ps1"
+
+# OPTIONAL
+language: "cuda"         # triton | cuda | python
+target_gpu: "H100"
+
+# Workload selection for evaluation (fast feedback during evolution)
+feedback_workloads:
+  - bd2dae14-7bae-4edb-964f-2163accf506e
+  - 84221f45-78f8-4d44-84f6-998153d2c1fa
+  - d0da33e2-2d94-42b5-be8a-09111f9f2649
+  - e417264f-195d-4204-89fa-3ebdb539f1cf
+  - 939f995a-1ab2-4d19-8d94-50f07e73542d
+num_feedback_workloads: 5
+
+# Benchmark knobs
+warmup_runs: 10
+iterations: 10
+num_trials: 1
+rtol: 1e-2
+atol: 1e-2
+timeout_seconds: 150
+parallel_workloads: true
+# max_parallel_workloads: 0   # 0 = auto (min(num_gpus, num_workloads))
+
+# If true, uses isolated runner subprocesses (more robust, potentially slower)
+use_isolated_runner: true
+
+# Optional: limit number of workloads for evaluation (0 or omitted = all)
+num_eval_workload: 0
+
+# Required baseline for vs_base scoring (from dataset traces).
+# Note: the evaluator uses this for scoring, but it is NOT passed into the evolved program.
+baseline_solution: "flashinfer_wrapper_03f7b0"
+

@@ -1,0 +1,12 @@
+# EVOLVE-BLOCK-START
+
+<header_file name="kernel.h">
+</header_file>
+
+<cuda_file name="kernel.cu">
+</cuda_file>
+
+<cpp_file name="main.cpp">
+</cpp_file>
+
+# EVOLVE-BLOCK-END

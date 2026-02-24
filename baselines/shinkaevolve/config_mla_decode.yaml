@@ -1,0 +1,99 @@
+max_iterations: 120
+checkpoint_interval: 5
+log_level: "INFO"
+
+# LLM configuration
+llm:
+  primary_model: "gemini-3-pro-preview"
+  primary_model_weight: 1
+  secondary_model: "gemini-3-flash-preview"
+  secondary_model_weight: 0
+  api_base: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  temperature: 0.6
+  top_p: 0.95
+  max_tokens: 80000
+  timeout: 900
+
+prompt:
+  system_message: |
+    You are a code generator. Generate a CUDA kernel implementation optimized for H100 GPU for the following specification.
+
+    Specification:
+    Name: mla_paged_decode_h16_ckv512_kpe64_ps1
+    Type: mla_paged
+
+    Axes:
+      batch_size: variable
+      num_qo_heads: constant = 16 (Number of query heads after tensor parallel split (128/8=16).)
+      head_dim_ckv: constant = 512
+      head_dim_kpe: constant = 64
+      page_size: constant = 1
+      num_pages: variable (Total number of allocated pages in the KV cache.)
+      len_indptr: variable (Length of kv_indptr array.)
+      num_kv_indices: variable (Total number of KV page indices.)
+
+    Inputs:
+      q_nope: [batch_size, num_qo_heads, head_dim_ckv] (DType.BFLOAT16) - Query tensor without positional encoding component.
+      q_pe: [batch_size, num_qo_heads, head_dim_kpe] (DType.BFLOAT16) - Query positional encoding component.
+      ckv_cache: [num_pages, page_size, head_dim_ckv] (DType.BFLOAT16) - Compressed key-value cache.
+      kpe_cache: [num_pages, page_size, head_dim_kpe] (DType.BFLOAT16) - Key positional encoding cache.
+      kv_indptr: [len_indptr] (DType.INT32) - KV page offsets for each sequence. For decode (single-query), we don't need qo_indptr.
+      kv_indices: [num_kv_indices] (DType.INT32) - Page indices for KV cache lookups.
+      sm_scale: scalar (DType.FLOAT32) - Softmax scale. Default is (1/sqrt(128 + 64) = 1/sqrt(192)), based on head dimensions before matrix absorption.
+
+    Outputs:
+      output: [batch_size, num_qo_heads, head_dim_ckv] (DType.BFLOAT16)
+      lse: [batch_size, num_qo_heads] (DType.FLOAT32) - The 2-based log-sum-exp of attention logits.
+
+    Constraints:
+      len_indptr == batch_size + 1
+      num_kv_indices == kv_indptr[-1].item()
+
+    Requirements:
+    - Write clean, efficient CUDA C++ code optimized for H100 architecture (sm_90)
+    - Implement the exact functionality described in the specification
+    - You MUST use MMA to utilize the tensor cores on H100
+
+    IMPORTANT: Generate code in XML format with exactly 3 files with these strict names:
+
+    <header_file name="kernel.h">
+    - All CUDA kernel function declarations
+    - Host function declarations
+    - Any necessary struct/type definitions
+    - Include guards and necessary headers
+    </header_file>
+
+    <cuda_file name="kernel.cu">
+    - All __global__ kernel implementations
+    - All __device__ helper functions
+    - CUDA-specific optimizations and memory patterns
+    </cuda_file>
+
+    <cpp_file name="main.cpp">
+    - Host function that launches kernels
+    - Memory allocation and data transfer management
+    - Entry point function named "run" that can be called to execute the implementation
+    - Include PyTorch C++ extension bindings using PYBIND11_MODULE
+    </cpp_file>
+
+  num_top_programs: 3
+  num_diverse_programs: 2
+
+database:
+  db_path: "./openevolve_output/flashinfer_mla_decode"
+  population_size: 25
+  archive_size: 12
+  num_islands: 3
+  elite_selection_ratio: 0.3
+  exploitation_ratio: 0.65
+  exploration_ratio: 0.35
+
+evaluator:
+  timeout: 1200
+  parallel_evaluations: 1
+  cascade_evaluation: false
+
+diff_based_evolution: false
+allow_full_rewrites: true
+max_code_length: 90000
+

@@ -1,0 +1,47 @@
+# Evaluator config for ShinkaEvolve FlashInfer kernel evolution.
+#
+# This mirrors:
+#   `examples/openevolve/flashinfer_evaluator_config_moe.yaml`
+#
+# Consumed by:
+#   - `examples/shinkaevolve/evaluate_flashinfer.py --evaluator-config ...`
+# Forwarded into:
+#   - `examples/shinkaevolve/flashinfer_initial.py::run_experiment(**kwargs)`
+
+# REQUIRED
+dataset_path: "<PATH_TO_FLASHINFER_TRACE_DATASET>"
+definition: "moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048"
+
+# OPTIONAL
+language: "cuda"         # triton | cuda | python
+target_gpu: "B200"
+
+# Workload selection for evaluation (fast feedback during evolution)
+feedback_workloads:
+  # tiny → small → medium
+  - e05c6c03-5603-4a1c-b34c-dcce0ecaeea4  # seq_len=1
+  - b8f4f012-a32e-4356-b4e1-7665b3d598af  # seq_len=7
+  - 8cba5890-4288-448a-93b8-42c14c6b9420  # seq_len=14
+  - a7c2bcfd-a2f4-479e-8d32-200115df89cf  # seq_len=16
+  - 6230e838-67ca-41dd-a9d6-6f36b7676c6b  # seq_len=32
+num_feedback_workloads: 5
+
+# Benchmark knobs
+warmup_runs: 10
+iterations: 10
+num_trials: 1
+rtol: 1e-2
+atol: 1e-2
+timeout_seconds: 150
+parallel_workloads: true
+
+# If true, uses isolated runner subprocesses (more robust, potentially slower)
+use_isolated_runner: true
+
+# Optional: limit number of workloads for evaluation (0 or omitted = all)
+num_eval_workload: 0
+
+# Required baseline for vs_base scoring (from dataset traces).
+# Note: the evaluator uses this for scoring, but it is NOT passed into the evolved program.
+baseline_solution: "flashinfer_moe"
+

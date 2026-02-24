@@ -1,0 +1,119 @@
+max_iterations: 120
+checkpoint_interval: 5
+log_level: "INFO"
+
+# LLM configuration
+llm:
+  primary_model: "gemini-3-pro-preview"
+  primary_model_weight: 1
+  secondary_model: "gemini-3-flash-preview"
+  secondary_model_weight: 0
+  api_base: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  temperature: 0.6
+  top_p: 0.95
+  max_tokens: 32000
+  timeout: 900
+
+prompt:
+  system_message: |
+    You are a code generator. Generate a CUDA kernel implementation optimized for B200 GPU for the following specification.
+
+    Specification:
+    Name: moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048
+    Type: moe
+    Description: FP8 block scale MoE operation. Routing and two grouped-GEMM included.
+
+    Axes:
+      seq_len: variable (number of tokens)
+      num_experts: constant = 256
+      num_local_experts: constant = 32
+      hidden_size: constant = 7168
+      intermediate_size: constant = 2048
+      gemm1_out_size: constant = 4096  # 2 * intermediate_size
+      num_hidden_blocks: constant = 56  # hidden_size/128
+      num_intermediate_blocks: constant = 16  # intermediate_size/128
+      num_gemm1_out_blocks: constant = 32  # gemm1_out_size/128
+
+    Inputs:
+      routing_logits: [seq_len, 256] (float32)
+      routing_bias: [256] (bfloat16)
+      hidden_states: [seq_len, 7168] (float8_e4m3fn)
+      hidden_states_scale: [56, seq_len] (float32)  # block-scale (block=128), transposed layout
+      gemm1_weights: [32, 4096, 7168] (float8_e4m3fn)  # W13 (gate+up)
+      gemm1_weights_scale: [32, 32, 56] (float32)
+      gemm2_weights: [32, 7168, 2048] (float8_e4m3fn)  # W2 (down)
+      gemm2_weights_scale: [32, 56, 16] (float32)
+      local_expert_offset: scalar int32
+      routed_scaling_factor: scalar float32
+
+    Outputs:
+      output: [seq_len, 7168] (bfloat16)
+
+    Routing algorithm (DeepSeek-V3/R1, no-aux):
+      - s = sigmoid(routing_logits)
+      - s_with_bias = s + routing_bias
+      - group experts into n_group=8 (group_size=32)
+      - group_score = sum(top2(s_with_bias[group]))
+      - pick topk_group=4 groups by group_score
+      - within kept groups pick global top_k=8 experts by s_with_bias
+      - weights for selected experts use s (without bias), normalized per token and scaled by routed_scaling_factor
+      - only experts in [local_expert_offset, local_expert_offset + 32) are computed on this rank
+
+    Math:
+      1) Dequantize hidden_states FP8 with block scales (block=128):
+         A_fp32[t, h] = fp8_to_fp32(hidden_states[t,h]) * hidden_states_scale[h/128, t]
+      2) For each local expert e:
+         G1 = A_e @ W13_e^T   # [Tk, 4096]
+         C = SwiGLU(G1)       # split into [Tk,2048] + [Tk,2048], C = silu(X2) * X1
+         Oe = C @ W2_e^T      # [Tk, 7168]
+         output[token] += Oe * weight[token, global_expert]
+
+    Requirements:
+    - Write efficient CUDA C++ code optimized for B200 (sm_100)
+    - Correctness must match the definition's semantics within rtol/atol
+    - Prefer fused kernels and efficient scheduling over naive per-expert loops
+    - You may allocate temporary workspace inside the PyTorch extension (in `main.cpp`) if needed
+
+    IMPORTANT: Generate code in XML format with exactly 3 files with these strict names:
+
+    <header_file name="kernel.h">
+    - All CUDA kernel function declarations
+    - Host function declarations
+    - Any necessary struct/type definitions
+    - Include guards and necessary headers
+    </header_file>
+
+    <cuda_file name="kernel.cu">
+    - All __global__ kernel implementations
+    - All __device__ helper functions
+    - CUDA-specific optimizations and memory patterns
+    </cuda_file>
+
+    <cpp_file name="main.cpp">
+    - Host function that launches kernels
+    - Memory allocation and data transfer management
+    - Entry point function named "run" that can be called to execute the implementation
+    - Include PyTorch C++ extension bindings using PYBIND11_MODULE
+    </cpp_file>
+
+  num_top_programs: 3
+  num_diverse_programs: 2
+
+database:
+  db_path: "./openevolve_output/flashinfer_moe_fp8_ds_routing_topk8"
+  population_size: 25
+  archive_size: 12
+  num_islands: 3
+  elite_selection_ratio: 0.3
+  exploitation_ratio: 0.65
+  exploration_ratio: 0.35
+
+evaluator:
+  timeout: 900
+  parallel_evaluations: 1
+  cascade_evaluation: false
+
+diff_based_evolution: false
+allow_full_rewrites: true
+max_code_length: 80000
+

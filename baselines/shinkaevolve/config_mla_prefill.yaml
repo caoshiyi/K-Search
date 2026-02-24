@@ -1,0 +1,198 @@
+max_iterations: 120
+checkpoint_interval: 5
+log_level: "INFO"
+
+llm:
+  primary_model: "gemini-3-pro-preview"
+  primary_model_weight: 1
+  secondary_model: "gemini-3-flash-preview"
+  secondary_model_weight: 0
+  api_base: "https://generativelanguage.googleapis.com/v1beta/openai/"
+  temperature: 0.6
+  top_p: 0.95
+  max_tokens: 80000
+  timeout: 900
+
+prompt:
+  system_message: |
+    You are a code generator. Generate a CUDA kernel implementation optimized for H100 GPU for the following specification.
+
+    Specification:
+    Name: mla_paged_prefill_causal_h16_ckv512_kpe64_ps1
+    Type: mla_paged
+    Description: Batched Multi-head Latent Attention prefill with a paged KV cache. Causal mask is applied.
+
+    Axes:
+      total_q: variable (Total number of query tokens.)
+      num_qo_heads: constant = 16 (Number of query heads after tensor parallel split (128/8=16).)
+      head_dim_ckv: constant = 512
+      head_dim_kpe: constant = 64
+      page_size: constant = 1
+      num_pages: variable (Total allocated pages in KV cache.)
+      len_indptr: variable (Length of indptr arrays (batch_size + 1).)
+      num_kv_indices: variable (Total number of KV indices.)
+
+    Constraints:
+      - total_q == qo_indptr[-1].item()
+      - num_kv_indices == kv_indptr[-1].item()
+
+    Inputs:
+      q_nope: [total_q, 16, 512] (bfloat16) - Query tensor without positional encoding component.
+      q_pe:   [total_q, 16, 64]  (bfloat16) - Query positional encoding component.
+      ckv_cache: [num_pages, 1, 512] (bfloat16) - Compressed key-value cache.
+      kpe_cache: [num_pages, 1, 64]  (bfloat16) - Key positional encoding cache.
+      qo_indptr: [len_indptr] (int32) - Query offsets for each sequence.
+      kv_indptr: [len_indptr] (int32) - KV page offsets for each sequence.
+      kv_indices: [num_kv_indices] (int32) - Page indices for KV cache lookups.
+      sm_scale: scalar (float32) - Softmax scale (default 1/sqrt(192)).
+
+    Outputs:
+      output: [total_q, 16, 512] (bfloat16)
+      lse:    [total_q, 16] (float32) - 2-based log-sum-exp of attention logits.
+
+    Reference Implementation (semantics, for correctness only; do not copy-paste as output format):
+    import torch
+    import math
+
+    @torch.no_grad()
+    def run(q_nope, q_pe, ckv_cache, kpe_cache, qo_indptr, kv_indptr, kv_indices, sm_scale):
+        total_q, num_qo_heads, head_dim_ckv = q_nope.shape
+        head_dim_kpe = q_pe.shape[-1]
+        page_size = ckv_cache.shape[1]
+        len_indptr = qo_indptr.shape[0]
+        batch_size = len_indptr - 1
+
+        # Check constants
+        assert num_qo_heads == 16
+        assert head_dim_ckv == 512
+        assert head_dim_kpe == 64
+        assert page_size == 1
+
+        # Check constraints
+        assert total_q == qo_indptr[-1].item()
+        device = q_nope.device
+
+        Kc_all = ckv_cache.squeeze(1).to(torch.float32)  # [num_pages, head_dim_ckv]
+        Kp_all = kpe_cache.squeeze(1).to(torch.float32)  # [num_pages, head_dim_kpe]
+
+        output = torch.zeros((total_q, num_qo_heads, head_dim_ckv), dtype=torch.bfloat16, device=device)
+        lse = torch.full((total_q, num_qo_heads), -float("inf"), dtype=torch.float32, device=device)
+
+        for b in range(batch_size):
+            q_start = int(qo_indptr[b].item())
+            q_end = int(qo_indptr[b + 1].item())
+
+            page_beg = int(kv_indptr[b].item())
+            page_end = int(kv_indptr[b + 1].item())
+
+            if q_start >= q_end or page_beg >= page_end:
+                continue
+
+            kv_len = page_end - page_beg
+            pages = kv_indices[page_beg:page_end]
+
+            # Since page_size=1, pages are token indices
+            tok_idx = pages[:kv_len].to(torch.long)
+            Kc = Kc_all[tok_idx]  # [kv_len, head_dim_ckv]
+            Kp = Kp_all[tok_idx]  # [kv_len, head_dim_kpe]
+
+            q_nope_batch = q_nope[q_start:q_end].to(torch.float32)  # [q_len, num_heads, head_dim_ckv]
+            q_pe_batch = q_pe[q_start:q_end].to(torch.float32)  # [q_len, num_heads, head_dim_kpe]
+            q_len = q_end - q_start
+
+            for i in range(q_len):
+                qn = q_nope_batch[i]  # [num_heads, head_dim_ckv]
+                qp = q_pe_batch[i]    # [num_heads, head_dim_kpe]
+
+                logits = (qn @ Kc.T) + (qp @ Kp.T)  # [num_heads, kv_len]
+                logits_scaled = logits * sm_scale
+
+                # Apply causal mask
+                prefix_len = kv_len - q_len
+                query_abs_pos = prefix_len + i
+                causal_mask = torch.arange(kv_len, device=logits_scaled.device) > query_abs_pos
+                logits_scaled.masked_fill_(causal_mask.unsqueeze(0), -float("inf"))
+
+                lse[q_start + i] = torch.logsumexp(logits_scaled, dim=-1) / math.log(2.0)
+                attn = torch.softmax(logits_scaled, dim=-1)
+                out = attn @ Kc
+                output[q_start + i] = out.to(torch.bfloat16)
+
+        return output, lse
+
+    Requirements:
+    - Write clean, efficient CUDA C++ code optimized for H100 architecture
+    - Use proper CUDA syntax and memory management optimized for H100
+    - Implement the exact functionality described in the specification
+    - The reference code provides the mathematical specification but is unoptimized - your CUDA implementation should match its computational accuracy while delivering high performance
+    - Use the definition's tensor shapes, dtypes, and axes information to guide memory access patterns and optimization strategies
+    - Optimize for H100 GPU characteristics (memory hierarchy, compute units, etc.)
+    - For fixed axis values, optimize specifically for those constants rather than general cases
+    - You may use 3rd party libraries (cuBLAS, cuDNN, CUTLASS) when beneficial, but custom implementations often perform better for specialized kernels with known axis constraints
+
+    IMPORTANT: Generate code in XML format with exactly 3 files with these strict names:
+
+    <header_file name="kernel.h">
+    - All CUDA kernel function declarations
+    - Host function declarations
+    - Any necessary struct/type definitions
+    - Include guards and necessary headers
+    </header_file>
+
+    <cuda_file name="kernel.cu">
+    - All __global__ kernel implementations
+    - All __device__ helper functions
+    - CUDA-specific optimizations and memory patterns
+    - Proper error checking and memory management
+    </cuda_file>
+
+    <cpp_file name="main.cpp">
+    - Host function that launches kernels
+    - Memory allocation and data transfer management
+    - Device management and error handling
+    - Entry point function named "run" that can be called to execute the implementation
+    - Handle both args and kwargs properly
+    - Move CPU data to GPU, execute kernels, and return results to CPU
+    - Include PyTorch C++ extension bindings using PYBIND11_MODULE
+    - The "run" function must be exposed to Python through the binding
+    - Include proper tensor type conversion between PyTorch tensors and CUDA pointers
+    - Include all necessary PyTorch headers: #include <torch/extension.h>
+    </cpp_file>
+
+    Code Generation Guidelines:
+    - Use modern CUDA features appropriate for H100
+    - Optimize memory coalescing and reduce bank conflicts
+    - Utilize shared memory effectively for data reuse
+    - Consider occupancy and register usage
+    - Implement proper error checking with cudaGetLastError()
+    - Use appropriate grid and block dimensions for the problem size
+    - Leverage constant memory for frequently accessed read-only data
+    - Use PyTorch tensor API (torch::Tensor) for all tensor arguments in the "run" function
+    - Convert PyTorch tensors to CUDA pointers using .data_ptr<float>() or similar methods
+    - Ensure proper CUDA stream synchronization and error handling
+
+    ** You MUST use MMA to utilize the tensor cores on H100! **
+
+    Generate the implementation:
+
+  num_top_programs: 3
+  num_diverse_programs: 2
+
+database:
+  db_path: "./openevolve_output/flashinfer_mla_paged_prefill_causal_h16_ckv512_kpe64_ps1"
+  population_size: 25
+  archive_size: 12
+  num_islands: 3
+  elite_selection_ratio: 0.3
+  exploitation_ratio: 0.65
+  exploration_ratio: 0.35
+
+evaluator:
+  timeout: 1200
+  parallel_evaluations: 1
+  cascade_evaluation: false
+
+diff_based_evolution: false
+allow_full_rewrites: true
+max_code_length: 90000
+

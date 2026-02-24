@@ -435,7 +435,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument(
         "--config",
         type=str,
-        default=str(Path(__file__).with_name("example_config.yaml")),
         help="Path to an OpenEvolve YAML config.",
     )
     p.add_argument(

@@ -1,6 +1,6 @@
 OE_CONFIG="<PATH_TO_KSEARCH_REPO>/baselines/openevolve/config_gqa_decode.yaml"
 EVALUATOR_CONFIG="<PATH_TO_KSEARCH_REPO>/baselines/openevolve/flashinfer_evaluator_config_gqa_decode.yaml"
-INITIAL_PROGRAM="<PATH_TO_KSEARCH_REPO>/baselines/openevolve/initial_kernel.txt"
+INITIAL_PROGRAM="<PATH_TO_KSEARCH_REPO>/baselines/openevolve/initial_empty.txt"
 
 export OPENAI_API_KEY="DUMMY_OPENAI_API_KEY"
 export WANDB_API_KEY="DUMMY_WANDB_API_KEY"

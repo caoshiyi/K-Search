@@ -77,10 +77,12 @@ Correctness:
 TRIMUL_SPEC_TEXT_TRITON = """GPUMode TriMul (Triton submission)
 Task:
 - Optimize the *forward* pass of the outgoing Triangle Multiplicative Update (TriMul).
-- Primary goal:
+- Primary goal: Analyze the shapes of the test cases and find the best hybrid Triton + PyTorch approach to achive high performance.
   - **Fuse** operators to minimize large intermediate tensors, global-memory traffic, and kernel launch overhead.
   - Use a **mixed precision** strategy where appropriate (e.g. fp16 for math and storage, fp32 for accumulations). Only the returned tensor **must be float32**.
-  - You do **not** need to re-implement everything in Triton. You may choose to have some of the operations done in pytorch -- to leverage cuBLAS etc. However, you must implement at least part of the operations in a kernel.
+  - You do **not** need to re-implement everything in Triton. You may choose to have some of the operations done in pytorch -- to leverage cuBLAS etc.
+    - You need to experiment with **many different** hybrid Triton + PyTorch approaches to find the best one. 
+    - Analyze on the shapes of the test cases to find the best hybrid approach. 
 - Include a short comment at the top summarizing your new implementation.
 - For each round, you can see your current best solution and the previous round's summary, therefore you can implement the kernel step by step.
 

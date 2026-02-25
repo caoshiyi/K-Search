@@ -863,16 +863,23 @@ class WorldModelManager:
                     return True
             return False
 
-        # If we already have enough open action nodes, don't spam the tree.
+        # If we already have enough open frontier action nodes AND the best node has open children,
+        # don't spam the tree.  The minimum of 3 applies to *frontier* nodes (executable open actions
+        # whose parent already has a solution or is root), not just any open action node.
         try:
-            # We aim for >=3 open actions TOTAL in the tree, and (when possible) >=3 executable "frontier" actions.
-            if (
-                self._count_open_action_nodes(world_model_json=prev) >= 3
-                and self._count_open_frontier_action_nodes(world_model_json=prev) >= 3
-            ):
+            frontier_ok = self._count_open_frontier_action_nodes(world_model_json=prev) >= 3
+            best_nid = self._find_best_node_id(world_model_json=prev)
+            best_has_children = (
+                best_nid is None  # no best node yet => nothing to ensure
+                or self._node_has_open_child_action(world_model_json=prev, parent_id=best_nid)
+            )
+            if frontier_ok and best_has_children:
                 return prev
         except Exception:
             pass
+        # Determine the best node so we can steer the LLM to create children under it.
+        best_nid_for_children = self._find_best_node_id(world_model_json=prev)
+
         candidate = prev
         max_retries = 2
         last_err: Optional[str] = None
@@ -880,11 +887,20 @@ class WorldModelManager:
             frontier_text = self._render_open_frontier_nodes_for_prompt(world_model_json=candidate, max_items=10)
             status_note = None
             # Prompt steering: always ask for at least one high-score OPEN frontier action.
+            best_children_hint = ""
+            if best_nid_for_children and not self._node_has_open_child_action(
+                world_model_json=candidate or "", parent_id=best_nid_for_children
+            ):
+                best_children_hint = (
+                    f"\nCRITICAL: The best-performing node (node_id={best_nid_for_children}) has NO open child action nodes. "
+                    f"You MUST insert at least one OPEN action child under node_id={best_nid_for_children} to continue exploring from the best solution."
+                )
             if attempt == 0:
                 status_note = (
                     "[ACTION_NODE_REQUIREMENT]\n"
                     "Ensure there is at least one executable OPEN frontier action with score_0_to_1 > 0.5.\n"
                     "Prefer concrete, single-iteration actions (not vague ideas)."
+                    + best_children_hint
                 )
             elif last_err:
                 status_note = (
@@ -892,6 +908,7 @@ class WorldModelManager:
                     f"{last_err}\n"
                     "Fix by inserting/updating at least one OPEN frontier action with score_0_to_1 > 0.5.\n"
                     "Do NOT output commentary; output JSON edit script only."
+                    + best_children_hint
                 )
             edit_prompt = build_decision_tree_edit_prompt(
                 world_model_json=candidate,
@@ -923,6 +940,14 @@ class WorldModelManager:
                 break
             last_err = "need >=1 OPEN frontier action node with score_0_to_1 > 0.5"
         # If the model still didn't comply, proceed anyway: selection will pick the best available frontier action.
+
+        # Final hard guard: if the best node still has no open children, deterministically insert one.
+        if best_nid_for_children and not self._node_has_open_child_action(
+            world_model_json=candidate or "", parent_id=best_nid_for_children
+        ):
+            candidate = self._fallback_insert_best_node_child(
+                world_model_json=candidate or "", parent_id=best_nid_for_children, round_index=round_index
+            )
 
         if candidate:
             self.set(name, candidate)
@@ -1255,6 +1280,149 @@ class WorldModelManager:
                     continue
             cnt += 1
         return cnt
+
+    def _find_best_node_id(self, *, world_model_json: str) -> Optional[str]:
+        """
+        Find the node_id of the best solved node strictly by ATTACHED solution eval score:
+        solution_ref.eval.metrics.score (higher is better).
+        No node-local fallback signals are used.
+        """
+        obj = load_world_model_obj(world_model_json or "")
+        if obj is None:
+            return None
+        dt = obj.get("decision_tree")
+        if not isinstance(dt, dict):
+            return None
+        nodes = dt.get("nodes")
+        if not isinstance(nodes, list):
+            return None
+
+        best_nid: Optional[str] = None
+        best_key: tuple[float, str] | None = None
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            sr = n.get("solution_ref")
+            if not isinstance(sr, dict):
+                continue
+            sid = sr.get("solution_id")
+            if not (isinstance(sid, str) and sid.strip()):
+                continue
+
+            ev = sr.get("eval")
+            if not isinstance(ev, dict):
+                continue
+            m = ev.get("metrics")
+            if not isinstance(m, dict):
+                continue
+            s = m.get("score")
+            if not isinstance(s, (int, float)):
+                continue
+            sol_score = float(s)
+            nid = str(n.get("node_id") or "").strip()
+            if not nid:
+                continue
+            key = (sol_score, nid)
+            if best_key is None or key > best_key:
+                best_key = key
+                best_nid = nid
+        return best_nid
+
+    def _node_has_open_child_action(self, *, world_model_json: str, parent_id: str) -> bool:
+        """
+        Check whether a given node has at least one OPEN child action node
+        (child with action.title but no solution_id).
+        """
+        obj = load_world_model_obj(world_model_json or "")
+        if not isinstance(obj, dict):
+            return False
+        dt = obj.get("decision_tree")
+        if not isinstance(dt, dict):
+            return False
+        nodes = dt.get("nodes")
+        if not isinstance(nodes, list):
+            return False
+
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            if str(n.get("parent_id") or "") != parent_id:
+                continue
+            # Must not already have a solution attached
+            sr = n.get("solution_ref")
+            if isinstance(sr, dict):
+                sid = sr.get("solution_id")
+                if isinstance(sid, str) and sid.strip():
+                    continue
+            act = n.get("action")
+            if isinstance(act, dict) and str(act.get("title") or "").strip():
+                return True
+        return False
+
+    def _fallback_insert_best_node_child(
+        self,
+        *,
+        world_model_json: str,
+        parent_id: str,
+        round_index: Optional[int] = None,
+    ) -> str:
+        """
+        Deterministic fallback: insert a minimal OPEN action child under the best-performing node
+        so the search can continue exploring from the best solution.
+        """
+        obj = load_world_model_obj(world_model_json or "")
+        if not isinstance(obj, dict):
+            return world_model_json
+        dt = obj.get("decision_tree")
+        if not isinstance(dt, dict):
+            return world_model_json
+        nodes = dt.get("nodes")
+        if not isinstance(nodes, list):
+            return world_model_json
+        by_id: dict[str, dict] = {}
+        for n in nodes:
+            if isinstance(n, dict) and n.get("node_id"):
+                by_id[str(n["node_id"])] = n
+        parent = by_id.get(parent_id)
+        if not isinstance(parent, dict):
+            return world_model_json
+        # Capture parent solution_id if present.
+        parent_sol = None
+        srp = parent.get("solution_ref")
+        if isinstance(srp, dict):
+            ps = srp.get("solution_id")
+            parent_sol = str(ps).strip() if isinstance(ps, str) and ps.strip() else None
+
+        rid = "r" + str(round_index) if round_index is not None else "rX"
+        counter = 0
+        while True:
+            counter += 1
+            nid = f"node_best_cont_{rid}_{counter}"
+            if nid not in by_id:
+                break
+
+        child = {
+            "node_id": nid,
+            "parent_id": parent_id,
+            "decision": "Continue from best",
+            "choice": "Next-step refinement of best solution",
+            "overall_rating_0_to_10": max(0.0, float(parent.get("overall_rating_0_to_10") or 0.0)),
+            "confidence_0_to_1": max(0.2, float(parent.get("confidence_0_to_1") or 0.2)),
+            "notes": "AUTO_BEST_CONTINUATION: the best-performing node had no open children. "
+            "Inserting a continuation action to keep exploring from the best solution.",
+            "impacts": parent.get("impacts") if isinstance(parent.get("impacts"), dict) else {},
+            "action": {
+                "title": "Refine best solution: target the top bottleneck",
+                "description": "Propose one small change that targets the primary bottleneck indicated by the latest eval on the best solution, without changing the overall mapping plan.",
+                "rationale": "The best solution should always have a continuation path for further improvement.",
+                "score_0_to_1": 0.6,
+                "difficulty_1_to_5": 2,
+            },
+            "solution_ref": {"solution_id": None, "parent_solution_id": parent_sol, "eval": None},
+            "last_updated_round": round_index,
+        }
+        nodes.append(child)
+        return dump_world_model_obj(obj) or world_model_json
 
     def _apply_decision_tree_ops(
         self,

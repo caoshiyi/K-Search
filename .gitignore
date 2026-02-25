@@ -1,6 +1,6 @@
 __pycache__/
 logs/
-.ksearch-output/
+.ksearch-output*/
 wandb/
 openevolve_output/
 *.log

@@ -22,7 +22,7 @@ from k_search.kernel_generators.world_model_prompts import (
     get_improve_from_spec_prompt_from_text,
     get_improve_generated_code_prompt_from_text,
 )
-from k_search.kernel_generators.world_model_manager import WorldModelConfig, WorldModelManager
+from k_search.kernel_generators.world_model_manager import WorldModelConfig, WorldModelManager, WorldModelSelectionPolicy
 from k_search.tasks.task_base import EvalResult
 from k_search.kernel_generators.world_model import (
     Prediction,
@@ -93,6 +93,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         # Default higher to allow passing full kernel.cu into WM prompts (we avoid truncating code).
         world_model_max_chars: int = 50000,
         artifacts_dir: str | None = None,
+        wm_max_difficulty: int | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -112,6 +113,10 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             )
             return (response.choices[0].message.content or "").strip()
 
+        selection_policy = WorldModelSelectionPolicy()
+        if wm_max_difficulty is not None:
+            selection_policy.max_difficulty_1_to_5 = int(wm_max_difficulty)
+
         self._wm = WorldModelManager(
             llm_call=_llm_call,
             target_gpu=self.target_gpu,
@@ -119,6 +124,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             config=WorldModelConfig(
                 enabled=bool(enable_world_model),
                 max_chars_per_block=self._world_model_max_chars,
+                selection_policy=selection_policy,
             ),
         )
         # Lazy-init; we need TraceSet.root to choose a persistence location.

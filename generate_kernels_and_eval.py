@@ -97,6 +97,7 @@ def generate_and_evaluate(
     # World model prompting
     enable_world_model: bool = False,
     wm_stagnation_window: int = 5,
+    wm_max_difficulty: Optional[int] = None,
     artifacts_dir: Optional[str] = None,
 ) -> None:
     """
@@ -132,6 +133,7 @@ def generate_and_evaluate(
                 "continue_from_world_model": continue_from_world_model,
                 "enable_world_model": bool(enable_world_model),
                 "wm_stagnation_window": int(wm_stagnation_window),
+                "wm_max_difficulty": wm_max_difficulty,
                 "save_results": bool(save_results),
                 "save_solutions": bool(save_solutions),
                 "num_eval_workload": num_eval_workload,
@@ -171,6 +173,7 @@ def generate_and_evaluate(
             api_key=api_key,
             base_url=base_url,
             artifacts_dir=artifacts_dir,
+            wm_max_difficulty=wm_max_difficulty,
         )
     else:
         # Non-world-model mode: baseline-style generator (task-driven).
@@ -312,6 +315,12 @@ def main():
         default=5,
         help="World-model mode: end an action cycle after this many consecutive non-improving rounds (>=1).",
     )
+    parser.add_argument(
+        "--wm-max-difficulty",
+        type=int,
+        default=None,
+        help="World-model mode: max difficulty (1-5) for action selection. Actions above this are deferred. Default: use policy default (4).",
+    )
     # W&B options
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--wandb-project", default=os.getenv("WANDB_PROJECT"), help="W&B project")
@@ -382,6 +391,7 @@ def main():
         continue_from_world_model=args.continue_from_world_model,
         enable_world_model=args.world_model,
         wm_stagnation_window=args.wm_stagnation_window,
+        wm_max_difficulty=args.wm_max_difficulty,
         artifacts_dir=args.artifacts_dir,
         enable_wandb=args.wandb,
         wandb_project=args.wandb_project,

@@ -1,4 +1,3 @@
-[GENERATED kernel.cu]
 #include "kernel.h"
 #include <cuda_bf16.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -424,4 +423,3 @@ void launch_gqa_decode(
         k_cache.stride(0), k_cache.stride(2)
     );
 }
-[/GENERATED kernel.cu]

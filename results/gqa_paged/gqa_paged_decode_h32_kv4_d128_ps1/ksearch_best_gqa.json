@@ -1,0 +1,427 @@
+[GENERATED kernel.cu]
+#include "kernel.h"
+#include <cuda_bf16.h>
+#include <ATen/cuda/CUDAContext.h>
+
+#define HEAD_DIM 128
+#define HEAD_DIM_PAD 136
+#define BLOCK_SIZE 256
+#define WARP_SIZE 32
+#define TILE_SIZE 64
+#define STAGES 2
+
+__device__ __forceinline__ float warp_reduce_sum(float val) {
+    #pragma unroll
+    for (int mask = 16; mask > 0; mask >>= 1) {
+        val += __shfl_xor_sync(0xffffffff, val, mask);
+    }
+    return val;
+}
+
+__device__ __forceinline__ float warp_reduce_max(float val) {
+    #pragma unroll
+    for (int mask = 16; mask > 0; mask >>= 1) {
+        val = fmaxf(val, __shfl_xor_sync(0xffffffff, val, mask));
+    }
+    return val;
+}
+
+__device__ __forceinline__ void cp_async_16(void* smem, const void* global) {
+    uint32_t smem_addr = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 16;" :: "r"(smem_addr), "l"(global));
+}
+
+__device__ __forceinline__ void cp_async_commit() {
+    asm volatile("cp.async.commit_group;");
+}
+
+__device__ __forceinline__ void cp_async_wait_group(int n) {
+    if (n == 0) asm volatile("cp.async.wait_group 0;");
+    else if (n == 1) asm volatile("cp.async.wait_group 1;");
+    else if (n == 2) asm volatile("cp.async.wait_group 2;");
+}
+
+__global__ void __launch_bounds__(BLOCK_SIZE) gqa_decode_kernel(
+    __nv_bfloat16* __restrict__ output,
+    float* __restrict__ lse,
+    float* __restrict__ tmp_buffer,
+    float* __restrict__ tmp_stats,
+    int* __restrict__ semaphores,
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k_cache,
+    const __nv_bfloat16* __restrict__ v_cache,
+    const int* __restrict__ kv_indptr,
+    const int* __restrict__ kv_indices,
+    float sm_scale,
+    int split_k,
+    long long stride_q_batch,
+    long long stride_q_head,
+    long long stride_k_page,
+    long long stride_k_head
+) {
+    // Grid: (num_kv_heads, split_k, batch_size)
+    // Block: 256 threads (8 warps).
+    // Each block processes 1 KV head (which maps to 8 Q heads).
+    // Each warp processes 1 Q head.
+
+    int kv_head_idx = blockIdx.x;
+    int split_idx = blockIdx.y;
+    int batch_idx = blockIdx.z;
+
+    int tid = threadIdx.x;
+    int warp_id = tid / WARP_SIZE;
+    int lane_id = tid % WARP_SIZE;
+
+    // Map warp to Q head global index
+    int q_head_global = kv_head_idx * 8 + warp_id;
+
+    extern __shared__ char smem[];
+    // Memory Layout:
+    // Q: [8 heads, 128 elements] = 8 * 256 bytes = 2 KB
+    // K: [STAGES, TILE_SIZE, HEAD_DIM_PAD]
+    // V: [STAGES, TILE_SIZE, HEAD_DIM_PAD]
+    // P: [8 heads, TILE_SIZE] (Storage for Softmax probs)
+
+    __nv_bfloat16* q_smem = reinterpret_cast<__nv_bfloat16*>(smem);
+    __nv_bfloat16* k_smem = q_smem + 8 * 128;
+    __nv_bfloat16* v_smem = k_smem + STAGES * TILE_SIZE * HEAD_DIM_PAD;
+    float* p_smem = reinterpret_cast<float*>(v_smem + STAGES * TILE_SIZE * HEAD_DIM_PAD);
+
+    // 1. Load Q into Shared Memory
+    // Each thread loads 4 elements (256 threads * 4 = 1024 elements = 8 * 128)
+    int q_offset_base = batch_idx * stride_q_batch + kv_head_idx * 8 * stride_q_head;
+
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        int idx = tid * 4 + i; // 0..1023
+        int h = idx / 128; // 0..7
+        int d = idx % 128; // 0..127
+        if (h < 8) { // Safety, though block is fixed size
+             q_smem[idx] = q[q_offset_base + h * stride_q_head + d];
+        }
+    }
+    __syncthreads();
+
+    // 2. Setup Loop
+    int seq_start = kv_indptr[batch_idx];
+    int seq_end = kv_indptr[batch_idx + 1];
+    int total_len = seq_end - seq_start;
+
+    int chunk_len = (total_len + split_k - 1) / split_k;
+    int my_start = split_idx * chunk_len;
+    int my_end = min(my_start + chunk_len, total_len);
+    int my_len = max(0, my_end - my_start);
+
+    // Accumulators
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float m_curr = -INFINITY;
+    float l_curr = 0.0f;
+
+    if (my_len > 0) {
+        int num_tiles = (my_len + TILE_SIZE - 1) / TILE_SIZE;
+        int stage = 0;
+
+        auto load_stage = [&](int tile_idx, int s_idx) {
+            int token_base = my_start + tile_idx * TILE_SIZE;
+            int valid_tokens = min(TILE_SIZE, my_end - token_base);
+
+            // Each token needs 128 elements = 16 chunks of 8 bf16.
+            // 256 threads.
+            #pragma unroll
+            for (int k = 0; k < 4; ++k) {
+                int chunk_idx = tid + k * BLOCK_SIZE;
+                // There are TILE_SIZE * 16 chunks total.
+                // For TILE=64, total 1024 chunks.
+                // 256 * 4 = 1024. Exact match.
+
+                if (chunk_idx < valid_tokens * 16) {
+                    int t = chunk_idx / 16;
+                    int c = chunk_idx % 16;
+
+                    // We need kv_indices[seq_start + token_base + t]
+                    // The 16 chunks for token t are handled by contiguous threads (mostly).
+                    // Actually, chunks are distributed:
+                    // Thread 0 handles chunk 0 (t=0, c=0)
+                    // Thread 1 handles chunk 1 (t=0, c=1) ...
+                    // So first 16 threads handle token 0.
+                    // This creates a broadcast load for kv_indices, which is good.
+
+                    int page_id = kv_indices[seq_start + token_base + t];
+                    long long offset = (long long)page_id * stride_k_page + (long long)kv_head_idx * stride_k_head + c * 8;
+
+                    __nv_bfloat16* k_dst = k_smem + s_idx * TILE_SIZE * HEAD_DIM_PAD + t * HEAD_DIM_PAD + c * 8;
+                    __nv_bfloat16* v_dst = v_smem + s_idx * TILE_SIZE * HEAD_DIM_PAD + t * HEAD_DIM_PAD + c * 8;
+
+                    cp_async_16(k_dst, k_cache + offset);
+                    cp_async_16(v_dst, v_cache + offset);
+                }
+            }
+            cp_async_commit();
+        };
+
+        // Prologue
+        load_stage(0, 0);
+
+        for (int tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+            int next_tile = tile_idx + 1;
+            if (next_tile < num_tiles) load_stage(next_tile, stage ^ 1);
+
+            cp_async_wait_group(next_tile < num_tiles ? 1 : 0);
+            __syncthreads();
+
+            int token_base = my_start + tile_idx * TILE_SIZE;
+            int valid_tokens = min(TILE_SIZE, my_end - token_base);
+
+            __nv_bfloat16* k_curr = k_smem + stage * TILE_SIZE * HEAD_DIM_PAD;
+            __nv_bfloat16* q_curr = q_smem + warp_id * 128;
+
+            // Each warp processes 1 Q head.
+            // Loop over tokens in the tile.
+            // Using "Thread-per-token" strategy:
+            // Each thread computes dot product for 2 tokens (64 tokens / 32 threads = 2).
+
+            float scores[2] = {-INFINITY, -INFINITY};
+
+            #pragma unroll
+            for (int k = 0; k < 2; ++k) {
+                int t = lane_id + k * 32;
+                if (t < valid_tokens) {
+                    float s = 0.0f;
+                    __nv_bfloat16* k_ptr = k_curr + t * HEAD_DIM_PAD;
+
+                    // Unroll the dot product
+                    #pragma unroll
+                    for (int i = 0; i < 16; ++i) {
+                         // Load 8 elements
+                         int4 k_vec = *reinterpret_cast<int4*>(k_ptr + i * 8);
+                         int4 q_vec = *reinterpret_cast<int4*>(q_curr + i * 8);
+
+                         __nv_bfloat162* k2 = reinterpret_cast<__nv_bfloat162*>(&k_vec);
+                         __nv_bfloat162* q2 = reinterpret_cast<__nv_bfloat162*>(&q_vec);
+
+                         #pragma unroll
+                         for (int j = 0; j < 4; ++j) {
+                             float2 kv = __bfloat1622float2(k2[j]);
+                             float2 qv = __bfloat1622float2(q2[j]);
+                             s += qv.x * kv.x + qv.y * kv.y;
+                         }
+                    }
+                    scores[k] = s * sm_scale;
+                }
+            }
+
+            // Online Softmax Update
+            // 1. Reduce Max
+            float m_tile = fmaxf(scores[0], scores[1]);
+            m_tile = warp_reduce_max(m_tile);
+
+            float alpha = 1.0f;
+            float beta = 0.0f;
+
+            if (m_tile > -INFINITY) {
+                float m_prev = m_curr;
+                m_curr = fmaxf(m_curr, m_tile);
+                alpha = expf(m_prev - m_curr);
+                beta = expf(m_tile - m_curr);
+            }
+
+            l_curr *= alpha;
+            #pragma unroll
+            for(int i=0; i<4; ++i) acc[i] *= alpha;
+
+            // 2. Compute Probabilities and Reduce Sum
+            float l_tile = 0.0f;
+            float* p_ptr = p_smem + warp_id * TILE_SIZE;
+
+            #pragma unroll
+            for (int k = 0; k < 2; ++k) {
+                int t = lane_id + k * 32;
+                float p = 0.0f;
+                if (t < valid_tokens && scores[k] > -INFINITY) {
+                    p = expf(scores[k] - m_tile) * beta;
+                }
+                if (t < TILE_SIZE) p_ptr[t] = p; // Store for V pass
+                l_tile += p;
+            }
+            l_tile = warp_reduce_sum(l_tile);
+            l_curr += l_tile;
+
+            // 3. Compute Output: O += P * V
+            // Each thread computes 4 dimensions of the output (128 / 32 = 4)
+            __nv_bfloat16* v_curr = v_smem + stage * TILE_SIZE * HEAD_DIM_PAD;
+            int d_start = lane_id * 4;
+
+            // Iterate over all tokens in the tile to accumulate weighted V
+            #pragma unroll 4
+            for (int t = 0; t < valid_tokens; ++t) {
+                float p_val = p_ptr[t];
+
+                // Load 4 elements of V for this token at d_start
+                // V is stored as BF16.
+                // We load 4 BF16s (64 bits = int2).
+                __nv_bfloat16* v_ptr = v_curr + t * HEAD_DIM_PAD + d_start;
+                int2 v_val = *reinterpret_cast<int2*>(v_ptr);
+
+                __nv_bfloat162 v01 = *reinterpret_cast<__nv_bfloat162*>(&v_val.x);
+                __nv_bfloat162 v23 = *reinterpret_cast<__nv_bfloat162*>(&v_val.y);
+
+                float2 f01 = __bfloat1622float2(v01);
+                float2 f23 = __bfloat1622float2(v23);
+
+                acc[0] += p_val * f01.x;
+                acc[1] += p_val * f01.y;
+                acc[2] += p_val * f23.x;
+                acc[3] += p_val * f23.y;
+            }
+
+            __syncthreads();
+            stage ^= 1;
+        }
+    }
+
+    // Write Output
+    if (split_k > 1) {
+        // Offset in temp buffers
+        // Stats: [batch, 32, split_k, 2]
+        long long base_stats_idx = (long long)batch_idx * 32 * split_k + q_head_global * split_k;
+        long long stats_idx = base_stats_idx + split_idx;
+
+        if (lane_id == 0) {
+            tmp_stats[stats_idx * 2 + 0] = m_curr;
+            tmp_stats[stats_idx * 2 + 1] = l_curr;
+        }
+
+        // Buffer: [batch, 32, split_k, 128]
+        long long out_idx = stats_idx * HEAD_DIM;
+        #pragma unroll
+        for(int i=0; i<4; ++i) {
+            tmp_buffer[out_idx + lane_id * 4 + i] = acc[i];
+        }
+
+        __threadfence(); // Ensure global writes are visible
+
+        __shared__ bool is_last;
+        if (tid == 0) {
+            // Semaphore: [batch, 4] (one per KV head)
+            // But we have 8 Q heads per KV head sharing the reduction?
+            // NO. The split_k reduction is per Q head?
+            // The split_k splits the SEQUENCE. All Q heads in the KV group process the SAME split of the sequence.
+            // So they all finish at the same time for a given split.
+            // We need to know when ALL splits are done for THIS KV head group.
+            // We use one semaphore per KV head per batch.
+            int old = atomicAdd(&semaphores[batch_idx * 4 + kv_head_idx], 1);
+            is_last = (old == (split_k - 1));
+        }
+        __syncthreads();
+
+        if (is_last) {
+            // This block performs the final reduction for all 8 Q heads in this KV group
+            // Each warp handles its assigned Q head (q_head_global)
+
+            float m_final = -INFINITY;
+            float l_final = 0.0f;
+            float acc_final[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+            long long base_out = base_stats_idx * HEAD_DIM;
+
+            // Simple sequential scan (per thread)
+            // Each thread handles 4 dimensions.
+            for (int s = 0; s < split_k; ++s) {
+                float m_s = tmp_stats[(base_stats_idx + s) * 2 + 0];
+                float l_s = tmp_stats[(base_stats_idx + s) * 2 + 1];
+
+                if (m_s > -INFINITY) {
+                    float m_new = fmaxf(m_final, m_s);
+                    float a = expf(m_final - m_new);
+                    float b = expf(m_s - m_new);
+                    l_final = l_final * a + l_s * b;
+                    m_final = m_new;
+
+                    #pragma unroll
+                    for(int i=0; i<4; ++i) {
+                        float v = tmp_buffer[base_out + s * HEAD_DIM + lane_id * 4 + i];
+                        acc_final[i] = acc_final[i] * a + v * b;
+                    }
+                }
+            }
+
+            float inv_l = (l_final > 0.0f) ? (1.0f / l_final) : 0.0f;
+            __nv_bfloat16 out_bf[4];
+            #pragma unroll
+            for(int i=0; i<4; ++i) out_bf[i] = __float2bfloat16(acc_final[i] * inv_l);
+
+            long long final_offset = (long long)batch_idx * stride_q_batch + q_head_global * stride_q_head;
+            *reinterpret_cast<int2*>(output + final_offset + lane_id * 4) = *reinterpret_cast<int2*>(out_bf);
+
+            if (lane_id == 0) {
+                lse[batch_idx * 32 + q_head_global] = (l_final > 0.0f) ? (m_final + logf(l_final)) / logf(2.0f) : -INFINITY;
+            }
+        }
+    } else {
+        // No split_k, direct write
+        float inv_l = (l_curr > 0.0f) ? (1.0f / l_curr) : 0.0f;
+        __nv_bfloat16 out_bf[4];
+        #pragma unroll
+        for(int i=0; i<4; ++i) out_bf[i] = __float2bfloat16(acc[i] * inv_l);
+
+        long long final_offset = (long long)batch_idx * stride_q_batch + q_head_global * stride_q_head;
+        *reinterpret_cast<int2*>(output + final_offset + lane_id * 4) = *reinterpret_cast<int2*>(out_bf);
+
+        if (lane_id == 0) {
+            lse[batch_idx * 32 + q_head_global] = (l_curr > 0.0f) ? (m_curr + logf(l_curr)) / logf(2.0f) : -INFINITY;
+        }
+    }
+}
+
+void launch_gqa_decode(
+    torch::Tensor& output,
+    torch::Tensor& lse,
+    const torch::Tensor& q,
+    const torch::Tensor& k_cache,
+    const torch::Tensor& v_cache,
+    const torch::Tensor& kv_indptr,
+    const torch::Tensor& kv_indices,
+    float sm_scale,
+    torch::Tensor& tmp_buffer,
+    torch::Tensor& tmp_stats,
+    torch::Tensor& semaphores,
+    int split_k
+) {
+    int batch_size = q.size(0);
+    int num_kv_heads = k_cache.size(2);
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    if (split_k > 1) {
+        cudaMemsetAsync(semaphores.data_ptr(), 0, semaphores.nbytes(), stream);
+    }
+
+    // Calculate SMEM size
+    // Q: 8 * 128 * 2 = 2048
+    // KV: 2 * 64 * 136 * 2 * 2 = 69632
+    // P: 8 * 64 * 4 = 2048
+    // Total = ~74KB. Fits easily (3 blocks/SM on H100).
+    int smem_size = 76 * 1024;
+    cudaFuncSetAttribute(gqa_decode_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+
+    dim3 grid(num_kv_heads, split_k, batch_size);
+    dim3 block(BLOCK_SIZE);
+
+    gqa_decode_kernel<<<grid, block, smem_size, stream>>>(
+        (__nv_bfloat16*)output.data_ptr(),
+        lse.data_ptr<float>(),
+        split_k > 1 ? tmp_buffer.data_ptr<float>() : nullptr,
+        split_k > 1 ? tmp_stats.data_ptr<float>() : nullptr,
+        split_k > 1 ? semaphores.data_ptr<int>() : nullptr,
+        (const __nv_bfloat16*)q.data_ptr(),
+        (const __nv_bfloat16*)k_cache.data_ptr(),
+        (const __nv_bfloat16*)v_cache.data_ptr(),
+        kv_indptr.data_ptr<int>(),
+        kv_indices.data_ptr<int>(),
+        sm_scale,
+        split_k,
+        q.stride(0), q.stride(1),
+        k_cache.stride(0), k_cache.stride(2)
+    );
+}
+[/GENERATED kernel.cu]

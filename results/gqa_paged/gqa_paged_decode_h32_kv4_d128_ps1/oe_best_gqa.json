@@ -1,0 +1,397 @@
+An optimized CUDA implementation for the GQA Paged Decode operation on H100 GPUs using Tensor Cores (MMA), asynchronous memory copies, and shared memory padding to minimize bank conflicts.
+
+<header_file name="kernel.h">
+#pragma once
+#include <torch/extension.h>
+#include <cuda_runtime.h>
+
+void run_gqa_decode(
+    torch::Tensor q,
+    torch::Tensor k_cache,
+    torch::Tensor v_cache,
+    torch::Tensor kv_indptr,
+    torch::Tensor kv_indices,
+    float sm_scale,
+    torch::Tensor output,
+    torch::Tensor lse
+);
+</header_file>
+
+<cuda_file name="kernel.cu">
+#include "kernel.h"
+#include <mma.h>
+#include <cuda_bf16.h>
+
+using namespace nvcuda;
+
+#define HEAD_DIM 128
+#define SMEM_HEAD_DIM 136 // Padded to avoid bank conflicts (128 + 8)
+#define WARPS_PER_BLOCK 4
+#define Q_HEADS_PER_KV 8
+#define CHUNK_SIZE 16
+
+__device__ __forceinline__ __nv_bfloat16 float2bfloat16(float f) {
+    return __float2bfloat16(f);
+}
+
+__device__ __forceinline__ void cp_async_ca(void* smem_ptr, const void* glob_ptr) {
+    uint32_t smem_int = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 16;" :: "r"(smem_int), "l"(glob_ptr));
+}
+
+__device__ __forceinline__ void cp_async_commit() {
+    asm volatile("cp.async.commit_group;");
+}
+
+__device__ __forceinline__ void cp_async_wait_group_0() {
+    asm volatile("cp.async.wait_group 0;");
+}
+
+__device__ __forceinline__ void cp_async_wait_group_1() {
+    asm volatile("cp.async.wait_group 1;");
+}
+
+__global__ void __launch_bounds__(128) gqa_decode_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k_cache,
+    const __nv_bfloat16* __restrict__ v_cache,
+    const int* __restrict__ kv_indptr,
+    const int* __restrict__ kv_indices,
+    float sm_scale,
+    __nv_bfloat16* __restrict__ output,
+    float* __restrict__ lse,
+    int stride_q_batch,
+    int stride_q_head,
+    int stride_kv_page,
+    int stride_kv_head
+) {
+    int batch_idx = blockIdx.x;
+    int kv_head_idx = blockIdx.y;
+    
+    int tid = threadIdx.x;
+    int warp_idx = tid / 32;
+    int lane_idx = tid % 32;
+
+    extern __shared__ char smem[];
+    
+    // Shared Memory Layout with Padding
+    // Q: [16, 136] bf16
+    __nv_bfloat16* s_q = (__nv_bfloat16*)smem;
+    // K: [WARPS][2][16][136] bf16
+    __nv_bfloat16* s_k = s_q + 16 * SMEM_HEAD_DIM;
+    // V: [WARPS][2][16][136] bf16
+    __nv_bfloat16* s_v = s_k + WARPS_PER_BLOCK * 2 * CHUNK_SIZE * SMEM_HEAD_DIM;
+    // O_accum: [WARPS][8][128] float
+    float* s_o = (float*)(s_v + WARPS_PER_BLOCK * 2 * CHUNK_SIZE * SMEM_HEAD_DIM);
+    // Temp: [WARPS][16][16] float
+    float* s_temp = s_o + WARPS_PER_BLOCK * 8 * 128;
+    // Stats: [WARPS][16] float
+    float* s_stats = s_temp + WARPS_PER_BLOCK * 16 * 16;
+    // Page IDs: [WARPS][16] int
+    int* s_page_ids = (int*)(s_stats + WARPS_PER_BLOCK * 16);
+    
+    // Initialize O accumulator and Stats
+    for (int i = tid; i < WARPS_PER_BLOCK * 8 * 128; i += blockDim.x) {
+        s_o[i] = 0.0f;
+    }
+    if (tid < WARPS_PER_BLOCK * 16) {
+        s_stats[tid] = (tid % 2 == 0) ? -INFINITY : 0.0f;
+    }
+
+    // Load Q (8 heads)
+    int q_base = batch_idx * stride_q_batch + kv_head_idx * Q_HEADS_PER_KV * stride_q_head;
+    int q_offset_linear = tid * 8;
+    if (q_offset_linear < 8 * 128) {
+        int r = q_offset_linear / 128;
+        int c = q_offset_linear % 128;
+        const __nv_bfloat16* src = q + q_base + r * stride_q_head + c;
+        __nv_bfloat16* dst = s_q + r * SMEM_HEAD_DIM + c;
+        cp_async_ca(dst, src);
+    }
+    // Zero pad Q rows 8..15
+    for (int i = tid; i < 8 * SMEM_HEAD_DIM; i += blockDim.x) {
+        s_q[(8 * SMEM_HEAD_DIM) + i] = float2bfloat16(0.0f);
+    }
+    
+    cp_async_commit();
+    cp_async_wait_group_0();
+    __syncthreads();
+
+    // Load Q fragments
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> frag_q[8];
+    for (int k = 0; k < 8; ++k) {
+        wmma::load_matrix_sync(frag_q[k], s_q + k * 16, SMEM_HEAD_DIM);
+    }
+
+    int start_token = kv_indptr[batch_idx];
+    int num_tokens = kv_indptr[batch_idx + 1] - start_token;
+    
+    __nv_bfloat16* my_k_base = s_k + warp_idx * 2 * CHUNK_SIZE * SMEM_HEAD_DIM;
+    __nv_bfloat16* my_v_base = s_v + warp_idx * 2 * CHUNK_SIZE * SMEM_HEAD_DIM;
+    float* my_o = s_o + warp_idx * 8 * 128;
+    float* my_temp = s_temp + warp_idx * 16 * 16;
+    float* my_stats = s_stats + warp_idx * 16;
+    int* my_page_ids = s_page_ids + warp_idx * 16;
+
+    int pipe_stage = 0;
+    
+    auto load_chunk = [&](int token_base, int stage) {
+        if (token_base >= num_tokens) return;
+        
+        int valid = min(CHUNK_SIZE, num_tokens - token_base);
+        
+        // Preload page IDs to avoid global latency in inner loop
+        if (lane_idx < 16) {
+            if (lane_idx < valid)
+                my_page_ids[lane_idx] = kv_indices[start_token + token_base + lane_idx];
+            else
+                my_page_ids[lane_idx] = 0;
+        }
+        __syncwarp();
+
+        __nv_bfloat16* dst_k = my_k_base + stage * CHUNK_SIZE * SMEM_HEAD_DIM;
+        __nv_bfloat16* dst_v = my_v_base + stage * CHUNK_SIZE * SMEM_HEAD_DIM;
+        
+        for (int i = 0; i < 8; ++i) {
+            int idx = lane_idx + i * 32; 
+            int t = idx / 16; 
+            int c = idx % 16; 
+            
+            if (t < valid) {
+                int page_id = my_page_ids[t];
+                long long offset = (long long)page_id * stride_kv_page + kv_head_idx * stride_kv_head + c * 8;
+                cp_async_ca(dst_k + t * SMEM_HEAD_DIM + c * 8, k_cache + offset);
+                cp_async_ca(dst_v + t * SMEM_HEAD_DIM + c * 8, v_cache + offset);
+            } else {
+                int4 zero = {0,0,0,0};
+                *reinterpret_cast<int4*>(dst_k + t * SMEM_HEAD_DIM + c * 8) = zero;
+                *reinterpret_cast<int4*>(dst_v + t * SMEM_HEAD_DIM + c * 8) = zero;
+            }
+        }
+    };
+
+    int start_step = warp_idx * CHUNK_SIZE;
+    int step_stride = WARPS_PER_BLOCK * CHUNK_SIZE;
+    
+    load_chunk(start_step, 0);
+    cp_async_commit();
+    
+    for (int token_base = start_step; token_base < num_tokens; token_base += step_stride) {
+        int next_token = token_base + step_stride;
+        if (next_token < num_tokens) {
+            load_chunk(next_token, 1 - pipe_stage);
+        }
+        cp_async_commit();
+        cp_async_wait_group_1();
+        __syncwarp();
+        
+        int valid = min(CHUNK_SIZE, num_tokens - token_base);
+        
+        __nv_bfloat16* curr_k = my_k_base + pipe_stage * CHUNK_SIZE * SMEM_HEAD_DIM;
+        __nv_bfloat16* curr_v = my_v_base + pipe_stage * CHUNK_SIZE * SMEM_HEAD_DIM;
+        
+        wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc_s;
+        wmma::fill_fragment(acc_s, 0.0f);
+        
+        for (int k = 0; k < 8; ++k) {
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> frag_k;
+            wmma::load_matrix_sync(frag_k, curr_k + k * 16, SMEM_HEAD_DIM);
+            wmma::mma_sync(acc_s, frag_q[k], frag_k, acc_s);
+        }
+        
+        wmma::store_matrix_sync(my_temp, acc_s, 16, wmma::mem_row_major);
+        __syncwarp();
+        
+        int h = lane_idx / 4; 
+        int t_idx = lane_idx % 4; 
+        
+        if (h < 8) {
+            float local_max = -INFINITY;
+            for (int t = t_idx; t < valid; t += 4) 
+                local_max = fmaxf(local_max, my_temp[h * 16 + t] * sm_scale);
+            
+            local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, 2));
+            local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, 1));
+            
+            float old_max = my_stats[h * 2 + 0];
+            float new_max = fmaxf(old_max, local_max);
+            float alpha = (old_max == -INFINITY) ? 0.0f : __expf(old_max - new_max);
+            
+            if (t_idx == 0) {
+                 my_stats[h * 2 + 0] = new_max;
+                 my_temp[(8 + h) * 16] = alpha;
+            }
+        }
+        __syncwarp();
+        
+        // Scale O
+        for (int i = lane_idx; i < 8 * 128; i += 32) {
+            int head = i / 128;
+            float alpha = my_temp[(8 + head) * 16];
+            my_o[i] *= alpha;
+        }
+        __syncwarp();
+        
+        if (h < 8) {
+            float new_max = my_stats[h * 2 + 0];
+            float local_sum = 0.0f;
+            for (int t = t_idx; t < 16; t += 4) {
+                if (t < valid) {
+                    float val = __expf(my_temp[h * 16 + t] * sm_scale - new_max);
+                    my_temp[h * 16 + t] = val;
+                    local_sum += val;
+                } else {
+                    my_temp[h * 16 + t] = 0.0f;
+                }
+            }
+            local_sum += __shfl_xor_sync(0xffffffff, local_sum, 2);
+            local_sum += __shfl_xor_sync(0xffffffff, local_sum, 1);
+            
+            if (t_idx == 0) {
+                float alpha = my_temp[(8 + h) * 16];
+                my_stats[h * 2 + 1] = my_stats[h * 2 + 1] * alpha + local_sum;
+            }
+        }
+        __syncwarp();
+        
+        for (int i = lane_idx; i < 8 * 16; i += 32) {
+             curr_k[i] = float2bfloat16(my_temp[i]);
+        }
+        for (int i = 8 * 16 + lane_idx; i < 16 * 16; i += 32) {
+             curr_k[i] = float2bfloat16(0.0f);
+        }
+        __syncwarp();
+        
+        wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> frag_p;
+        wmma::load_matrix_sync(frag_p, curr_k, 16); 
+        
+        for (int k = 0; k < 8; ++k) {
+             wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::row_major> frag_v;
+             wmma::load_matrix_sync(frag_v, curr_v + k * 16, SMEM_HEAD_DIM);
+             
+             wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc_pv;
+             wmma::fill_fragment(acc_pv, 0.0f);
+             wmma::mma_sync(acc_pv, frag_p, frag_v, acc_pv);
+             
+             wmma::store_matrix_sync(my_temp, acc_pv, 16, wmma::mem_row_major);
+             __syncwarp();
+             
+             for (int i = lane_idx; i < 8 * 16; i += 32) {
+                 int r = i / 16;
+                 int c = i % 16;
+                 my_o[r * 128 + k * 16 + c] += my_temp[i];
+             }
+             __syncwarp();
+        }
+        
+        pipe_stage = 1 - pipe_stage;
+    }
+    
+    __syncthreads();
+    
+    if (warp_idx == 0) {
+        for (int i = lane_idx; i < 8 * 128; i += 32) {
+            int h = i / 128;
+            int d = i % 128;
+            
+            float g_max = -INFINITY;
+            for (int w = 0; w < WARPS_PER_BLOCK; ++w) {
+                g_max = fmaxf(g_max, s_stats[w * 16 + h * 2 + 0]);
+            }
+            
+            float g_sum = 0.0f;
+            float g_out = 0.0f;
+            
+            for (int w = 0; w < WARPS_PER_BLOCK; ++w) {
+                float m = s_stats[w * 16 + h * 2 + 0];
+                float s = s_stats[w * 16 + h * 2 + 1];
+                float factor = (m == -INFINITY) ? 0.0f : __expf(m - g_max);
+                
+                g_sum += s * factor;
+                g_out += s_o[w * 8 * 128 + h * 128 + d] * factor;
+            }
+            
+            int q_idx = kv_head_idx * Q_HEADS_PER_KV + h;
+            if (g_sum > 0.0f) {
+                output[batch_idx * 32 * 128 + q_idx * 128 + d] = float2bfloat16(g_out / g_sum);
+            } else {
+                output[batch_idx * 32 * 128 + q_idx * 128 + d] = float2bfloat16(0.0f);
+            }
+            
+            if (d == 0) {
+                float lse_val = (g_sum > 0.0f) ? (g_max + __logf(g_sum)) * 1.44269504089f : -INFINITY;
+                lse[batch_idx * 32 + q_idx] = lse_val;
+            }
+        }
+    }
+}
+
+void run_gqa_decode(
+    torch::Tensor q,
+    torch::Tensor k_cache,
+    torch::Tensor v_cache,
+    torch::Tensor kv_indptr,
+    torch::Tensor kv_indices,
+    float sm_scale,
+    torch::Tensor output,
+    torch::Tensor lse
+) {
+    int batch_size = q.size(0);
+    int num_kv_heads = k_cache.size(2);
+    
+    int stride_q_batch = q.stride(0);
+    int stride_q_head = q.stride(1);
+    int stride_kv_page = k_cache.stride(0);
+    int stride_kv_head = k_cache.stride(2);
+    
+    int smem_size = 100 * 1024;
+    cudaFuncSetAttribute(gqa_decode_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+    
+    dim3 grid(batch_size, num_kv_heads);
+    dim3 block(128);
+    
+    gqa_decode_kernel<<<grid, block, smem_size>>>(
+        (const __nv_bfloat16*)q.data_ptr<at::BFloat16>(),
+        (const __nv_bfloat16*)k_cache.data_ptr<at::BFloat16>(),
+        (const __nv_bfloat16*)v_cache.data_ptr<at::BFloat16>(),
+        kv_indptr.data_ptr<int>(),
+        kv_indices.data_ptr<int>(),
+        sm_scale,
+        (__nv_bfloat16*)output.data_ptr<at::BFloat16>(),
+        lse.data_ptr<float>(),
+        stride_q_batch, stride_q_head, stride_kv_page, stride_kv_head
+    );
+}
+</cuda_file>
+
+<cpp_file name="main.cpp">
+#include <torch/extension.h>
+#include "kernel.h"
+
+std::vector<torch::Tensor> run(
+    torch::Tensor q,
+    torch::Tensor k_cache,
+    torch::Tensor v_cache,
+    torch::Tensor kv_indptr,
+    torch::Tensor kv_indices,
+    double sm_scale
+) {
+    int batch_size = q.size(0);
+    int num_qo_heads = q.size(1);
+    int head_dim = q.size(2);
+    
+    auto options = torch::TensorOptions().dtype(torch::kBFloat16).device(q.device());
+    torch::Tensor output = torch::empty({batch_size, num_qo_heads, head_dim}, options);
+    
+    auto options_lse = torch::TensorOptions().dtype(torch::kFloat32).device(q.device());
+    torch::Tensor lse = torch::empty({batch_size, num_qo_heads}, options_lse);
+
+    run_gqa_decode(q, k_cache, v_cache, kv_indptr, kv_indices, (float)sm_scale, output, lse);
+
+    return {output, lse};
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("run", &run, "GQA Paged Decode Optimized");
+}
+</cpp_file>

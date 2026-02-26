@@ -185,12 +185,12 @@ K-Search achieves state-of-the-art performance on the [GPUMode TriMul](https://w
 
 Geometric mean latency across 7 benchmarks (3 runs, H100, PyTorch 2.8.0+cu128, Triton 3.4.0):
 
-| Submission ID | Leaderboard Score | Avg Geo Mean | Std |
+| Submission ID | Leaderboard Score | Local Score | Std |
 |---------------|-------------------|-------------|-----|
 | **K-Search (ours)** | — | **1.028 ms** | 0.0007 ms |
-| shiyegao | 1074 | 1.067 ms | 0.0013 ms |
-| TTT | 1161 | 1.222 ms | 0.0018 ms |
-| zeyushen | 1140 | 1.240 ms | 0.0057 ms |
+| shiyegao | 1.074 ms | 1.067 ms | 0.0013 ms |
+| TTT | 1.161 ms | 1.222 ms | 0.0018 ms |
+| zeyushen | 1.140 ms | 1.240 ms | 0.0057 ms |
 
 ### Generated Kernels
 

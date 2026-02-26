@@ -204,4 +204,15 @@ We provide all generated kernels (K-Search, OpenEvolve, and ShinkaEvolve) under 
 | MoE FP8 | `results/moe/moe_fp8_block_scale_ds_routing_topk8_ng8_kg4_e32_h7168_i2048/` |
 | GPUMode TriMul | `results/gpumode_trimul/` |
 
+## Citation
 
+If you find K-Search useful in your research, please cite our paper:
+
+```bibtex
+@article{cao2026k,
+  title={K-Search: LLM Kernel Generation via Co-Evolving Intrinsic World Model},
+  author={Cao, Shiyi and Mao, Ziming and Gonzalez, Joseph E and Stoica, Ion},
+  journal={arXiv preprint arXiv:2602.19128},
+  year={2026}
+}
+```

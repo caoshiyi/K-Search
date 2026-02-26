@@ -1,5 +1,3 @@
-// https://wandb.ai/sky-posttraining-uc-berkeley/Capybara/artifacts/generated-code/mla_paged_decode_h16_ckv512_kpe64_ps1_r117_gemini-3-pro-preview_mla_paged_decode_h16_ckv512_kpe64_ps1_cuda_optimized_r117_code/v14/files/clean
-
 #include "kernel.h"
 #include <cuda_bf16.h>
 #include <cuda_pipeline.h>

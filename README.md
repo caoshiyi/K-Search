@@ -153,14 +153,14 @@ Key variables you can customize (see the script header for the full list):
 | `--continue-from-solution` | Resume from an existing solution | — |
 | `--continue-from-world-model` | Resume WM state (`auto` or path to JSON) | — |
 | `--save-solutions` | Persist generated solutions to disk | off |
-| `--artifacts-dir` | Base directory for all k-search artifacts | `.ksearch` |
+| `--artifacts-dir` | Base directory for all K-Search artifacts | `.ksearch` |
 | `--wandb` | Enable Weights & Biases logging | off |
 | `--wandb-project` | W&B project name | `flashinfer-bench` |
 | `--run-name` | W&B run name | auto-generated |
 
 ## Baselines
 
-k-search includes adapter configurations for comparison with existing evolutionary kernel optimization systems:
+K-Search includes adapter configurations for comparison with existing evolutionary kernel optimization systems:
 
 | System | Directory | Description |
 |--------|-----------|-------------|

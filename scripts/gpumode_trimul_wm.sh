@@ -27,7 +27,7 @@
 # - WANDB: 1 to enable (default: 0)
 # - WANDB_PROJECT, RUN_NAME
 
-KSEARCH_ROOT="${KSEARCH_ROOT:-/mnt/cluster_storage/k-search}"
+KSEARCH_ROOT="${KSEARCH_ROOT:-}"
 
 # MODEL_NAME="${MODEL_NAME:-gemini-3-pro-preview}"
 # BASE_URL="${BASE_URL:-https://generativelanguage.googleapis.com/v1beta/}"
@@ -44,6 +44,7 @@ CONTINUE_FROM_SOLUTION="${CONTINUE_FROM_SOLUTION:-gpt-5.2_gpumode_trimul_triton_
 
 WM="${WM:-1}"
 WM_STAGNATION_WINDOW="${WM_STAGNATION_WINDOW:-5}"
+WORLD_MODEL_JSON="${WORLD_MODEL_JSON:-}"
 
 GPUMODE_MODE="${GPUMODE_MODE:-leaderboard}"
 GPUMODE_KEEP_TMP="${GPUMODE_KEEP_TMP:-0}"

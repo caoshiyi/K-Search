@@ -101,13 +101,28 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         self._artifacts_dir = artifacts_dir
 
         def _llm_call(prompt: str) -> str:
-            if self.model_name.startswith("gpt-5") or self.model_name.startswith("o3"):
+            if self._api_style == "anthropic":
+                anthropic_kwargs = {
+                    "model": self.model_name,
+                    "max_tokens": 16384,
+                    "messages": [{"role": "user", "content": prompt}],
+                }
+                if self.reasoning_effort == "high":
+                    anthropic_kwargs["thinking"] = {
+                        "type": "enabled",
+                        "budget_tokens": 10000,
+                    }
+                response = self.client.messages.create(**anthropic_kwargs)
+                text_blocks = [b.text for b in response.content if b.type == "text"]
+                return "\n".join(text_blocks).strip()
+            if self._api_style == "openai_responses":
                 response = self.client.responses.create(
                     model=self.model_name,
                     input=prompt,
                     reasoning={"effort": self.reasoning_effort},
                 )
                 return (response.output_text or "").strip()
+            # openai_chat — works with all OpenAI-compatible providers
             response = self.client.chat.completions.create(
                 model=self.model_name, messages=[{"role": "user", "content": prompt}]
             )

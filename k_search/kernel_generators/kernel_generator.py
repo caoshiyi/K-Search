@@ -6,6 +6,11 @@ from typing import Any, Dict, List, Optional
 import os
 
 import openai
+try:
+    import anthropic as _anthropic_mod
+except ImportError:
+    _anthropic_mod = None  # type: ignore[assignment]
+
 from .kernel_generator_prompts import (
     get_optimization_prompt_from_definition_text,
     get_prompt_from_definition_text,
@@ -33,20 +38,23 @@ class KernelGenerator:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         reasoning_effort: str = "medium",  # only used for openai reasoning models
+        api_style: str = "openai_chat",
     ):
         """
         Args:
-            model_name: Name of the model to use (e.g., "gpt-5")
+            model_name: Name of the model to use (e.g., "gpt-5", "claude-sonnet-4-6")
             language: Programming language for code generation (default: "triton")
             target_gpu: Target GPU architecture (e.g., "H100", "B200", "RTX4090", default: "H100")
             api_key: API key (if None, uses LLM_API_KEY environment variable)
             base_url: Base URL for the API (need to provide for non-openai api models)
             reasoning_effort: Reasoning effort for OpenAI reasoning models ("low", "medium", "high", default: "medium")
+            api_style: API calling convention — "anthropic", "openai_responses", or "openai_chat" (default)
         """
         self.model_name = model_name
         self.language = language
         self.target_gpu = target_gpu
         self.reasoning_effort = reasoning_effort
+        self._api_style = api_style
 
         if api_key is None:
             api_key = os.getenv("LLM_API_KEY")
@@ -55,11 +63,21 @@ class KernelGenerator:
                     "API key must be provided or set in LLM_API_KEY environment variable"
                 )
 
-        client_kwargs = {"api_key": api_key}
-        if base_url is not None:
-            client_kwargs["base_url"] = base_url
-
-        self.client = openai.OpenAI(**client_kwargs)
+        if self._api_style == "anthropic":
+            if _anthropic_mod is None:
+                raise ImportError(
+                    "The 'anthropic' package is required for api_style='anthropic'. "
+                    "Install it with: pip install anthropic"
+                )
+            anthropic_kwargs: dict[str, Any] = {"api_key": api_key}
+            if base_url is not None:
+                anthropic_kwargs["base_url"] = base_url
+            self.client = _anthropic_mod.Anthropic(**anthropic_kwargs)
+        else:
+            client_kwargs = {"api_key": api_key}
+            if base_url is not None:
+                client_kwargs["base_url"] = base_url
+            self.client = openai.OpenAI(**client_kwargs)
 
     def _get_supported_language(self) -> SupportedLanguages:
         language_map = {
@@ -153,12 +171,26 @@ class KernelGenerator:
             try:
                 effective_prompt = prompt
 
-                if self.model_name.startswith("gpt-5") or self.model_name.startswith("o3"):
+                if self._api_style == "anthropic":
+                    anthropic_kwargs: dict[str, Any] = {
+                        "model": self.model_name,
+                        "max_tokens": 16384,
+                        "messages": [{"role": "user", "content": effective_prompt}],
+                    }
+                    if self.reasoning_effort == "high":
+                        anthropic_kwargs["thinking"] = {
+                            "type": "enabled",
+                            "budget_tokens": 10000,
+                        }
+                    response = self.client.messages.create(**anthropic_kwargs)
+                    text_blocks = [b.text for b in response.content if b.type == "text"]
+                    generated_code = "\n".join(text_blocks).strip()
+                elif self._api_style == "openai_responses":
                     response = self.client.responses.create(
                         model=self.model_name, input=effective_prompt, reasoning={"effort": self.reasoning_effort}
                     )
                     generated_code = response.output_text.strip()
-                else:  # We use the completions api for OpenAI SDK compatible models
+                else:  # openai_chat — works with all OpenAI-compatible providers
                     response = self.client.chat.completions.create(
                         model=self.model_name, messages=[{"role": "user", "content": effective_prompt}]
                     )
@@ -216,8 +248,8 @@ class KernelGenerator:
 
         def_name = str(getattr(task, "name", "") or "").strip() or "__unknown__"
 
-        # Include reasoning effort in name and description for GPT-5 models
-        if self.model_name.startswith("gpt-5") or self.model_name.startswith("o3"):
+        # Include reasoning effort in name for models that use it
+        if self._api_style == "openai_responses":
             solution_name = f"{self.model_name}_{def_name}_{self.language}_optimized_r{round_num}_{self.reasoning_effort}"
             solution_description = f"{self.model_name} optimized kernel for {def_name} (round {round_num}, reasoning effort: {self.reasoning_effort})"
         else:

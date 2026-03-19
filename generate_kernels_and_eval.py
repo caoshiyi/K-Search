@@ -3,8 +3,150 @@ import os
 from datetime import datetime
 import uuid
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import json
+
+
+# ---------------------------------------------------------------------------
+# Provider registry
+# ---------------------------------------------------------------------------
+# Maps --provider names to (base_url, env_var_for_api_key, default_model).
+# base_url=None means use the SDK's default (OpenAI, Anthropic).
+# api_style controls which SDK / calling convention to use:
+#   "anthropic"         → Anthropic Messages API (anthropic SDK)
+#   "openai_responses"  → OpenAI Responses API  (openai SDK, for reasoning models)
+#   "openai_chat"       → OpenAI Chat Completions API (openai SDK, works with all compatible providers)
+PROVIDERS: Dict[str, Dict[str, Any]] = {
+    "openai": {
+        "base_url": None,
+        "api_key_env": "OPENAI_API_KEY",
+        "default_model": "gpt-5.2",
+        "api_style": "openai_responses",
+    },
+    "anthropic": {
+        "base_url": None,
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "default_model": "claude-sonnet-4-6",
+        "api_style": "anthropic",
+    },
+    "google": {
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/",
+        "api_key_env": "GOOGLE_API_KEY",
+        "default_model": "gemini-3-pro-preview",
+        "api_style": "openai_chat",
+    },
+    "xai": {
+        "base_url": "https://api.x.ai/v1",
+        "api_key_env": "XAI_API_KEY",
+        "default_model": "grok-3",
+        "api_style": "openai_chat",
+    },
+    "deepseek": {
+        "base_url": "https://api.deepseek.com",
+        "api_key_env": "DEEPSEEK_API_KEY",
+        "default_model": "deepseek-chat",
+        "api_style": "openai_chat",
+    },
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api/v1",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "default_model": "anthropic/claude-sonnet-4",
+        "api_style": "openai_chat",
+    },
+    "dashscope": {
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "api_key_env": "DASHSCOPE_API_KEY",
+        "default_model": "qwen-max",
+        "api_style": "openai_chat",
+    },
+    "moonshot": {
+        "base_url": "https://api.moonshot.cn/v1",
+        "api_key_env": "MOONSHOT_API_KEY",
+        "default_model": "moonshot-v1-128k",
+        "api_style": "openai_chat",
+    },
+}
+
+VALID_API_STYLES = {"anthropic", "openai_responses", "openai_chat"}
+
+
+def _load_env_file(path: str = ".env.local") -> None:
+    """Load key=value pairs from a .env file into os.environ (does not override existing vars)."""
+    env_path = Path(path)
+    if not env_path.is_file():
+        return
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def resolve_provider(
+    *,
+    provider: Optional[str],
+    model_name: Optional[str],
+    api_key: Optional[str],
+    base_url: Optional[str],
+    api_style: Optional[str],
+) -> Tuple[str, str, Optional[str], str]:
+    """Resolve (model_name, api_key, base_url, api_style) from provider + explicit overrides.
+
+    Priority: explicit flags > provider defaults > model-name inference > env fallback.
+    """
+    resolved_api_style = api_style  # may be None; resolved below
+
+    if provider:
+        p = provider.lower()
+        if p not in PROVIDERS:
+            available = ", ".join(sorted(PROVIDERS.keys()))
+            raise ValueError(f"Unknown provider '{provider}'. Available: {available}")
+        prov = PROVIDERS[p]
+        model_name = model_name or prov["default_model"]
+        base_url = base_url or prov["base_url"]
+        api_key = api_key or os.getenv(prov["api_key_env"]) or os.getenv("LLM_API_KEY")
+        resolved_api_style = resolved_api_style or prov["api_style"]
+    else:
+        # No provider: try to infer from model name prefix
+        if model_name and not api_key:
+            if model_name.startswith("claude"):
+                api_key = os.getenv("ANTHROPIC_API_KEY")
+                resolved_api_style = resolved_api_style or "anthropic"
+            elif model_name.startswith("gemini"):
+                api_key = os.getenv("GOOGLE_API_KEY")
+                base_url = base_url or "https://generativelanguage.googleapis.com/v1beta/"
+            elif model_name.startswith("grok"):
+                api_key = os.getenv("XAI_API_KEY")
+                base_url = base_url or "https://api.x.ai/v1"
+            elif model_name.startswith("deepseek"):
+                api_key = os.getenv("DEEPSEEK_API_KEY")
+                base_url = base_url or "https://api.deepseek.com"
+        api_key = api_key or os.getenv("LLM_API_KEY")
+
+    # Final fallback
+    resolved_api_style = resolved_api_style or "openai_chat"
+
+    if resolved_api_style not in VALID_API_STYLES:
+        raise ValueError(
+            f"Unknown --api-style '{resolved_api_style}'. "
+            f"Valid: {', '.join(sorted(VALID_API_STYLES))}"
+        )
+    if not model_name:
+        raise ValueError(
+            "Model name is required. Pass --model-name or --provider to use a default."
+        )
+    if not api_key:
+        hint = f" ({PROVIDERS[provider.lower()]['api_key_env']})" if provider else ""
+        raise ValueError(
+            f"API key is required. Pass --api-key, set the provider env var{hint}, or set LLM_API_KEY."
+        )
+    return model_name, api_key, base_url, resolved_api_style
 
 def _persist_ksearch_solution(
     solution: Any, *, definition_name: str, artifacts_dir: Optional[str]
@@ -99,6 +241,7 @@ def generate_and_evaluate(
     wm_stagnation_window: int = 5,
     wm_max_difficulty: Optional[int] = None,
     artifacts_dir: Optional[str] = None,
+    api_style: str = "openai_chat",
 ) -> None:
     """
     Generate exactly one solution for the task, then run final evaluation.
@@ -172,6 +315,7 @@ def generate_and_evaluate(
             target_gpu=target_gpu,
             api_key=api_key,
             base_url=base_url,
+            api_style=api_style,
             artifacts_dir=artifacts_dir,
             wm_max_difficulty=wm_max_difficulty,
         )
@@ -185,6 +329,7 @@ def generate_and_evaluate(
             target_gpu=target_gpu,
             api_key=api_key,
             base_url=base_url,
+            api_style=api_style,
         )
 
     # Generate exactly one solution.
@@ -239,7 +384,8 @@ def generate_and_evaluate(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate kernels with GPT/Gemini (OpenAI-compatible) and evaluate via task backends.")
+    provider_names = ", ".join(sorted(PROVIDERS.keys()))
+    parser = argparse.ArgumentParser(description="Generate kernels with LLMs and evaluate via task backends.")
     parser.add_argument("--local", required=False, default=None, help="Path to flashinfer-trace dataset root (flashinfer only)")
     parser.add_argument(
         "--task-source",
@@ -253,9 +399,23 @@ def main():
         help="Task source path/identifier. For --task-source=flashinfer, this is the dataset root path (defaults to --local).",
     )
     parser.add_argument("--definition", default=None, help="Single definition name to target (required)")
-    parser.add_argument("--model-name", required=True, help="LLM model name (e.g., gpt-4.1, gpt-5, gemini-2.5-pro via compatible endpoint)")
-    parser.add_argument("--base-url", default=None, help="OpenAI-compatible base URL for non-OpenAI providers (e.g. Gemini proxy)")
-    parser.add_argument("--api-key", default=None, help="API key; if omitted, uses LLM_API_KEY env var")
+    parser.add_argument(
+        "--provider",
+        default=None,
+        help=f"LLM provider — auto-sets base URL and API key env var. Available: {provider_names}",
+    )
+    parser.add_argument("--model-name", default=None, help="LLM model name (e.g., claude-sonnet-4-6, gpt-5.2, gemini-3-pro-preview). If --provider is set and this is omitted, uses the provider default.")
+    parser.add_argument("--base-url", default=None, help="Override base URL (auto-set by --provider if not given)")
+    parser.add_argument("--api-key", default=None, help="API key; if omitted, resolved from --provider env var or LLM_API_KEY")
+    parser.add_argument("--env-file", default=".env.local", help="Path to .env file to load (default: .env.local)")
+    parser.add_argument(
+        "--api-style",
+        default=None,
+        choices=sorted(VALID_API_STYLES),
+        help="Override the API calling convention (default: auto from --provider). "
+             "anthropic=Anthropic Messages API, openai_responses=OpenAI Responses API, "
+             "openai_chat=OpenAI Chat Completions API (works with all compatible providers).",
+    )
     parser.add_argument("--language", default="triton", choices=["triton", "python", "cuda"], help="Target language for generated kernel")
     parser.add_argument("--target-gpu", default="H100", help="Target GPU architecture hint for prompts")
     parser.add_argument("--max-opt-rounds", type=int, default=5, help="Max optimization rounds for each solution generation")
@@ -333,9 +493,17 @@ def main():
 
     args = parser.parse_args()
 
-    api_key = args.api_key or os.getenv("LLM_API_KEY")
-    if not api_key:
-        raise ValueError("API key is required (pass --api-key or set LLM_API_KEY)")
+    # Load .env file before resolving provider keys
+    _load_env_file(args.env_file)
+
+    model_name, api_key, base_url, api_style = resolve_provider(
+        provider=args.provider,
+        model_name=args.model_name,
+        api_key=args.api_key,
+        base_url=args.base_url,
+        api_style=args.api_style,
+    )
+    print(f"[config] model={model_name} provider={args.provider or '(auto)'} api_style={api_style} base_url={base_url or '(default)'}")
 
     task_source = str(args.task_source or "flashinfer")
     task_path = str(args.task_path or (args.local or ""))
@@ -378,8 +546,8 @@ def main():
         raise ValueError(f"Unsupported task_source: {task_source}")
     generate_and_evaluate(
         task=task,
-        model_name=args.model_name,
-        base_url=args.base_url,
+        model_name=model_name,
+        base_url=base_url,
         api_key=api_key,
         language=args.language,
         target_gpu=args.target_gpu,
@@ -396,6 +564,7 @@ def main():
         enable_wandb=args.wandb,
         wandb_project=args.wandb_project,
         run_name=args.run_name,
+        api_style=api_style,
     )
 
 

@@ -8,6 +8,7 @@
   </p>
   <p align="center">
     <a href="https://arxiv.org/pdf/2602.19128v1"><img src="https://img.shields.io/badge/arXiv-2602.19128-b31b1b.svg" alt="arXiv"></a>
+    <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
   </p>
 </p>
 

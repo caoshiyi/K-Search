@@ -30,7 +30,16 @@ MODEL_NAME="${MODEL_NAME:-glm-5.1}"
 MAX_ROUNDS="${MAX_ROUNDS:-20}"
 TARGET_GPU="${TARGET_GPU:-Ascend910B3}"
 TIMEOUT_S="${TIMEOUT_S:-900}"
-ARTIFACTS_DIR="${ARTIFACTS_DIR:-.ksearch-output-mqa}"
+ARTIFACTS_DIR="${ARTIFACTS_DIR:-.ksearch}"
+
+# Accuracy: which case types to validate each round (comma-separated).
+export KSEARCH_TEST_CASE_TYPES="${KSEARCH_TEST_CASE_TYPES:-basic,general}"
+# Performance: bench case type, warmup, and repeat count.
+export KSEARCH_BENCH_CASE_TYPE="${KSEARCH_BENCH_CASE_TYPE:-basic}"
+export KSEARCH_WARMUP="${KSEARCH_WARMUP:-10}"
+export KSEARCH_REPEAT="${KSEARCH_REPEAT:-50}"
+# NPU device ID (avoid card 0 which often has default occupancy).
+export KSEARCH_DEVICE_ID="${KSEARCH_DEVICE_ID:-1}"
 
 # Force a long HTTP timeout for SDK sessions (overrides any pre-set value).
 export API_TIMEOUT_MS=7200000

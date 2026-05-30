@@ -12,7 +12,7 @@
 # - LANGUAGE: triton|cuda (default: triton)
 # - TARGET_GPU: e.g. A100-80GB, H100 (default: H100)
 # - MAX_OPT_ROUNDS: (default: 50)
-# - ARTIFACTS_DIR: base output dir (default: .ksearch-output-kernelbench)
+# - ARTIFACTS_DIR: base output dir (default: .ksearch)
 # - CONTINUE_FROM_SOLUTION: optional solution name or path to a persisted solution .json
 #   (if set, resumes optimization from that solution)
 #
@@ -42,7 +42,7 @@ BASE_URL="${BASE_URL:-https://api.openai.com/v1}"
 # Generation configuration
 LANGUAGE="${LANGUAGE:-triton}"
 MAX_OPT_ROUNDS="${MAX_OPT_ROUNDS:-50}"
-ARTIFACTS_DIR="${ARTIFACTS_DIR:-.ksearch-output-kernelbench}"
+ARTIFACTS_DIR="${ARTIFACTS_DIR:-.ksearch}"
 CONTINUE_FROM_SOLUTION="${CONTINUE_FROM_SOLUTION:-}"
 
 # World model configuration

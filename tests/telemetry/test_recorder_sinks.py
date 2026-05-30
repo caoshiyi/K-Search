@@ -26,14 +26,15 @@ def test_build_attempt_dir_uses_sanitized_attempt_layout(tmp_path, monkeypatch):
 
     path = build_attempt_dir(context)
 
-    assert path == tmp_path / "task_name" / "run_alpha" / "round_0007" / "action_n_12" / "attempt_0002"
+    assert path == tmp_path / "task_name" / "run_alpha" / "telemetry" / "round_0007" / "action_n_12" / "attempt_0002"
 
 
-def test_telemetry_root_defaults_to_project_local_output(monkeypatch, tmp_path):
+def test_telemetry_root_defaults_to_unified_logs_dir(monkeypatch, tmp_path):
     monkeypatch.delenv("KSEARCH_TELEMETRY_DIR", raising=False)
+    monkeypatch.delenv("KSEARCH_ARTIFACTS_DIR", raising=False)
     monkeypatch.chdir(tmp_path)
 
-    assert telemetry_root() == tmp_path / ".ksearch-output-mqa" / "telemetry"
+    assert telemetry_root() == tmp_path / ".ksearch" / "logs"
 
 
 def test_is_telemetry_enabled_honors_falsey_env(monkeypatch):

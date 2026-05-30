@@ -12,7 +12,7 @@
 # - LANGUAGE: triton|python|cuda (default: triton)
 # - TARGET_GPU: e.g. H100 (default: H100)
 # - MAX_OPT_ROUNDS: (default: 5)
-# - ARTIFACTS_DIR: base output dir (default: .ksearch-output)
+# - ARTIFACTS_DIR: base output dir (default: .ksearch)
 # - CONTINUE_FROM_SOLUTION: optional solution name or path to a persisted solution .json
 #   (if set, resumes optimization from that solution)
 #
@@ -42,7 +42,7 @@ BASE_URL="${BASE_URL:-https://us.api.openai.com/v1}"
 LANGUAGE="${LANGUAGE:-triton}"
 TARGET_GPU="${TARGET_GPU:-H100}"
 MAX_OPT_ROUNDS="${MAX_OPT_ROUNDS:-300}"
-ARTIFACTS_DIR="${ARTIFACTS_DIR:-.ksearch-output-gpumode}"
+ARTIFACTS_DIR="${ARTIFACTS_DIR:-.ksearch}"
 CONTINUE_FROM_SOLUTION="${CONTINUE_FROM_SOLUTION:-gpt-5.2_gpumode_trimul_triton_r182_20260210_173942_b89cf625}"
 
 WM="${WM:-1}"

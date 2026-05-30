@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Optional, Protocol
 
+from k_search.utils.paths import get_run_id, get_run_logs_dir
+
 
 LLMProvider = Literal["openai", "claude-agent"]
 
@@ -112,19 +114,20 @@ def _round_path_component(context: dict[str, Any]) -> str:
     return _safe_log_path_component(value, default="round")
 
 
-def _log_context_path(log_root: Path, *, timestamp_utc: str, context: dict[str, Any]) -> Path:
-    operator = None
+def _operator_from_context(context: dict[str, Any]) -> Any:
     for key in ("operator", "task_name", "definition_name", "definition", "op"):
         if context.get(key) is not None and str(context.get(key)).strip():
-            operator = context.get(key)
-            break
+            return context.get(key)
+    return None
+
+
+def _log_context_path(log_root: Path, *, context: dict[str, Any]) -> Path:
+    # Operator and run are already encoded in <base>/logs/<task>/<run>/llm;
+    # here we only add the per-run sub-structure flow/round/stage.
     flow = context.get("flow") or context.get("process") or "direct"
     stage = context.get("stage") or context.get("phase") or "llm_call"
-    run_start = os.getenv("KSEARCH_RUN_START") or str(timestamp_utc)[:8]
     return (
         log_root
-        / _safe_log_path_component(run_start, default=str(timestamp_utc)[:8])
-        / _safe_log_path_component(operator, default="__unknown__")
         / _safe_log_path_component(flow, default="direct")
         / _round_path_component(context)
         / _safe_log_path_component(stage, default="llm_call")
@@ -166,7 +169,7 @@ def _format_llm_interaction_markdown(payload: dict[str, Any]) -> str:
         "",
         "## Metadata",
         "",
-        f"- timestamp_utc: {_metadata_value(payload.get('timestamp_utc'))}",
+        f"- timestamp: {_metadata_value(payload.get('timestamp'))}",
         f"- provider: {_metadata_value(payload.get('provider'))}",
         f"- model_name: {_metadata_value(payload.get('model_name'))}",
     ]
@@ -199,15 +202,21 @@ def _log_llm_interaction(*, provider: str, model_name: str, prompt: str, respons
     global _log_counter
     _log_counter += 1
 
-    # Allow caller to override via env; fall back to a project-local default.
-    log_dir = Path(
-        os.getenv("KSEARCH_LLM_LOG_DIR")
-        or os.path.join(os.getcwd(), ".ksearch-output-mqa", "llm_logs")
-    ).expanduser().resolve()
-
-    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     context = _json_safe_log_context(dict(_llm_log_context.get() or {}))
-    target_dir = _log_context_path(log_dir, timestamp_utc=ts, context=context)
+    operator = _operator_from_context(context)
+
+    # Local wall-clock timestamp so filenames match the user's clock.
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Allow caller to override via env; else fall back to the unified run-scoped
+    # logs dir shared with telemetry: <base>/logs/<task>/<run_id>/llm.
+    override = os.getenv("KSEARCH_LLM_LOG_DIR")
+    if override:
+        log_dir = Path(override).expanduser().resolve()
+    else:
+        log_dir = get_run_logs_dir(task_name=operator, run_id=get_run_id(), sub="llm")
+
+    target_dir = _log_context_path(log_dir, context=context)
 
     try:
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -215,11 +224,10 @@ def _log_llm_interaction(*, provider: str, model_name: str, prompt: str, respons
         return  # Silently skip if we can't create the directory.
 
     safe_model = "".join(c if c.isalnum() or c in "-_" else "_" for c in model_name)[:48]
-    filename = f"{ts}_{_log_counter:04d}_{provider}_{safe_model}.json"
-    path = target_dir / filename
+    stem = f"{ts}_{_log_counter:04d}_{provider}_{safe_model}"
 
     payload = {
-        "timestamp_utc": ts,
+        "timestamp": ts,
         "provider": provider,
         "model_name": model_name,
         "prompt": str(prompt or ""),
@@ -230,10 +238,16 @@ def _log_llm_interaction(*, provider: str, model_name: str, prompt: str, respons
     if error is not None:
         payload["error"] = error
 
+    # Human-readable markdown is the default single artifact; JSON is opt-in to
+    # avoid writing the same content twice.
+    want_json = os.getenv("KSEARCH_LLM_LOG_JSON", "").strip().lower() in {"1", "true", "yes", "on"}
     try:
-        import json
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        path.with_suffix(".md").write_text(_format_llm_interaction_markdown(payload), encoding="utf-8")
+        (target_dir / f"{stem}.md").write_text(_format_llm_interaction_markdown(payload), encoding="utf-8")
+        if want_json:
+            import json
+            (target_dir / f"{stem}.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
     except Exception:
         pass  # Logging must never break the caller.
 

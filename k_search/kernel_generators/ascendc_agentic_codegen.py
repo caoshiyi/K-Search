@@ -142,7 +142,7 @@ class AscendCAgenticPromptBuilder:
             max_chars = int(raw) if raw.isdigit() and int(raw) > 0 else 20_000
         self.max_chars = int(max_chars)
 
-    def build(self, request: AscendCAgenticCodegenRequest, *, has_code_map: bool = False) -> str:
+    def build(self, request: AscendCAgenticCodegenRequest, *, has_code_map: bool = False, task_path: str | None = None) -> str:
         sections = {
             "definition": _truncate(request.definition_text, 5000),
             "action": _truncate(request.action_text, 3000),
@@ -179,8 +179,8 @@ class AscendCAgenticPromptBuilder:
             "Recent failure or trace excerpt:\n"
             f"{sections['trace_logs'] or '(none)'}\n"
         )
-        # 不变量:送达 LLM 的文本不得携带物理 worktree 路径,统一抹成语义占位符。
-        prompt = sanitize_worktree_paths(prompt)
+        # 不变量:送达 LLM 的文本不得携带物理路径(worktree 或原始任务目录),统一抹成语义占位符。
+        prompt = sanitize_worktree_paths(prompt, task_path=task_path)
         if len(prompt) > self.max_chars:
             sizes = ", ".join(f"{name}={len(value)}" for name, value in sorted(sections.items()))
             raise ValueError(
@@ -235,7 +235,7 @@ class AscendCAgenticCodegenRunner:
                         )
                         reader.run(
                             project_dir=session.project_dir,
-                            context={"definition_text": request.definition_text},
+                            context={"definition_text": request.definition_text, "task_path": str(getattr(task, "task_path", "") or "")},
                         )
                         produced = store.read_from_worktree(CODE_MAP, session.project_dir)
                         if produced:
@@ -253,7 +253,7 @@ class AscendCAgenticCodegenRunner:
                 editor_client=self.editor_client,
                 prompt_builder=self.prompt_builder,
             )
-            codegen_context = {"request": request, "has_code_map": has_code_map}
+            codegen_context = {"request": request, "has_code_map": has_code_map, "task_path": str(getattr(task, "task_path", "") or "")}
             prompt = codegen.build_prompt(codegen_context)
             # Replace absolute task-path references so the LLM only sees <PROJECT_ROOT>.
             task_path = getattr(task, "task_path", None)

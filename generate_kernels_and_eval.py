@@ -547,6 +547,16 @@ def main():
 
     args = parser.parse_args()
 
+    # Pin a single output base + run id for the whole process so that llm logs,
+    # telemetry and the narrative summary all land under the same
+    # <base>/logs/<task>/<run_id>/ tree (and never drift apart across calls).
+    from k_search.utils.paths import get_run_id, resolve_output_base
+
+    os.environ.setdefault(
+        "KSEARCH_ARTIFACTS_DIR", str(resolve_output_base(getattr(args, "artifacts_dir", None)))
+    )
+    os.environ.setdefault("KSEARCH_RUN_ID", get_run_id())
+
     # MLX runs on Apple Silicon; the CUDA-style --target-gpu hint is not meaningful.
     # If Metal is available, replace it with an auto-detected device name
     if str(getattr(args, "task_source", "")).strip().lower() == "mlx":

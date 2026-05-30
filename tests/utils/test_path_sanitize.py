@@ -47,3 +47,44 @@ def test_custom_placeholder():
     text = "/tmp/ksearch_agentic_worktree_xyz/x.cpp"
     out = sanitize_worktree_paths(text, placeholder="<ROOT>")
     assert out == "<ROOT>/x.cpp"
+
+
+def test_task_path_replaces_original_directory():
+    text = "Specification source: /home/user/cv_agent/tile2asc/multi_query_attention/ksearch_task.md"
+    out = sanitize_worktree_paths(text, task_path="/home/user/cv_agent/tile2asc/multi_query_attention")
+    assert "/home/user/cv_agent/tile2asc/multi_query_attention" not in out
+    assert out == "Specification source: <PROJECT_ROOT>/ksearch_task.md"
+
+
+def test_task_path_replaces_sub_paths():
+    text = (
+        "Read /home/user/cv_agent/tile2asc/mqa/kernel/cube.h "
+        "Edit /home/user/cv_agent/tile2asc/mqa/kernel/cube.h"
+    )
+    out = sanitize_worktree_paths(text, task_path="/home/user/cv_agent/tile2asc/mqa")
+    assert "/home/user/cv_agent/tile2asc/mqa" not in out
+    assert out == (
+        "Read <PROJECT_ROOT>/kernel/cube.h "
+        "Edit <PROJECT_ROOT>/kernel/cube.h"
+    )
+
+
+def test_task_path_combined_with_worktree():
+    text = (
+        "worktree /tmp/ksearch_agentic_worktree_abc/mqa/x.h "
+        "original /home/user/cv_agent/tile2asc/mqa/x.h"
+    )
+    out = sanitize_worktree_paths(text, task_path="/home/user/cv_agent/tile2asc/mqa")
+    assert "/home/user/cv_agent" not in out
+    assert "ksearch_agentic_worktree_abc" not in out
+    assert out == (
+        "worktree <PROJECT_ROOT>/mqa/x.h "
+        "original <PROJECT_ROOT>/x.h"
+    )
+
+
+def test_task_path_none_skips_original_dir_replacement():
+    text = "See /home/user/cv_agent/tile2asc/mqa/ksearch_task.md"
+    out = sanitize_worktree_paths(text, task_path=None)
+    # No task_path → original dir path stays unchanged.
+    assert out == text

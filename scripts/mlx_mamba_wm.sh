@@ -14,7 +14,7 @@ set -euo pipefail
 # Task/generation:
 # - LANGUAGE: mlx (default: mlx)
 # - MAX_OPT_ROUNDS: (default: 50)
-# - ARTIFACTS_DIR: base output dir (default: .ksearch-output-mlx-mamba)
+# - ARTIFACTS_DIR: base output dir (default: .ksearch)
 #
 # World model:
 # - WM: 1 to enable world-model prompting (default: 1)
@@ -33,7 +33,7 @@ BASE_URL="${BASE_URL:-https://us.api.openai.com/v1}"
 
 LANGUAGE="${LANGUAGE:-mlx}"
 MAX_OPT_ROUNDS="${MAX_OPT_ROUNDS:-50}"
-ARTIFACTS_DIR="${ARTIFACTS_DIR:-.ksearch-output-mlx-mamba}"
+ARTIFACTS_DIR="${ARTIFACTS_DIR:-.ksearch}"
 
 WM="${WM:-1}"
 WM_STAGNATION_WINDOW="${WM_STAGNATION_WINDOW:-5}"

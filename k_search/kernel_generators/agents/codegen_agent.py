@@ -22,4 +22,5 @@ class CodegenAgent(ProjectAgent):
     def build_prompt(self, context: Any) -> str:
         request: AscendCAgenticCodegenRequest = context["request"]
         has_code_map = bool(context.get("has_code_map", False))
-        return self.prompt_builder.build(request, has_code_map=has_code_map)
+        task_path = context.get("task_path")
+        return self.prompt_builder.build(request, has_code_map=has_code_map, task_path=task_path)

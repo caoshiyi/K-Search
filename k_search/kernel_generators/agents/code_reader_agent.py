@@ -4,6 +4,7 @@ import os
 from typing import Any
 
 from k_search.kernel_generators.agents.project_agent import ProjectAgent
+from k_search.utils.path_sanitize import sanitize_worktree_paths
 
 _READER_PROMPT_TEMPLATE = """\
 You are a code-understanding agent working inside an AscendC operator project directory.
@@ -67,9 +68,13 @@ class CodeReaderAgent(ProjectAgent):
 
     def build_prompt(self, context: Any) -> str:
         definition_text = ""
+        task_path = None
         if isinstance(context, dict):
             definition_text = str(context.get("definition_text", "") or "")
-        return _READER_PROMPT_TEMPLATE.format(
+            task_path = context.get("task_path")
+        prompt = _READER_PROMPT_TEMPLATE.format(
             max_chars=self.max_chars,
             definition_text=definition_text.strip() or "(no specification provided)",
         )
+        prompt = sanitize_worktree_paths(prompt, task_path=task_path)
+        return prompt

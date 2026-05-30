@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from k_search.utils.paths import get_run_id, resolve_output_base, safe_path_component
 
 
 @dataclass(frozen=True)
@@ -45,21 +46,13 @@ def telemetry_root() -> Path:
     raw = os.getenv("KSEARCH_TELEMETRY_DIR", "").strip()
     if raw:
         return Path(raw).expanduser().resolve()
-    return (Path.cwd() / ".ksearch-output-mqa" / "telemetry").resolve()
+    # Unified: telemetry lives under the shared logs root next to llm logs.
+    return resolve_output_base() / "logs"
 
 
 def default_run_id() -> str:
-    for name in ("KSEARCH_RUN_ID", "KSEARCH_RUN_START"):
-        raw = os.getenv(name, "").strip()
-        if raw:
-            return raw
-    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-
-
-def safe_path_component(value: Any, *, default: str, max_len: int = 96) -> str:
-    text = str(value if value is not None else "").strip() or default
-    safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in text).strip(".")
-    return (safe or default)[:max_len]
+    # Single source of truth shared with llm logs and the narrative log.
+    return get_run_id()
 
 
 def _round_component(value: int | None) -> str:
@@ -82,6 +75,7 @@ def build_attempt_dir(context: TelemetryContext, *, root: Path | None = None) ->
         (root or telemetry_root())
         / task_name
         / run_id
+        / "telemetry"
         / _round_component(context.round_index)
         / action
         / _attempt_component(context.attempt_index)

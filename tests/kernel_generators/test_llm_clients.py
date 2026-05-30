@@ -149,6 +149,7 @@ def test_openai_provider_requires_api_key(monkeypatch):
 
 def test_llm_interaction_logger_writes_hierarchical_human_readable_logs(monkeypatch, tmp_path):
     monkeypatch.setenv("KSEARCH_LLM_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("KSEARCH_LLM_LOG_JSON", "1")
 
     with llm_log_context(
         operator="multi/query attention",
@@ -170,9 +171,9 @@ def test_llm_interaction_logger_writes_hierarchical_human_readable_logs(monkeypa
     assert len(json_logs) == 1
     assert len(markdown_logs) == 1
     rel_parts = json_logs[0].relative_to(tmp_path).parts
-    assert re.fullmatch(r"\d{8}", rel_parts[0])
-    assert rel_parts[1] == "multi_query_attention"
-    assert rel_parts[2:5] == ("world_model", "round_0003", "debug_codegen")
+    # Operator and run are encoded by the run logs dir; under an explicit
+    # KSEARCH_LLM_LOG_DIR override the per-call sub-structure is flow/round/stage.
+    assert rel_parts[0:3] == ("world_model", "round_0003", "debug_codegen")
 
     raw_json = json_logs[0].read_text(encoding="utf-8")
     payload = json.loads(raw_json)
@@ -191,6 +192,7 @@ def test_llm_interaction_logger_writes_hierarchical_human_readable_logs(monkeypa
 
 def test_llm_interaction_logger_uses_unknown_hierarchy_without_context(monkeypatch, tmp_path):
     monkeypatch.setenv("KSEARCH_LLM_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("KSEARCH_LLM_LOG_JSON", "1")
 
     _log_llm_interaction(
         provider="openai",
@@ -202,15 +204,30 @@ def test_llm_interaction_logger_uses_unknown_hierarchy_without_context(monkeypat
     json_logs = list(tmp_path.rglob("*.json"))
     assert len(json_logs) == 1
     rel_parts = json_logs[0].relative_to(tmp_path).parts
-    assert re.fullmatch(r"\d{8}", rel_parts[0])
-    assert rel_parts[1] == "__unknown__"
-    assert rel_parts[2:5] == ("direct", "global", "llm_call")
+    assert rel_parts[0:3] == ("direct", "global", "llm_call")
+
+
+def test_llm_interaction_logger_writes_markdown_only_by_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("KSEARCH_LLM_LOG_DIR", str(tmp_path))
+    monkeypatch.delenv("KSEARCH_LLM_LOG_JSON", raising=False)
+
+    _log_llm_interaction(
+        provider="openai",
+        model_name="gpt-5.2",
+        prompt="prompt",
+        response="response",
+    )
+
+    # json+md double-write is merged: markdown only unless KSEARCH_LLM_LOG_JSON is set.
+    assert list(tmp_path.rglob("*.md"))
+    assert list(tmp_path.rglob("*.json")) == []
 
 
 def test_codegen_logging_context_keeps_outer_round_and_stage(monkeypatch, tmp_path):
     from k_search.kernel_generators.kernel_generator import KernelGenerator
 
     monkeypatch.setenv("KSEARCH_LLM_LOG_DIR", str(tmp_path))
+    monkeypatch.setenv("KSEARCH_LLM_LOG_JSON", "1")
 
     class LoggingFakeLLMClient:
         def generate(self, prompt):
@@ -245,8 +262,7 @@ def test_codegen_logging_context_keeps_outer_round_and_stage(monkeypatch, tmp_pa
     json_logs = list(tmp_path.rglob("*.json"))
     assert len(json_logs) == 1
     rel_parts = json_logs[0].relative_to(tmp_path).parts
-    assert rel_parts[1] == "vec_add"
-    assert rel_parts[2:5] == ("world_model", "round_0007", "debug_codegen")
+    assert rel_parts[0:3] == ("world_model", "round_0007", "debug_codegen")
     payload = json.loads(json_logs[0].read_text(encoding="utf-8"))
     assert payload["log_context"]["attempt"] == 1
     assert payload["log_context"]["max_attempts"] == 1

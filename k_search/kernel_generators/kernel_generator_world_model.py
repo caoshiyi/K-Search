@@ -36,7 +36,8 @@ from k_search.kernel_generators.world_model import (
     render_world_model_status,
 )
 from k_search.utils.solution_db import SolutionDB
-from k_search.utils.paths import get_ksearch_artifacts_dir
+from k_search.utils.paths import get_ksearch_artifacts_dir, get_run_id, get_run_logs_dir
+from k_search.telemetry.narrative import RunNarrativeLogger
 
 
 def _definition_text_for_codegen_prompt(
@@ -223,6 +224,33 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             except Exception:
                 return str(s or "")
 
+        # Run-level narrative summary log (human-readable timeline + events.jsonl),
+        # under the unified run logs dir <base>/logs/<task>/<run_id>/.
+        try:
+            _task_name = str(getattr(task, "name", "") or "")
+            _run_id = get_run_id()
+            self._narrative = RunNarrativeLogger(
+                get_run_logs_dir(base_dir=self._artifacts_dir, task_name=_task_name, run_id=_run_id),
+                meta={
+                    "run_id": _run_id,
+                    "task_name": _task_name,
+                    "model_name": str(getattr(self, "model_name", "") or ""),
+                    "llm_provider": str(
+                        getattr(self, "llm_provider", "")
+                        or getattr(getattr(self, "llm_client", None), "provider", "")
+                        or ""
+                    ),
+                    "target_gpu": str(self.target_gpu),
+                    "language": str(self.language),
+                    "max_opt_rounds": int(max_opt_rounds),
+                    "reference_latency_ms": getattr(task, "reference_latency_ms", None),
+                    "artifacts_dir": str(self._artifacts_dir or ""),
+                },
+            )
+            self._narrative.run_start()
+        except Exception:
+            self._narrative = None
+
         # Init SolutionDB under k-search artifacts dir (task-agnostic; never use dataset root).
         if self._solution_db is None:
             _stage("init SolutionDB")
@@ -363,6 +391,12 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             _emit(render_world_model_status(wm))
             _emit(f"[STAGE] world model init latency: {dt:.2f}s")
             self._persist_world_model_snapshot(task=task)
+            try:
+                _nar = getattr(self, "_narrative", None)
+                if _nar is not None:
+                    _nar.world_model_init(summary=render_open_action_nodes_block(wm, max_items=8))
+            except Exception:
+                pass
 
             # NOTE: We intentionally do NOT attach `baseline_solution` code to the WM tree.
             # Baseline is used for targets/vs_base evaluation, but should be hidden from the model.
@@ -554,6 +588,22 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             if blk.strip():
                 chosen_action_text = blk.strip()
                 _emit(chosen_action_text)
+
+            try:
+                _nar = getattr(self, "_narrative", None)
+                if _nar is not None:
+                    _no = node_obj if isinstance(node_obj, dict) else {}
+                    _act = _no.get("action") if isinstance(_no.get("action"), dict) else {}
+                    _nar.action_selected(
+                        node_id=chosen_leaf,
+                        title=_act.get("title") or _no.get("choice"),
+                        decision=_no.get("decision"),
+                        difficulty=_act.get("difficulty_1_to_5"),
+                        score=_act.get("score_0_to_1"),
+                        round_num=cycle_start_round,
+                    )
+            except Exception:
+                pass
 
             parent_id = str((node_obj or {}).get("parent_id") or "root")
             parent_is_root = parent_id == "root"
@@ -820,6 +870,26 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         all_passed = bool(getattr(round_eval, "is_passed", lambda: False)())
                         round_score = float(getattr(round_eval, "score", lambda: -1.0)())
                         last_eval = round_eval
+                        try:
+                            _nar = getattr(self, "_narrative", None)
+                            if _nar is not None:
+                                _details = []
+                                if isinstance(result.artifact_paths, dict):
+                                    for _k in ("transcript_path", "prompt_path", "manifest_path"):
+                                        _v = result.artifact_paths.get(_k)
+                                        if _v:
+                                            _details.append(str(_v))
+                                _nar.llm_codegen(
+                                    round_num=round_num,
+                                    attempt=attempt_idx,
+                                    mode=f"agentic/{agentic_mode}",
+                                    changed_paths=result.changed_paths,
+                                    diff=str(result.diff_text or ""),
+                                    detail_paths=_details,
+                                )
+                                _nar.eval_result(round_num=round_num, eval_result=round_eval)
+                        except Exception:
+                            pass
                         if all_passed and round_score > best_score:
                             best_score = float(round_score)
                             best_eval = round_eval
@@ -1077,6 +1147,19 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     dump_traces=False,
                     round_num=int(round_num),
                 )
+                try:
+                    _nar = getattr(self, "_narrative", None)
+                    if _nar is not None:
+                        _nar.llm_codegen(
+                            round_num=round_num,
+                            attempt=attempt_idx,
+                            mode=("action" if attempt_idx == 1 else "debug/improve"),
+                            prompt=prompt,
+                            response=str(current_raw_code or ""),
+                        )
+                        _nar.eval_result(round_num=round_num, eval_result=round_eval)
+                except Exception:
+                    pass
 
                 all_passed = bool(getattr(round_eval, "is_passed", lambda: False)())
                 round_score = float(getattr(round_eval, "score", lambda: -1.0)())
@@ -1266,6 +1349,17 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     )
                 _emit(render_world_model_status(self._wm.get(task.name)))
                 self._persist_world_model_snapshot(task=task)
+                try:
+                    _nar = getattr(self, "_narrative", None)
+                    if _nar is not None:
+                        _nar.world_model_update(
+                            kind="attach+refine",
+                            round_num=cycle_best_round,
+                            detail=f"attach solution to {chosen_leaf}; refine world model (score={cycle_best_score:.3f})",
+                            prediction=prediction,
+                        )
+                except Exception:
+                    pass
             else:
                 _stage("cycle end: no PASSED solution; mark action too hard")
                 try:
@@ -1298,6 +1392,16 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         )
                     _emit(render_world_model_status(self._wm.get(task.name)))
                     self._persist_world_model_snapshot(task=task)
+                    try:
+                        _nar = getattr(self, "_narrative", None)
+                        if _nar is not None:
+                            _nar.world_model_update(
+                                kind="too_hard",
+                                round_num=cycle_start_round + max(0, rounds_consumed - 1),
+                                detail=f"action {chosen_leaf} marked too hard after {rounds_consumed} round(s)",
+                            )
+                    except Exception:
+                        pass
                 except LLMProviderFatalError as exc:
                     _emit(f"[ERROR] world model too-hard update failed with fatal provider error: {exc}")
                     raise
@@ -1305,6 +1409,22 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     _emit(f"[WARN] world model too-hard update failed: {type(exc).__name__}: {exc}")
 
             cycle_start_round += max(1, rounds_consumed)
+
+        # Run-level narrative end marker (best-effort).
+        try:
+            _nar = getattr(self, "_narrative", None)
+            if _nar is not None:
+                _be = best_eval
+                _nar.run_end(
+                    best_round=getattr(_be, "metrics", {}).get("round")
+                    if isinstance(getattr(_be, "metrics", None), dict)
+                    else None,
+                    latency_ms=getattr(_be, "latency_ms", None),
+                    vs_baseline=getattr(_be, "mean_vs_baseline_factor", None),
+                    total_rounds=cycle_start_round - 1,
+                )
+        except Exception:
+            pass
 
         # Fall back to the best observed solution, else the last attempted.
         if best_solution is not None:

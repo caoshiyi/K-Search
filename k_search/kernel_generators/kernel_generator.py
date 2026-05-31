@@ -408,7 +408,8 @@ class KernelGenerator:
         attempt_idx: int,
         mode: str,
         base_solution: Optional[Solution],
-    ) -> Solution:
+        max_fix_rounds: int | None = None,
+    ) -> Any:
         definition_hook = getattr(task, "get_agentic_definition_text", None)
         if callable(definition_hook):
             definition_text = str(definition_hook(language=str(self.language)) or "").strip()
@@ -424,11 +425,19 @@ class KernelGenerator:
             attempt_idx=int(attempt_idx),
             mode=str(mode),  # type: ignore[arg-type]
         )
-        result = self._agentic_runner().run(
-            task=task,
-            request=request,
-            base_solution=base_solution,
-        )
+        if max_fix_rounds is not None:
+            result = self._agentic_runner().run_multi_turn(
+                task=task,
+                request=request,
+                base_solution=base_solution,
+                max_fix_rounds=max_fix_rounds,
+            )
+        else:
+            result = self._agentic_runner().run(
+                task=task,
+                request=request,
+                base_solution=base_solution,
+            )
         print(
             f"[LLM] agentic ascendc result provider={self.llm_provider} model={self.model_name} "
             f"round={round_num} prompt_chars={result.prompt_chars} "
@@ -780,6 +789,7 @@ class KernelGenerator:
                             attempt_idx=1,
                             mode="improve",
                             base_solution=base_for_agentic,
+                            max_fix_rounds=int(os.getenv("KSEARCH_AGENTIC_MAX_FIX_ROUNDS", "3")),
                         )
                         solution = agentic_result.solution
                         pending_agentic_eval = agentic_result.eval_result

@@ -102,12 +102,21 @@ class MockClaudeAgentSDK:
                 self.options = options
                 self._prompt = ""
                 self._messages: list[MockClaudeMessage] = []
+                self._connected = False
 
             async def __aenter__(self):
+                await self.connect()
                 return self
 
             async def __aexit__(self, exc_type, exc, tb):
+                await self.disconnect()
                 return False
+
+            async def connect(self, prompt: Any = None) -> None:
+                self._connected = True
+
+            async def disconnect(self) -> None:
+                self._connected = False
 
             async def query(self, prompt: str) -> None:
                 call_index = len(sdk.client_calls)

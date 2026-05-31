@@ -963,7 +963,20 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
                 changed_paths=["kernel/foo.h"],
                 diff_text="diff",
                 project_path=str(tmp_path),
+                editor_session=None,
+                worktree_session=None,
             )
+
+        def run_multi_turn(self, *, task, request, base_solution, max_fix_rounds=0):
+            return self.run(task=task, request=request, base_solution=base_solution)
+
+        def continue_fix(self, *, task, editor_session, wt_session, fix_prompt, request):
+            return self.run(task=task, request=request, base_solution=None)
+
+        class editor_client:
+            @staticmethod
+            def close_session(session):
+                pass
 
     class FakeWorldModel:
         def propose_action_nodes(self, **kwargs):

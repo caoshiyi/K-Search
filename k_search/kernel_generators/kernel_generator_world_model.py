@@ -600,6 +600,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             cycle_best_manifest_path: str | None = None
             cycle_best_changed_paths: list[str] = []
             cycle_best_diff_summary: str = ""
+            # Multi-turn SDK session for agentic AscendC (cycle-level)
+            editor_session: Any = None  # ClaudeProjectEditorSession | None
+            wt_session: Any = None     # AgenticWorktreeSession | None
             # End the cycle only after this many consecutive non-improving rounds.
             no_improve_streak: int = 0
             # End the cycle if we keep failing to beat the parent/base score for too long (once we have any PASSED solution).
@@ -634,6 +637,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     )
                 # --- Agentic AscendC codegen branch ---
                 if self._should_use_ascendc_agentic_codegen(task):
+                    from k_search.kernel_generators.ascendc_agentic_codegen import _build_fix_prompt
                     trace_excerpt = str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or "")
                     perf_lines: list[str] = []
                     if last_eval is not None:
@@ -641,6 +645,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     if base_eval is not None:
                         perf_lines.extend(base_eval.perf_summary_lines(prefix="base"))
                     perf_summary = "\n".join(perf_lines).strip()
+
                     if attempt_idx == 1:
                         agentic_mode = "action"
                         agentic_action = str(chosen_action_text or "")
@@ -686,15 +691,61 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         action_node_id=str(chosen_leaf) if chosen_leaf else None,
                     )
                     try:
-                        result = self._agentic_runner().run(
-                            task=task,
-                            request=request,
-                            base_solution=base_solution_for_agentic,
-                        )
+                        if attempt_idx == 1:
+                            # Attempt 1: open a new multi-turn session
+                            result = self._agentic_runner().run_multi_turn(
+                                task=task,
+                                request=request,
+                                base_solution=base_solution_for_agentic,
+                                max_fix_rounds=0,  # fix loop managed by cycle
+                            )
+                            editor_session = result.editor_session
+                            wt_session = result.worktree_session
+                        else:
+                            # Attempt 2+: continue in the same session with a fix prompt
+                            if editor_session is None or wt_session is None:
+                                # No existing session (first attempt failed to produce one);
+                                # fall back to a fresh session.
+                                result = self._agentic_runner().run_multi_turn(
+                                    task=task,
+                                    request=request,
+                                    base_solution=base_solution_for_agentic,
+                                    max_fix_rounds=0,
+                                )
+                                editor_session = result.editor_session
+                                wt_session = result.worktree_session
+                            else:
+                                fix_base = _build_fix_prompt(
+                                    eval_result=last_eval,
+                                    fix_round=attempt_idx - 1,
+                                )
+                                fix_prompt = (
+                                    f"Original action intent: {agentic_action}\n\n"
+                                    f"{fix_base}\n\n"
+                                    f"Continue the same action. Fix the failure first, then improve."
+                                )
+                                result = self._agentic_runner().continue_fix(
+                                    task=task,
+                                    editor_session=editor_session,
+                                    wt_session=wt_session,
+                                    fix_prompt=fix_prompt,
+                                    request=request,
+                                )
                     except LLMProviderFatalError as exc:
                         _emit(f"[ERROR] fatal LLM provider error during agentic codegen: {exc}")
+                        # Close session on fatal error
+                        if editor_session is not None and not editor_session._closed:
+                            self._agentic_runner().editor_client.close_session(editor_session)
+                            editor_session = None
                         raise
                     except (TimeoutError, ValueError, RuntimeError) as exc:
+                        # Close session on error
+                        if editor_session is not None and not editor_session._closed:
+                            self._agentic_runner().editor_client.close_session(editor_session)
+                            editor_session = None
+                        if wt_session is not None:
+                            wt_session.cleanup()
+                            wt_session = None
                         if self._allow_ascendc_agentic_legacy_fallback():
                             _emit(
                                 f"[WARN] agentic codegen failed for action_node_id={chosen_leaf} "
@@ -1123,6 +1174,14 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 rounds_consumed += 1
                 if no_improve_streak >= stagnation_window or no_improve_over_base_streak >= stagnation_window:
                     break
+
+            # Close any open multi-turn SDK session at cycle end
+            if editor_session is not None and not editor_session._closed:
+                self._agentic_runner().editor_client.close_session(editor_session)
+                editor_session = None
+            if wt_session is not None:
+                wt_session.cleanup()
+                wt_session = None
 
             if cycle_best_solution is not None and cycle_best_eval is not None:
                 _stage(f"cycle end: attach+refine best PASSED (round {cycle_best_round}, score={cycle_best_score:.3f})")

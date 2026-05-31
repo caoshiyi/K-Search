@@ -11,6 +11,7 @@ keeping a single ClaudeSDKClient connection alive across multiple prompts.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -67,7 +68,7 @@ class ClaudeAgentProjectEditorClient:
     model_name: str
     max_turns: Optional[int] = field(default_factory=_default_claude_agent_max_turns)
     allowed_tools: list[str] = field(default_factory=lambda: list(DEFAULT_PROJECT_EDITOR_TOOLS))
-    disallowed_tools: list[str] = field(default_factory=lambda: ["Bash"])
+    disallowed_tools: list[str] = field(default_factory=lambda: ["Bash", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"])
     thinking_enabled: bool = field(default_factory=_default_claude_agent_thinking_enabled)
     timeout_seconds: float = field(default_factory=_default_claude_agent_timeout_seconds)
 
@@ -310,7 +311,7 @@ class ClaudeAgentProjectEditorClient:
                 model_name=self.model_name,
             )
 
-        return self._run_async_session(_connect)
+        return self._run_on_session_loop(_connect)
 
     def send_prompt(
         self,
@@ -376,7 +377,7 @@ class ClaudeAgentProjectEditorClient:
             )
 
         try:
-            result = self._run_async_session(_query_and_collect)
+            result = self._run_on_session_loop(_query_and_collect)
             _log_llm_interaction(
                 provider="claude-agent", model_name=self.model_name,
                 prompt=prompt, response=result.transcript,
@@ -413,13 +414,45 @@ class ClaudeAgentProjectEditorClient:
             session._closed = True
 
         try:
-            self._run_async_session_void(_disconnect)
+            self._run_on_session_loop(_disconnect)
         except Exception:
             # Best-effort disconnect; don't propagate errors from cleanup.
             session._closed = True
 
-    def _run_async_session(self, coro_factory: Any) -> Any:
-        """Run an async coroutine that returns a value, compatible with existing or no event loop."""
+    # -- Persistent event-loop for multi-turn sessions -------------------------
+    # Each call to asyncio.run() creates a fresh loop, which invalidates
+    # WebSocket connections created in the previous loop.  To keep a
+    # ClaudeSDKClient session alive across open_session / send_prompt /
+    # close_session, all three must run on the SAME loop.  We achieve this
+    # with a dedicated thread that hosts a long-lived asyncio event loop.
+
+    _session_loop: asyncio.AbstractEventLoop | None = field(default=None, init=False, repr=False)
+    _session_thread: threading.Thread | None = field(default=None, init=False, repr=False)
+
+    def _ensure_session_loop(self) -> asyncio.AbstractEventLoop:
+        """Lazily create a persistent asyncio event loop on a background thread."""
+        if self._session_loop is not None and self._session_loop.is_running():
+            return self._session_loop
+        loop = asyncio.new_event_loop()
+        self._session_loop = loop
+        self._session_thread = threading.Thread(
+            target=loop.run_forever,
+            name="claude-agent-session-loop",
+            daemon=True,
+        )
+        self._session_thread.start()
+        return loop
+
+    def _stop_session_loop(self) -> None:
+        """Stop the persistent event-loop thread (best-effort)."""
+        if self._session_loop is not None:
+            self._session_loop.call_soon_threadsafe(self._session_loop.stop)
+            self._session_loop = None
+            self._session_thread = None
+
+    def _run_on_session_loop(self, coro_factory: Any) -> Any:
+        """Run an async coroutine on the persistent session loop with timeout."""
+        loop = self._ensure_session_loop()
         timeout = float(self.timeout_seconds or 0)
 
         async def _timed_run() -> Any:
@@ -427,24 +460,15 @@ class ClaudeAgentProjectEditorClient:
                 return await coro_factory()
             return await asyncio.wait_for(coro_factory(), timeout=timeout)
 
+        future = asyncio.run_coroutine_threadsafe(_timed_run(), loop)
         try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            try:
-                return asyncio.run(_timed_run())
-            except TimeoutError as exc:
-                raise TimeoutError(
-                    f"Claude Agent SDK session timed out after {timeout:g}s."
-                ) from exc
-
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            try:
-                return executor.submit(lambda: asyncio.run(_timed_run())).result()
-            except TimeoutError as exc:
-                raise TimeoutError(
-                    f"Claude Agent SDK session timed out after {timeout:g}s."
-                ) from exc
+            return future.result(timeout=timeout if timeout > 0 else None)
+        except TimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(
+                f"Claude Agent SDK session timed out after {timeout:g}s."
+            ) from exc
 
     def _run_async_session_void(self, coro_factory: Any) -> None:
         """Run an async coroutine that returns None (e.g. disconnect)."""
-        self._run_async_session(coro_factory)
+        self._run_on_session_loop(coro_factory)

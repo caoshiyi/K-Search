@@ -255,6 +255,10 @@ class AscendCAgenticCodegenRunner:
             )
             codegen_context = {"request": request, "has_code_map": has_code_map}
             prompt = codegen.build_prompt(codegen_context)
+            # Replace absolute task-path references so the LLM only sees <PROJECT_ROOT>.
+            task_path = getattr(task, "task_path", None)
+            if task_path is not None:
+                prompt = prompt.replace(str(Path(task_path).expanduser().resolve()), "<PROJECT_ROOT>")
             telemetry_context = TelemetryContext(
                 task_name=getattr(task, "definition_name", None),
                 definition=getattr(task, "definition_name", None),
@@ -283,6 +287,26 @@ class AscendCAgenticCodegenRunner:
             project_changed_paths = session.project_changed_paths()
             changed_paths = project_changed_paths or session.changed_paths()
             changed_paths = [p for p in changed_paths if p != CODE_MAP.filename]
+            if not changed_paths:
+                # The LLM may have written edits to absolute paths outside the
+                # worktree (e.g. the original task directory).  Sync those
+                # changes into the worktree so change-detection can find them.
+                task_path = getattr(task, "task_path", None)
+                if task_path is not None:
+                    import shutil as _shutil
+                    from pathlib import Path as _P
+                    src_root = _P(task_path).expanduser().resolve()
+                    dst_root = session.project_dir
+                    ignore = _shutil.ignore_patterns(".git", "__pycache__", "build", "cmake-build-debug", "logs")
+                    try:
+                        _shutil.copytree(src_root, dst_root, dirs_exist_ok=True, ignore=ignore)
+                    except Exception as exc:  # noqa: BLE001
+                        import logging
+                        logging.getLogger(__name__).warning("mirror sync failed: %s", exc)
+                    session.commit_all("ksearch sync external edits")
+                    project_changed_paths = session.project_changed_paths()
+                    changed_paths = project_changed_paths or session.changed_paths()
+                    changed_paths = [p for p in changed_paths if p != CODE_MAP.filename]
             if not changed_paths:
                 raise RuntimeError(
                     "Claude agentic AscendC codegen did not change any files "
@@ -431,6 +455,10 @@ class AscendCAgenticCodegenRunner:
             # Attempt 1: send full prompt
             prompt = self.prompt_builder.build(request, has_code_map=has_code_map)
             prompt = sanitize_worktree_paths(prompt)
+            # Replace absolute task-path references so the LLM only sees <PROJECT_ROOT>.
+            task_path = getattr(task, "task_path", None)
+            if task_path is not None:
+                prompt = prompt.replace(str(Path(task_path).expanduser().resolve()), "<PROJECT_ROOT>")
             telemetry_context = TelemetryContext(
                 task_name=getattr(task, "definition_name", None),
                 definition=getattr(task, "definition_name", None),
@@ -459,6 +487,26 @@ class AscendCAgenticCodegenRunner:
             project_changed_paths = wt_session.project_changed_paths()
             changed_paths = project_changed_paths or wt_session.changed_paths()
             changed_paths = [p for p in changed_paths if p != CODE_MAP.filename]
+            if not changed_paths:
+                # The LLM may have written edits to absolute paths outside the
+                # worktree (e.g. the original task directory).  Sync those
+                # changes into the worktree so change-detection can find them.
+                task_path = getattr(task, "task_path", None)
+                if task_path is not None:
+                    import shutil as _shutil
+                    from pathlib import Path as _P
+                    src_root = _P(task_path).expanduser().resolve()
+                    dst_root = wt_session.project_dir
+                    ignore = _shutil.ignore_patterns(".git", "__pycache__", "build", "cmake-build-debug", "logs")
+                    try:
+                        _shutil.copytree(src_root, dst_root, dirs_exist_ok=True, ignore=ignore)
+                    except Exception as exc:  # noqa: BLE001
+                        import logging
+                        logging.getLogger(__name__).warning("mirror sync failed: %s", exc)
+                    wt_session.commit_all("ksearch sync external edits")
+                    project_changed_paths = wt_session.project_changed_paths()
+                    changed_paths = project_changed_paths or wt_session.changed_paths()
+                    changed_paths = [p for p in changed_paths if p != CODE_MAP.filename]
             if not changed_paths:
                 raise RuntimeError(
                     "Claude agentic AscendC codegen did not change any files "

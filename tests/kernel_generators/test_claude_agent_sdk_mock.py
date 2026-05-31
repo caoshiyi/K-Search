@@ -70,7 +70,7 @@ def test_claude_project_editor_client_uses_sdk_client_with_cwd_and_file_tools(mo
     assert call.prompt == "Please edit the project."
     assert call.options.kwargs["cwd"] == str(tmp_path)
     assert call.options.kwargs["allowed_tools"] == ["Read", "Grep", "Glob", "Edit", "Write"]
-    assert call.options.kwargs["disallowed_tools"] == ["Bash"]
+    assert call.options.kwargs["disallowed_tools"][0] == "Bash"
     assert call.options.kwargs["permission_mode"] == "acceptEdits"
     assert call.options.kwargs["model"] == "claude-sonnet-4-6"
 

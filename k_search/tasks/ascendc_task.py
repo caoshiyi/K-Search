@@ -200,6 +200,10 @@ def _parse_latency_ms(output: str) -> float | None:
         r"\b(?:mean_|avg_)?latency_ms\b\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)",
         r"\b(?:mean|avg)?\s*latency\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\s*ms\b",
         r"\btime_ms\b\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)",
+        r"\bmean_ms\b\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)",
+        r"\bmean\b\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\s*ms\b",
+        r"\bmean_us\b\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\b",
+        r"\bmean\b\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)\s*us\b",
     )
     for pattern in patterns:
         m = re.search(pattern, text, flags=re.IGNORECASE)
@@ -208,6 +212,10 @@ def _parse_latency_ms(output: str) -> float | None:
         try:
             val = float(m.group(1))
             if val > 0:
+                # mean_us and mean=xxxus values need conversion from us to ms
+                matched_text = m.group(0)
+                if "_us" in pattern or ("us" in matched_text and "ms" not in matched_text):
+                    return val / 1000.0
                 return val
         except Exception:
             continue

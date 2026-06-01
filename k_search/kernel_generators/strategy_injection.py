@@ -130,6 +130,39 @@ def _render_api_references_section(api_references: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _render_priorities_section(priorities: list[dict[str, Any]]) -> str:
+    """Render implementation priorities into a structured section.
+
+    Args:
+        priorities: List of dicts with priority, action, dependency fields.
+
+    Returns:
+        A formatted string with the Implementation Priority section,
+        or empty string if priorities is empty.
+    """
+    if not priorities:
+        return ""
+
+    lines = ["=== Implementation Priority ==="]
+    lines.append("Apply ONE change at a time, verify before stacking:")
+
+    for p in priorities:
+        priority = p.get("priority", "P?")
+        action = p.get("action", "unknown action")
+        dep = p.get("dependency")
+
+        lines.append(f"{priority}: {action}")
+        if dep:
+            lines.append(f"     -> Requires: {dep}")
+
+    lines.append("")
+    lines.append("Constraint: Recommended 1-2 files per round.")
+    lines.append("-> Single-file changes have 100% success rate in experiments.")
+    lines.append("-> Do NOT combine P0+P1+P2 in one round. Each round should change ONE priority level.")
+
+    return "\n".join(lines)
+
+
 def _render_anti_patterns_section(
     api_references: list[dict[str, Any]],
     strategy_id: str,

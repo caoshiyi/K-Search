@@ -314,12 +314,24 @@ def _build_action_node(
     difficulty = strategy.get("difficulty", 3)
     impact = strategy.get("impact", "medium")
     impact_score = {"low": 0.3, "medium": 0.6, "high": 0.8}.get(impact, 0.5)
+
+    # Priority: expected_speedup_interval.likely > structured_params.expected_speedup.min
     expected_speedup = None
-    sp = strategy.get("structured_params", {})
-    if isinstance(sp, dict):
-        es = sp.get("expected_speedup")
-        if isinstance(es, dict) and "min" in es:
-            expected_speedup = float(es.get("min", 1.0))
+
+    # First: try expected_speedup_interval.likely
+    interval = strategy.get("expected_speedup_interval")
+    if isinstance(interval, dict):
+        likely = interval.get("likely")
+        if isinstance(likely, (int, float)):
+            expected_speedup = float(likely)
+
+    # Fallback: structured_params.expected_speedup.min
+    if expected_speedup is None:
+        sp = strategy.get("structured_params", {})
+        if isinstance(sp, dict):
+            es = sp.get("expected_speedup")
+            if isinstance(es, dict) and "min" in es:
+                expected_speedup = float(es.get("min", 1.0))
 
     action_text = render_strategy_as_action_text(strategy, form)
     title = f"{sid}: {name}"

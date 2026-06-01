@@ -129,3 +129,105 @@ def test_render_strategy_with_priorities_and_api_refs():
 
     assert desc_pos < priorities_pos
     assert priorities_pos < api_ref_pos
+
+
+# ==============================================================================
+# Tests for _build_action_node with expected_speedup_interval
+# ==============================================================================
+
+
+def test_build_action_node_with_speedup_interval():
+    """Test that expected_speedup uses 'likely' value from interval."""
+    from k_search.kernel_generators.strategy_injection import _build_action_node
+
+    strategy = {
+        "id": "S1",
+        "name": "Test",
+        "category": "tiling",
+        "impact": "high",
+        "difficulty": 2,
+        "natural_language": "Description",
+        "expected_speedup_interval": {
+            "min": 1.30,
+            "likely": 1.47,
+            "max": 1.50,
+        },
+    }
+    node = _build_action_node(0, strategy, "natural_language")
+
+    action = node.get("action", {})
+    expected_speedup = action.get("expected_vs_baseline_factor")
+
+    assert expected_speedup == 1.47
+
+
+def test_build_action_node_without_speedup_interval():
+    """Test that expected_speedup is None when interval is missing."""
+    from k_search.kernel_generators.strategy_injection import _build_action_node
+
+    strategy = {
+        "id": "S2",
+        "name": "No Interval",
+        "category": "compute",
+        "impact": "medium",
+        "difficulty": 1,
+        "natural_language": "Description",
+    }
+    node = _build_action_node(1, strategy, "natural_language")
+
+    action = node.get("action", {})
+    expected_speedup = action.get("expected_vs_baseline_factor")
+
+    assert expected_speedup is None
+
+
+def test_build_action_node_with_structured_params_speedup():
+    """Test fallback to structured_params.expected_speedup.min when interval missing."""
+    from k_search.kernel_generators.strategy_injection import _build_action_node
+
+    strategy = {
+        "id": "S3",
+        "name": "Structured",
+        "category": "tiling",
+        "impact": "medium",
+        "difficulty": 2,
+        "natural_language": "Description",
+        "structured_params": {
+            "expected_speedup": {"min": 1.5, "max": 2.5},
+        },
+    }
+    node = _build_action_node(2, strategy, "natural_language")
+
+    action = node.get("action", {})
+    expected_speedup = action.get("expected_vs_baseline_factor")
+
+    assert expected_speedup == 1.5
+
+
+def test_build_action_node_interval_overrides_structured_params():
+    """Test that expected_speedup_interval takes precedence over structured_params."""
+    from k_search.kernel_generators.strategy_injection import _build_action_node
+
+    strategy = {
+        "id": "S4",
+        "name": "Both",
+        "category": "tiling",
+        "impact": "high",
+        "difficulty": 2,
+        "natural_language": "Description",
+        "expected_speedup_interval": {
+            "min": 1.30,
+            "likely": 1.47,
+            "max": 1.50,
+        },
+        "structured_params": {
+            "expected_speedup": {"min": 1.5, "max": 2.5},
+        },
+    }
+    node = _build_action_node(3, strategy, "natural_language")
+
+    action = node.get("action", {})
+    expected_speedup = action.get("expected_vs_baseline_factor")
+
+    # expected_speedup_interval.likely should take precedence
+    assert expected_speedup == 1.47

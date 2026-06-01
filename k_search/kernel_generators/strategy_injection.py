@@ -330,8 +330,10 @@ def _build_action_node(
         sp = strategy.get("structured_params", {})
         if isinstance(sp, dict):
             es = sp.get("expected_speedup")
-            if isinstance(es, dict) and "min" in es:
-                expected_speedup = float(es.get("min", 1.0))
+            if isinstance(es, dict):
+                min_val = es.get("min")
+                if isinstance(min_val, (int, float)):
+                    expected_speedup = float(min_val)
 
     action_text = render_strategy_as_action_text(strategy, form)
     title = f"{sid}: {name}"

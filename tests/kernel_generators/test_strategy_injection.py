@@ -3,6 +3,7 @@
 import pytest
 
 from k_search.kernel_generators.strategy_injection import (
+    _build_action_node,
     _render_api_references_section,
     _render_anti_patterns_section,
     render_strategy_as_action_text,
@@ -306,3 +307,95 @@ class TestRenderStrategyWithApiReferences:
         strategy = {"id": "S04", "name": "No content", "category": "compute"}
         with pytest.raises(ValueError, match="no natural_language field"):
             render_strategy_as_action_text(strategy, form="natural_language")
+
+
+# ---------------------------------------------------------------------------
+# _build_action_node
+# ---------------------------------------------------------------------------
+
+
+class TestBuildActionNode:
+    """Tests for _build_action_node expected_speedup handling."""
+
+    def test_build_action_node_with_min_none(self):
+        """Test that min=None does not cause TypeError and returns None."""
+        strategy = {
+            "id": "S5",
+            "name": "Min None",
+            "category": "tiling",
+            "impact": "medium",
+            "difficulty": 2,
+            "natural_language": "Description",
+            "structured_params": {
+                "expected_speedup": {"min": None},
+            },
+        }
+        node = _build_action_node(4, strategy, "natural_language")
+
+        action = node.get("action", {})
+        expected_speedup = action.get("expected_vs_baseline_factor")
+
+        # min=None 应被跳过，expected_speedup 为 None
+        assert expected_speedup is None
+
+    def test_build_action_node_with_valid_min(self):
+        """Test that valid min value is correctly extracted."""
+        strategy = {
+            "id": "S6",
+            "name": "Valid Min",
+            "category": "tiling",
+            "impact": "high",
+            "difficulty": 3,
+            "natural_language": "Description",
+            "structured_params": {
+                "expected_speedup": {"min": 2.5},
+            },
+        }
+        node = _build_action_node(5, strategy, "natural_language")
+
+        action = node.get("action", {})
+        expected_speedup = action.get("expected_vs_baseline_factor")
+
+        assert expected_speedup == 2.5
+
+    def test_build_action_node_with_expected_speedup_interval(self):
+        """Test that expected_speedup_interval.likely takes priority."""
+        strategy = {
+            "id": "S7",
+            "name": "Interval Priority",
+            "category": "compute",
+            "impact": "high",
+            "difficulty": 4,
+            "natural_language": "Description",
+            "expected_speedup_interval": {"likely": 3.0},
+            "structured_params": {
+                "expected_speedup": {"min": 2.0},
+            },
+        }
+        node = _build_action_node(6, strategy, "natural_language")
+
+        action = node.get("action", {})
+        expected_speedup = action.get("expected_vs_baseline_factor")
+
+        # expected_speedup_interval.likely takes priority over structured_params.expected_speedup.min
+        assert expected_speedup == 3.0
+
+    def test_build_action_node_with_missing_min_key(self):
+        """Test that missing min key returns None."""
+        strategy = {
+            "id": "S8",
+            "name": "No Min Key",
+            "category": "tiling",
+            "impact": "low",
+            "difficulty": 1,
+            "natural_language": "Description",
+            "structured_params": {
+                "expected_speedup": {},  # no min key
+            },
+        }
+        node = _build_action_node(7, strategy, "natural_language")
+
+        action = node.get("action", {})
+        expected_speedup = action.get("expected_vs_baseline_factor")
+
+        assert expected_speedup is None

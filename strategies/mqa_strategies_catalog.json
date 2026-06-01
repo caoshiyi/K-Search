@@ -23,7 +23,13 @@
         "expected_speedup": {"min": 1.5, "max": 2.5},
         "affected_files": ["flash_attention_tiling.h", "flash_attention_kernel.h", "flash_attention_cube.h", "flash_attention_vec.h"]
       },
-      "dsl": "TILE_SIZE { BLOCK_M: 128, BLOCK_N: 128, BASE_K: 128 } CONSTRAINT { L0A_buf: 2*BLOCK_M*BASE_K*2 <= 64KB, L1_Q_buf: BLOCK_M*dim*2 <= (512KB - KV_buf - P_buf), alignment: BLOCK_M % C0 == 0, BLOCK_N % C0 == 0 } IMPACT { bandwidth: 9/10, register: 6/10, compute: 7/10 } EXPECT { speedup: [1.5, 2.5] } FILES { tiling.h, kernel.h, cube.h, vec.h }"
+      "dsl": "TILE_SIZE { BLOCK_M: 128, BLOCK_N: 128, BASE_K: 128 } CONSTRAINT { L0A_buf: 2*BLOCK_M*BASE_K*2 <= 64KB, L1_Q_buf: BLOCK_M*dim*2 <= (512KB - KV_buf - P_buf), alignment: BLOCK_M % C0 == 0, BLOCK_N % C0 == 0 } IMPACT { bandwidth: 9/10, register: 6/10, compute: 7/10 } EXPECT { speedup: [1.5, 2.5] } FILES { tiling.h, kernel.h, cube.h, vec.h }",
+      "implementation_priorities": [
+        {"priority": "P0", "action": "Change tile size constants (BLOCK_M, BLOCK_N, BASE_K) from 64 to 128", "dependency": null},
+        {"priority": "P1", "action": "Adjust L1 buffer allocations for larger tile sizes", "dependency": "P0 verified"},
+        {"priority": "P2", "action": "Reduce loop iteration count and sync overhead", "dependency": "P0+P1 verified"}
+      ],
+      "expected_speedup_interval": {"min": 1.30, "likely": 1.47, "max": 1.50, "rationale": "min accounts for dim=512 L1 pressure fallback; likely based on dim=128 basic case实测; max is ideal L0 utilization"}
     },
     {
       "id": "S2",
@@ -47,7 +53,13 @@
         "expected_speedup": {"min": 1.2, "max": 1.5},
         "affected_files": ["workspace_queue.h", "flash_attention_cube.h", "flash_attention_vec.h", "flash_attention_kernel.h"]
       },
-      "dsl": "WORKSPACE_QUEUE { T: QType, DEPTH: RING_SLOTS } METHOD { ProducerAcquire: ws_[head_%DEPTH*slotSize_], ProducerReleaseFix: CrossCoreSetFlag<0x2,PIPE_FIX>(notifyId_)+head_++, ProducerReleaseMte3: CrossCoreSetFlag<0x2,PIPE_MTE3>(notifyId_)+head_++, ConsumerAcquire: CrossCoreWaitFlag<0x2,PIPE_MTE2>(notifyId_)+ws_[tail_++%DEPTH*slotSize_] } SIGNALS { S_READY: 0_PIPE_FIX, P_READY: 1_PIPE_MTE3, O_READY: 2_PIPE_FIX } EXPECT { speedup: [1.2, 1.5] } FILES { workspace_queue.h, cube.h, vec.h, kernel.h }"
+      "dsl": "WORKSPACE_QUEUE { T: QType, DEPTH: RING_SLOTS } METHOD { ProducerAcquire: ws_[head_%DEPTH*slotSize_], ProducerReleaseFix: CrossCoreSetFlag<0x2,PIPE_FIX>(notifyId_)+head_++, ProducerReleaseMte3: CrossCoreSetFlag<0x2,PIPE_MTE3>(notifyId_)+head_++, ConsumerAcquire: CrossCoreWaitFlag<0x2,PIPE_MTE2>(notifyId_)+ws_[tail_++%DEPTH*slotSize_] } SIGNALS { S_READY: 0_PIPE_FIX, P_READY: 1_PIPE_MTE3, O_READY: 2_PIPE_FIX } EXPECT { speedup: [1.2, 1.5] } FILES { workspace_queue.h, cube.h, vec.h, kernel.h }",
+      "implementation_priorities": [
+        {"priority": "P0", "action": "Add WorkspaceQueue class encapsulating workspace ring-buffer management", "dependency": null},
+        {"priority": "P1", "action": "Integrate WorkspaceQueue in Cube side (AIC)", "dependency": "P0 verified"},
+        {"priority": "P2", "action": "Integrate WorkspaceQueue in Vector side (AIV)", "dependency": "P1 verified"}
+      ],
+      "expected_speedup_interval": {"min": 1.20, "likely": 1.35, "max": 1.50, "rationale": "min assumes basic sync fix; likely based on reference implementation; max is ideal pipeline overlap"}
     },
     {
       "id": "S3",
@@ -70,7 +82,12 @@
         "expected_speedup": {"min": 1.05, "max": 1.15},
         "affected_files": ["flash_attention_cube.h"]
       },
-      "dsl": "CACHE_SKIP { target: Q, fields: [qChunkStart_, qChunkId_, qChunkRowsAlign_], init: 0xffffffff, check: qChunkStart_==qRowStart && qChunkId_==chunkId, update: qChunkStart_=qRowStart; qChunkId_=chunkId; qChunkRowsAlign_=AlignUp(qChunkRows,C0) } BENEFIT { GM_traffic_reduction: proportional to kvSeqLen/BLOCK_N per Q reuse } EXPECT { speedup: [1.05, 1.15] } FILES { cube.h }"
+      "dsl": "CACHE_SKIP { target: Q, fields: [qChunkStart_, qChunkId_, qChunkRowsAlign_], init: 0xffffffff, check: qChunkStart_==qRowStart && qChunkId_==chunkId, update: qChunkStart_=qRowStart; qChunkId_=chunkId; qChunkRowsAlign_=AlignUp(qChunkRows,C0) } BENEFIT { GM_traffic_reduction: proportional to kvSeqLen/BLOCK_N per Q reuse } EXPECT { speedup: [1.05, 1.15] } FILES { cube.h }",
+      "implementation_priorities": [
+        {"priority": "P0", "action": "Add Q chunk caching mechanism with qChunkStart_ and qChunkId_ fields", "dependency": null},
+        {"priority": "P1", "action": "Implement cache skip logic in LoadQ function", "dependency": "P0 verified"}
+      ],
+      "expected_speedup_interval": {"min": 1.05, "likely": 1.10, "max": 1.15, "rationale": "min assumes partial KV reuse; likely based on typical MQA kvSeqLen; max is ideal full reuse"}
     },
     {
       "id": "S4",
@@ -136,7 +153,7 @@
         {
           "api_name": "RowDivs",
           "doc_path": "api_reference_docs/基础API/矢量计算/基础算术/RowDivs.md",
-          "summary": "RowDivs不是AscendC框架内置API，而是用户自定义__aicore__ inline函数。签名: RowDivs(dstUb, src0Ub, src1Ub, dealRowCount, columnCount, actualColumnCount)。底层实现: Div(dst,src0,src1,count,repeatTimes,BinaryRepeatParams{src1BlkStride=0,src1RepStride=1})。使用前必须定义此函数（源码参考: references/row_ops_source_reference/vector_common_row_ops.h）。",
+          "summary": "RowDivs不是AscendC框架内置API，而是用户定义__aicore__ inline函数。签名: RowDivs(dstUb, src0Ub, src1Ub, dealRowCount, columnCount, actualColumnCount)。底层实现: Div(dst,src0,src1,count,repeatTimes,BinaryRepeatParams{src1BlkStride=0,src1RepStride=1})。使用前必须定义此函数（源码参考: references/row_ops_source_reference/vector_common_row_ops.h）。",
           "anti_patterns": [
             {
               "id": "ap1",
@@ -183,7 +200,12 @@
           "summary": "Brcb(dst, src, repeatTimes, dstStride). 需要4参数，不可只传3个。用于行级广播复制。",
           "anti_patterns": []
         }
-      ]
+      ],
+      "implementation_priorities": [
+        {"priority": "P0", "action": "Replace scalar RowMulsImpl loops with vectorized RowMuls helper function", "dependency": null},
+        {"priority": "P1", "action": "Replace scalar RowDivsImpl loops with vectorized RowDivs helper function", "dependency": "P0 verified"}
+      ],
+      "expected_speedup_interval": {"min": 1.10, "likely": 1.20, "max": 1.30, "rationale": "min assumes partial vectorization; likely based on typical softmax row count; max is ideal full vector width"}
     },
     {
       "id": "S5",
@@ -204,7 +226,11 @@
         "expected_speedup": {"min": 1.05, "max": 1.15},
         "affected_files": ["flash_attention_vec.h"]
       },
-      "dsl": "VEC2_CHUNK { VEC2_M_CHUNK: 64 } UB_CHECK { oPrevBuf: 64*dimAlign*4 <= (196KB - other_bufs) } EXPECT { speedup: [1.05, 1.15] } FILES { vec.h }"
+      "dsl": "VEC2_CHUNK { VEC2_M_CHUNK: 64 } UB_CHECK { oPrevBuf: 64*dimAlign*4 <= (196KB - other_bufs) } EXPECT { speedup: [1.05, 1.15] } FILES { vec.h }",
+      "implementation_priorities": [
+        {"priority": "P0", "action": "Increase VEC2_M_CHUNK constant from 8 to 64", "dependency": null}
+      ],
+      "expected_speedup_interval": {"min": 1.05, "likely": 1.10, "max": 1.15, "rationale": "min assumes partial row processing; likely based on typical UB budget; max is ideal full chunk"}
     },
     {
       "id": "S6",
@@ -229,7 +255,13 @@
         "expected_speedup": {"min": 1.05, "max": 1.1},
         "affected_files": ["flash_attention_vec.h"]
       },
-      "dsl": "SOFTMAX_STATE_CACHE { location: UB, stride: AlignUp(subBlockRows_*BRCB_NUM*4,32)/4, slots: RING_SLOTS, default: {max: -1e9, sum: 0} } BUF_ALLOC { maxCacheBuf_: TBuf<VECCALC> RING_SLOTS*stride*4, sumCacheBuf_: TBuf<VECCALC> RING_SLOTS*stride*4, expCacheBuf_: TBuf<VECCALC> RING_SLOTS*stride*4 } EXPECT { speedup: [1.05, 1.1] } FILES { vec.h }"
+      "dsl": "SOFTMAX_STATE_CACHE { location: UB, stride: AlignUp(subBlockRows_*BRCB_NUM*4,32)/4, slots: RING_SLOTS, default: {max: -1e9, sum: 0} } BUF_ALLOC { maxCacheBuf_: TBuf<VECCALC> RING_SLOTS*stride*4, sumCacheBuf_: TBuf<VECCALC> RING_SLOTS*stride*4, expCacheBuf_: TBuf<VECCALC> RING_SLOTS*stride*4 } EXPECT { speedup: [1.05, 1.1] } FILES { vec.h }",
+      "implementation_priorities": [
+        {"priority": "P0", "action": "Add maxCacheBuf_, sumCacheBuf_, expCacheBuf_ buffer allocations", "dependency": null},
+        {"priority": "P1", "action": "Modify Vec1 to write state to UB cache instead of GM workspace", "dependency": "P0 verified"},
+        {"priority": "P2", "action": "Modify Vec2 to read state from UB cache", "dependency": "P1 verified"}
+      ],
+      "expected_speedup_interval": {"min": 1.05, "likely": 1.08, "max": 1.10, "rationale": "min assumes partial GM reduction; likely based on typical state size; max is ideal zero GM round-trips"}
     },
     {
       "id": "S7",
@@ -252,7 +284,13 @@
         "expected_speedup": {"min": 1.02, "max": 1.08},
         "affected_files": ["flash_attention_vec.h"]
       },
-      "dsl": "SUB_BLOCK { subBlockNum: GetSubBlockNum(), subBlockIdx: GetSubBlockIdx(), subBlockRows: BLOCK_M/subBlockNum, rowStart: subBlockIdx*subBlockRows } BUF_SIZE { inputQue: subBlockRows*BLOCK_N*4, outputQue: subBlockRows*BLOCK_N*2 } EXPECT { speedup: [1.02, 1.08] } FILES { vec.h }"
+      "dsl": "SUB_BLOCK { subBlockNum: GetSubBlockNum(), subBlockIdx: GetSubBlockIdx(), subBlockRows: BLOCK_M/subBlockNum, rowStart: subBlockIdx*subBlockRows } BUF_SIZE { inputQue: subBlockRows*BLOCK_N*4, outputQue: subBlockRows*BLOCK_N*2 } EXPECT { speedup: [1.02, 1.08] } FILES { vec.h }",
+      "implementation_priorities": [
+        {"priority": "P0", "action": "Add subBlockRows_, rowStart_ calculation logic", "dependency": null},
+        {"priority": "P1", "action": "Adjust Vec1 buffer sizes for subBlockRows_", "dependency": "P0 verified"},
+        {"priority": "P2", "action": "Adjust Vec2 buffer sizes for subBlockRows_", "dependency": "P1 verified"}
+      ],
+      "expected_speedup_interval": {"min": 1.02, "likely": 1.05, "max": 1.08, "rationale": "min assumes basic subblock; likely based on MIX_AIC_1_2 mode; max is ideal UB pressure reduction"}
     },
     {
       "id": "S8",
@@ -280,7 +318,12 @@
         "expected_speedup": {"min": 1.2, "max": 1.5},
         "affected_files": ["flash_attention_cube.h", "flash_attention_vec.h"]
       },
-      "dsl": "BARRIER { cube: { M_MTE1: before_LoadData_L0, MTE1_M+PIPE_M: before_Mmad, M_FIX: before_Fixpipe, FIX_MTE2: after_Fixpipe }, vector: { MTE3_MTE2: before_DataCopy_GM2UB, MTE2_V: before_vec_compute, PIPE_V: after_vec_compute, V_MTE3: before_DataCopy_UB2GM, MTE3_V: after_GM_write } } REPLACE { PipeBarrier<PIPE_ALL> -> targeted_SetWaitFlag } EXPECT { speedup: [1.2, 1.5] } FILES { cube.h, vec.h }"
+      "dsl": "BARRIER { cube: { M_MTE1: before_LoadData_L0, MTE1_M+PIPE_M: before_Mmad, M_FIX: before_Fixpipe, FIX_MTE2: after_Fixpipe }, vector: { MTE3_MTE2: before_DataCopy_GM2UB, MTE2_V: before_vec_compute, PIPE_V: after_vec_compute, V_MTE3: before_DataCopy_UB2GM, MTE3_V: after_GM_write } } REPLACE { PipeBarrier<PIPE_ALL> -> targeted_SetWaitFlag } EXPECT { speedup: [1.2, 1.5] } FILES { cube.h, vec.h }",
+      "implementation_priorities": [
+        {"priority": "P0", "action": "Replace PipeBarrier<PIPE_ALL> in Cube with targeted SetWaitFlag", "dependency": null},
+        {"priority": "P1", "action": "Replace PipeBarrier<PIPE_ALL> in Vector with targeted SetWaitFlag", "dependency": "P0 verified"}
+      ],
+      "expected_speedup_interval": {"min": 1.20, "likely": 1.35, "max": 1.50, "rationale": "min assumes partial overlap; likely based on reference implementation; max is ideal full pipeline overlap"}
     },
     {
       "id": "S9",
@@ -297,7 +340,12 @@
         "expected_speedup": {"min": 1.02, "max": 1.05},
         "affected_files": ["flash_attention_vec.h"]
       },
-      "dsl": "DEDICATED_BUF { name: oPrevBuf_, type: TBuf<VECCALC>, size: VEC2_M_CHUNK*dimAlign*4, tensor: oPrevUb_ = oPrevBuf_.Get<float>() } USAGE { DataCopy(wsAccOGm->oPrevUb_), RowMuls(oPrevUb_,oPrevUb_,expState), Add(oNewUb+=oPrevUb_) } EXPECT { speedup: [1.02, 1.05] } FILES { vec.h }"
+      "dsl": "DEDICATED_BUF { name: oPrevBuf_, type: TBuf<VECCALC>, size: VEC2_M_CHUNK*dimAlign*4, tensor: oPrevUb_ = oPrevBuf_.Get<float>() } USAGE { DataCopy(wsAccOGm->oPrevUb_), RowMuls(oPrevUb_,oPrevUb_,expState), Add(oNewUb+=oPrevUb_) } EXPECT { speedup: [1.02, 1.05] } FILES { vec.h }",
+      "implementation_priorities": [
+        {"priority": "P0", "action": "Allocate dedicated TBuf<VECCALC> oPrevBuf_", "dependency": null},
+        {"priority": "P1", "action": "Modify Vec2 to use oPrevBuf_ instead of TQue slot", "dependency": "P0 verified"}
+      ],
+      "expected_speedup_interval": {"min": 1.02, "likely": 1.03, "max": 1.05, "rationale": "min assumes basic UB reduction; likely based on typical TQue pressure; max is ideal zero TQue contention"}
     },
     {
       "id": "S10",
@@ -321,7 +369,13 @@
         "expected_speedup": {"min": 1.3, "max": 2.0},
         "affected_files": ["flash_attention_tiling.h", "flash_attention_tiling.cpp", "flash_attention_kernel.h", "flash_attention_cube.h"]
       },
-      "dsl": "OUTER_TILING { s2OuterBlocks: ceil(kvSeqLen/s2BaseSize), s2BaseSize: from_host_tiling } LOOP { outer: for(s2OuterIdx=0;s2OuterIdx<s2OuterBlocks), inner: for(t=0;t<microNLoops+PRELAUNCH) } Q_RESIDENCY { load_once_per_outer_block, reuse_across_inner_tiles } TILE_BASE { accumulate: tileBase+=microNLoops } EXPECT { speedup: [1.3, 2.0] } FILES { tiling.h, tiling.cpp, kernel.h, cube.h }"
+      "dsl": "OUTER_TILING { s2OuterBlocks: ceil(kvSeqLen/s2BaseSize), s2BaseSize: from_host_tiling } LOOP { outer: for(s2OuterIdx=0;s2OuterIdx<s2OuterBlocks), inner: for(t=0;t<microNLoops+PRELAUNCH) } Q_RESIDENCY { load_once_per_outer_block, reuse_across_inner_tiles } TILE_BASE { accumulate: tileBase+=microNLoops } EXPECT { speedup: [1.3, 2.0] } FILES { tiling.h, tiling.cpp, kernel.h, cube.h }",
+      "implementation_priorities": [
+        {"priority": "P0", "action": "Add s2OuterBlocks and s2BaseSize parameters in host tiling", "dependency": null},
+        {"priority": "P1", "action": "Implement outer loop structure in kernel", "dependency": "P0 verified"},
+        {"priority": "P2", "action": "Add Q residency optimization across inner tiles", "dependency": "P1 verified"}
+      ],
+      "expected_speedup_interval": {"min": 1.30, "likely": 1.50, "max": 2.00, "rationale": "min assumes partial Q reuse; likely based on typical kvSeqLen; max is ideal full outer block reuse"}
     },
     {
       "id": "S11",
@@ -343,7 +397,12 @@
         "expected_speedup": {"min": 1.05, "max": 1.15},
         "affected_files": ["flash_attention_cube.h"]
       },
-      "dsl": "SINGLE_BUF { kvBufL1_: TBuf<A1> BLOCK_N*dim*sizeof(QType), vBufL1_: TBuf<A1> BLOCK_N*dim*sizeof(QType) } REMOVE { kBufL1_0, kBufL1_1, vBufL1_0, vBufL1_1 } L1_SAVINGS { 2*BLOCK_N*dim*sizeof(QType) } RATIONALE { WorkspaceQueue_sync_eliminates_need_for_L1_double_buffer } EXPECT { speedup: [1.05, 1.15] } FILES { cube.h }"
+      "dsl": "SINGLE_BUF { kvBufL1_: TBuf<A1> BLOCK_N*dim*sizeof(QType), vBufL1_: TBuf<A1> BLOCK_N*dim*sizeof(QType) } REMOVE { kBufL1_0, kBufL1_1, vBufL1_0, vBufL1_1 } L1_SAVINGS { 2*BLOCK_N*dim*sizeof(QType) } RATIONALE { WorkspaceQueue_sync_eliminates_need_for_L1_double_buffer } EXPECT { speedup: [1.05, 1.15] } FILES { cube.h }",
+      "implementation_priorities": [
+        {"priority": "P0", "action": "Replace kBufL1_0/1 with single kvBufL1_", "dependency": null},
+        {"priority": "P1", "action": "Replace vBufL1_0/1 with single vBufL1_", "dependency": "P0 verified"}
+      ],
+      "expected_speedup_interval": {"min": 1.05, "likely": 1.10, "max": 1.15, "rationale": "min assumes partial L1 savings; likely based on WorkspaceQueue sync; max is ideal full L1 release"}
     },
     {
       "id": "S12",
@@ -370,7 +429,12 @@
         "expected_speedup": {"min": 1.0, "max": 1.05},
         "affected_files": ["flash_attention_cube.h"]
       },
-      "dsl": "REMAIN_LOOP { MM1: { kRemain: dim%BASE_K, kAligned: AlignUp(kRemain,C0), cmatrix_init: kTiles==0 }, MM2: { nRemain: dim%BASE_K, nAligned: AlignUp(nRemain,C0), cmatrix_init: true, Fixpipe: NzL0cToNdGm } } CORRECTNESS { ensures_all_dim_values_handled } EXPECT { speedup: [1.0, 1.05] } FILES { cube.h }"
+      "dsl": "REMAIN_LOOP { MM1: { kRemain: dim%BASE_K, kAligned: AlignUp(kRemain,C0), cmatrix_init: kTiles==0 }, MM2: { nRemain: dim%BASE_K, nAligned: AlignUp(nRemain,C0), cmatrix_init: true, Fixpipe: NzL0cToNdGm } } CORRECTNESS { ensures_all_dim_values_handled } EXPECT { speedup: [1.0, 1.05] } FILES { cube.h }",
+      "implementation_priorities": [
+        {"priority": "P0", "action": "Add kRemain loop in MM1 for dim % BASE_K handling", "dependency": null},
+        {"priority": "P1", "action": "Add nRemain loop in MM2 for dim % BASE_K handling", "dependency": "P0 verified"}
+      ],
+      "expected_speedup_interval": {"min": 1.00, "likely": 1.02, "max": 1.05, "rationale": "min assumes no speedup (correctness fix); likely based on typical dim values; max is ideal edge case optimization"}
     }
   ]
 }

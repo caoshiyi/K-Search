@@ -89,12 +89,14 @@ class WorldModelManager:
         target_gpu: str,
         language: str,
         config: WorldModelConfig | None = None,
+        strategy_catalog_path: str | None = None,
     ):
         self._llm_call = llm_call
         self._target_gpu = target_gpu
         self._language = language
         self._cfg = config or WorldModelConfig()
         self._world_models: Dict[str, str] = {}
+        self._strategy_catalog_path = strategy_catalog_path
         # Debug/reporting: last edit-ops application summary (applied vs skipped).
         self._last_apply_ops_report: dict | None = None
 
@@ -1287,6 +1289,161 @@ class WorldModelManager:
         if candidate:
             self.set(name, candidate)
         return candidate
+
+    def learn_anti_pattern_from_round_failure(
+        self,
+        *,
+        definition_name: str,
+        round_index: int,
+        failure_reason: str | None = None,
+        changed_files: list[str] | None = None,
+    ) -> bool:
+        """Attempt to learn a new anti-pattern from a round failure.
+
+        This is a lightweight, deterministic trigger that checks if:
+        1. A strategy_catalog_path is configured
+        2. The failure involves an API misuse (based on failure_reason keywords)
+        3. The active leaf node's strategy has api_references
+
+        If conditions are met, uses the LLM to analyze the failure and generate
+        an anti_pattern, then writes it back to the catalog file.
+
+        Returns True if a new anti-pattern was learned and saved, False otherwise.
+        """
+        if not self._strategy_catalog_path:
+            return False
+
+        from .strategy_injection import load_strategy_catalog, learn_anti_pattern_from_failure
+
+        catalog_path = Path(self._strategy_catalog_path).expanduser().resolve()
+        if not catalog_path.exists():
+            return False
+
+        # Load current catalog
+        try:
+            catalog_list = load_strategy_catalog(catalog_path)
+        except Exception:
+            return False
+
+        # Find which strategy the active leaf belongs to
+        name = str(definition_name or "").strip()
+        if not name:
+            return False
+
+        wm = self.get(name)
+        if not wm:
+            return False
+
+        obj = load_world_model_obj(wm)
+        if not isinstance(obj, dict):
+            return False
+        dt = obj.get("decision_tree")
+        if not isinstance(dt, dict):
+            return False
+        active_id = str(dt.get("active_leaf_id", "") or "").strip()
+
+        # Match active leaf to a strategy by node_id pattern "s{i+1}"
+        strategy_idx = None
+        if active_id.startswith("s"):
+            try:
+                strategy_idx = int(active_id[1:]) - 1
+            except ValueError:
+                pass
+
+        if strategy_idx is None or strategy_idx < 0 or strategy_idx >= len(catalog_list):
+            return False
+
+        strategy = catalog_list[strategy_idx]
+        strategy_id = str(strategy.get("id", "") or "").strip()
+        api_refs = strategy.get("api_references", [])
+        if not isinstance(api_refs, list) or not api_refs:
+            return False
+
+        # Check if failure_reason suggests API misuse
+        failure_text = str(failure_reason or "").lower()
+        api_keywords = ["api", "compile", "undeclared", "argument", "type", "precision", "accuracy", "mismatch"]
+        has_api_failure_hint = any(kw in failure_text for kw in api_keywords)
+        if not has_api_failure_hint and not changed_files:
+            return False
+
+        # Use LLM to analyze failure and extract anti-pattern
+        prompt = (
+            f"A kernel optimization round failed. Analyze the failure and extract an anti-pattern.\n\n"
+            f"Strategy: {strategy_id} - {strategy.get('name', '')}\n"
+            f"Strategy natural_language: {str(strategy.get('natural_language', '') or '')[:500]}\n\n"
+            f"APIs involved in this strategy:\n"
+        )
+        for ref in api_refs:
+            prompt += f"  - {ref.get('api_name', '')}: {str(ref.get('summary', '') or '')[:200]}\n"
+        prompt += f"\nFailure reason: {str(failure_reason or 'unknown')}\n"
+        if changed_files:
+            prompt += f"Changed files: {', '.join(changed_files)}\n"
+        prompt += (
+            f"\nExisting anti-patterns for these APIs:\n"
+        )
+        for ref in api_refs:
+            for ap in ref.get("anti_patterns", []):
+                prompt += f"  - [{ap.get('id', '')}] {ap.get('pattern', '')}: {ap.get('reason', '')}\n"
+        prompt += (
+            "\nBased on this failure, identify which API was misused and how. "
+            "Output a JSON object with exactly these fields:\n"
+            "  api_name: which API was misused (must match one of the API names listed above)\n"
+            "  pattern: short description of the misused pattern (what the code did wrong)\n"
+            "  reason: why this pattern is incorrect on AscendC hardware\n\n"
+            "Output ONLY the JSON object, no commentary."
+        )
+
+        try:
+            raw = (self._llm_call(prompt) or "").strip()
+        except Exception:
+            return False
+
+        # Parse the LLM response as JSON
+        import json as json_mod
+        # Strip markdown code fences if present
+        raw = raw.strip()
+        if raw.startswith("```"):
+            lines = raw.split("\n")
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            raw = "\n".join(lines)
+        try:
+            parsed = json_mod.loads(raw)
+        except json_mod.JSONDecodeError:
+            return False
+
+        if not isinstance(parsed, dict):
+            return False
+
+        api_name = str(parsed.get("api_name", "") or "").strip()
+        pattern = str(parsed.get("pattern", "") or "").strip()
+        reason = str(parsed.get("reason", "") or "").strip()
+
+        if not api_name or not pattern or not reason:
+            return False
+
+        # Verify api_name exists in the strategy's api_references
+        matching_apis = [r for r in api_refs if str(r.get("api_name", "") or "").strip() == api_name]
+        if not matching_apis:
+            return False
+
+        # Learn the anti-pattern
+        new_ap = {"pattern": pattern, "reason": reason, "api_name_hint": api_name}
+        updated_catalog = learn_anti_pattern_from_failure(
+            strategy_catalog=catalog_list,
+            strategy_id=strategy_id,
+            api_name=api_name,
+            new_anti_pattern=new_ap,
+            round_index=round_index,
+        )
+
+        # Write back to catalog file
+        try:
+            catalog_data = {"strategy_catalog": updated_catalog}
+            with open(catalog_path, "w", encoding="utf-8") as f:
+                json_mod.dump(catalog_data, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception:
+            return False
 
     @staticmethod
     def _action_is_closed(n: dict) -> bool:

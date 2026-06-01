@@ -1,7 +1,10 @@
 """Tests for implementation_priorities rendering."""
 
 import pytest
-from k_search.kernel_generators.strategy_injection import _render_priorities_section
+from k_search.kernel_generators.strategy_injection import (
+    _render_priorities_section,
+    render_strategy_as_action_text,
+)
 
 
 def test_render_priorities_section_basic():
@@ -48,3 +51,81 @@ def test_render_priorities_section_missing_fields():
     result = _render_priorities_section(priorities)
 
     assert "P0: unknown action" in result
+
+
+# ==============================================================================
+# Tests for render_strategy_as_action_text with implementation_priorities
+# ==============================================================================
+
+
+def test_render_strategy_with_priorities():
+    """Test that priorities section appears after natural_language."""
+    strategy = {
+        "id": "S1",
+        "name": "Test Strategy",
+        "category": "tiling",
+        "impact": "high",
+        "difficulty": 2,
+        "natural_language": "This is the strategy description.",
+        "implementation_priorities": [
+            {"priority": "P0", "action": "First step", "dependency": None},
+            {"priority": "P1", "action": "Second step", "dependency": "P0 verified"},
+        ],
+    }
+    result = render_strategy_as_action_text(strategy, form="natural_language")
+
+    # 策略描述应该在前面
+    strategy_desc_pos = result.find("Strategy S1: Test Strategy")
+    priorities_pos = result.find("=== Implementation Priority ===")
+
+    assert strategy_desc_pos < priorities_pos
+    assert "This is the strategy description" in result
+    assert "P0: First step" in result
+    assert "P1: Second step" in result
+
+
+def test_render_strategy_without_priorities():
+    """Test that strategy without priorities still renders correctly."""
+    strategy = {
+        "id": "S2",
+        "name": "No Priorities",
+        "category": "compute",
+        "impact": "medium",
+        "difficulty": 1,
+        "natural_language": "Simple strategy without priorities.",
+    }
+    result = render_strategy_as_action_text(strategy, form="natural_language")
+
+    assert "=== Implementation Priority ===" not in result
+    assert "Simple strategy without priorities" in result
+
+
+def test_render_strategy_with_priorities_and_api_refs():
+    """Test ordering: description -> priorities -> api_refs -> anti_patterns."""
+    strategy = {
+        "id": "S4",
+        "name": "Complex Strategy",
+        "category": "compute",
+        "impact": "high",
+        "difficulty": 2,
+        "natural_language": "Strategy description.",
+        "implementation_priorities": [
+            {"priority": "P0", "action": "Step one", "dependency": None},
+        ],
+        "api_references": [
+            {
+                "api_name": "RowMuls",
+                "doc_path": "some/path.md",
+                "summary": "API summary",
+            }
+        ],
+    }
+    result = render_strategy_as_action_text(strategy, form="natural_language")
+
+    # 检查顺序
+    desc_pos = result.find("Strategy description")
+    priorities_pos = result.find("=== Implementation Priority ===")
+    api_ref_pos = result.find("=== AscendC API Reference ===")
+
+    assert desc_pos < priorities_pos
+    assert priorities_pos < api_ref_pos

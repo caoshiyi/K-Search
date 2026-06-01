@@ -88,6 +88,13 @@ def render_strategy_as_action_text(
     else:
         raise ValueError(f"Unhandled form: {form}")
 
+    # === Implementation Priorities Section（放在策略描述后面）===
+    priorities = strategy.get("implementation_priorities")
+    if isinstance(priorities, list) and priorities:
+        priority_section = _render_priorities_section(priorities)
+        if priority_section:
+            base_text = base_text + "\n\n" + priority_section
+
     # Append API Reference and Anti-Pattern sections if api_references exists
     api_references = strategy.get("api_references")
     if isinstance(api_references, list) and api_references:

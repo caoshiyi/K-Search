@@ -136,6 +136,9 @@ def generate_and_evaluate(
     wm_stagnation_window: int = 5,
     wm_max_difficulty: Optional[int] = None,
     artifacts_dir: Optional[str] = None,
+    # Strategy injection
+    strategy_file: Optional[str] = None,
+    strategy_form: Optional[str] = None,
 ) -> None:
     """
     Generate exactly one solution for the task, then run final evaluation.
@@ -213,6 +216,8 @@ def generate_and_evaluate(
             artifacts_dir=artifacts_dir,
             wm_max_difficulty=wm_max_difficulty,
             llm_provider=llm_provider,
+            strategy_file=strategy_file,
+            strategy_form=strategy_form,
         )
     else:
         # Non-world-model mode: baseline-style generator (task-driven).
@@ -517,6 +522,29 @@ def main():
         ),
     )
 
+    # Strategy injection options
+    parser.add_argument(
+        "--strategy-file",
+        default=None,
+        help=(
+            "Path to a strategy catalog JSON file. When provided alongside --world-model, "
+            "the WM decision tree is seeded with strategy-derived action nodes instead of "
+            "LLM-generated ones. Enables controlled strategy-form experiments."
+        ),
+    )
+    parser.add_argument(
+        "--strategy-form",
+        choices=["natural_language", "structured_params", "dsl"],
+        default=None,
+        help=(
+            "Strategy rendering form for action text injection. "
+            "'natural_language' renders plain English descriptions. "
+            "'structured_params' renders JSON parameter specifications. "
+            "'dsl' renders domain-specific language specifications. "
+            "Must be used with --strategy-file."
+        ),
+    )
+
     args = parser.parse_args()
 
     # MLX runs on Apple Silicon; the CUDA-style --target-gpu hint is not meaningful.
@@ -563,6 +591,8 @@ def main():
         enable_wandb=args.wandb,
         wandb_project=args.wandb_project,
         run_name=args.run_name,
+        strategy_file=args.strategy_file,
+        strategy_form=args.strategy_form,
     )
 
 

@@ -129,11 +129,25 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         world_model_max_chars: int = 50000,
         artifacts_dir: str | None = None,
         wm_max_difficulty: int | None = None,
+        # Strategy injection: load external strategy catalog and seed WM with strategy-derived nodes.
+        strategy_file: str | None = None,
+        strategy_form: str | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self._world_model_max_chars = int(world_model_max_chars)
         self._artifacts_dir = artifacts_dir
+        self._strategy_file = strategy_file
+        self._strategy_form = strategy_form
+
+        # Load strategy catalog if provided
+        self._strategy_catalog: list[dict[str, Any]] | None = None
+        if strategy_file:
+            from k_search.kernel_generators.strategy_injection import load_strategy_catalog
+            self._strategy_catalog = load_strategy_catalog(strategy_file)
+            if not strategy_form:
+                strategy_form = "natural_language"
+            print(f"[STRATEGY] Loaded {len(self._strategy_catalog)} strategies from {strategy_file}, form={strategy_form}")
 
         def _llm_call(prompt: str) -> str:
             with llm_log_context(flow="world_model", phase="world_model_manager"):
@@ -315,15 +329,36 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         else:
             _stage("initialize world model")
             t0 = time.perf_counter()
-            with llm_log_context(
-                operator=str(getattr(task, "name", "") or ""),
-                flow="world_model",
-                round_index=0,
-                stage="world_model_init",
-                language=str(self.language),
-                target_gpu=str(self.target_gpu),
-            ):
-                wm = self._wm.ensure_initialized(definition_name=task.name, definition_text=definition_text)
+
+            # Strategy injection: if strategy_file is provided, build WM from catalog
+            # instead of using LLM-generated initialization.
+            if self._strategy_catalog is not None and self._strategy_form:
+                from k_search.kernel_generators.strategy_injection import (
+                    build_wm_from_strategies,
+                )
+                from k_search.kernel_generators.world_model import dump_world_model_obj
+                _emit(f"[STRATEGY] Building WM from strategy catalog ({len(self._strategy_catalog)} strategies, form={self._strategy_form})")
+                wm_obj = build_wm_from_strategies(
+                    strategy_catalog=self._strategy_catalog,
+                    form=self._strategy_form,
+                    definition_name=task.name,
+                    kernel_summary=str(definition_text[:500] or ""),
+                )
+                wm_json = dump_world_model_obj(wm_obj)
+                self._wm.set(task.name, wm_json)
+                wm = wm_json
+                _emit("[STRATEGY] WM built from catalog (no LLM init call needed)")
+            else:
+                with llm_log_context(
+                    operator=str(getattr(task, "name", "") or ""),
+                    flow="world_model",
+                    round_index=0,
+                    stage="world_model_init",
+                    language=str(self.language),
+                    target_gpu=str(self.target_gpu),
+                ):
+                    wm = self._wm.ensure_initialized(definition_name=task.name, definition_text=definition_text)
+
             dt = time.perf_counter() - t0
             _emit(render_world_model_status(wm))
             _emit(f"[STAGE] world model init latency: {dt:.2f}s")
@@ -474,29 +509,32 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 stagnation_window = 1
 
             _stage(f"world model: select next action (cycle start @ round {cycle_start_round})")
-            try:
-                wm_code = _wm_guardrail(_code_for_wm_from_raw(current_raw_code))
-                with llm_log_context(
-                    operator=str(getattr(task, "name", "") or ""),
-                    flow="world_model",
-                    round_index=cycle_start_round,
-                    stage="world_model_propose_actions",
-                    language=str(self.language),
-                    target_gpu=str(self.target_gpu),
-                ):
-                    self._wm.propose_action_nodes(
-                        definition_name=task.name,
-                        definition_text=definition_text,
-                        current_code_excerpt=(str(wm_code) if str(wm_code).strip() else None),
-                        current_tree_path=self._wm.get_tree_path_text(definition_name=task.name),
-                        baseline_targets_text=baseline_targets_text,
+            # When strategy injection is active, skip LLM propose_action_nodes.
+            # The action nodes are already seeded from the strategy catalog.
+            if self._strategy_catalog is None:
+                try:
+                    wm_code = _wm_guardrail(_code_for_wm_from_raw(current_raw_code))
+                    with llm_log_context(
+                        operator=str(getattr(task, "name", "") or ""),
+                        flow="world_model",
                         round_index=cycle_start_round,
-                    )
-            except LLMProviderFatalError as exc:
-                _emit(f"[ERROR] world model action proposal failed with fatal provider error: {exc}")
-                raise
-            except Exception as exc:
-                _emit(f"[WARN] world model action proposal failed: {type(exc).__name__}: {exc}")
+                        stage="world_model_propose_actions",
+                        language=str(self.language),
+                        target_gpu=str(self.target_gpu),
+                    ):
+                        self._wm.propose_action_nodes(
+                            definition_name=task.name,
+                            definition_text=definition_text,
+                            current_code_excerpt=(str(wm_code) if str(wm_code).strip() else None),
+                            current_tree_path=self._wm.get_tree_path_text(definition_name=task.name),
+                            baseline_targets_text=baseline_targets_text,
+                            round_index=cycle_start_round,
+                        )
+                except LLMProviderFatalError as exc:
+                    _emit(f"[ERROR] world model action proposal failed with fatal provider error: {exc}")
+                    raise
+                except Exception as exc:
+                    _emit(f"[WARN] world model action proposal failed: {type(exc).__name__}: {exc}")
             wm_json = self._wm.get(task.name)
             _emit(render_world_model_status(wm_json))
             _emit(render_open_action_nodes_block(wm_json, max_items=8))

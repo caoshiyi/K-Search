@@ -1,0 +1,43 @@
+{
+  "strategy_catalog": [
+    {
+      "id": "S2-V1",
+      "name": "WorkspaceQueue Pattern - Minimal",
+      "category": "pipeline",
+      "impact": "high",
+      "difficulty": 3,
+      "natural_language": "Replace raw CrossCoreSetFlag/WaitFlag with a typed WorkspaceQueue class that encapsulates workspace ring-buffer management. WorkspaceQueue provides ProducerAcquire() to get the next slot, ProducerReleaseFix() or ProducerReleaseMte3() to signal completion, and ConsumerAcquire() which waits with the correct PIPE_MTE2 mode.",
+      "structured_params": {
+        "parameters": {
+          "RING_SLOTS": {
+            "value": 3,
+            "note": "PRELAUNCH + 1"
+          },
+          "slot_calculation": {
+            "formula": "head_%DEPTH * slotSize_",
+            "description": "Ring-buffer slot offset"
+          }
+        },
+        "sync_modes": {
+          "producer_S": "CrossCoreSetFlag<0x2, PIPE_FIX>(SIG_S_READY)",
+          "producer_P": "CrossCoreSetFlag<0x2, PIPE_MTE3>(SIG_P_READY)",
+          "producer_O": "CrossCoreSetFlag<0x2, PIPE_FIX>(SIG_O_READY)",
+          "consumer": "CrossCoreWaitFlag<0x2, PIPE_MTE2>(notifyId)"
+        },
+        "expected_speedup": {
+          "min": 1.2,
+          "max": 1.5
+        },
+        "affected_files": [
+          "workspace_queue.h",
+          "flash_attention_kernel.h"
+        ]
+      },
+      "expected_speedup_interval": {
+        "min": 1.2,
+        "likely": 1.35,
+        "max": 1.5
+      }
+    }
+  ]
+}

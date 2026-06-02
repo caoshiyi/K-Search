@@ -1,0 +1,72 @@
+{
+  "strategy_catalog": [
+    {
+      "id": "S2-V7",
+      "name": "WorkspaceQueue Pattern - Principles",
+      "category": "pipeline",
+      "impact": "high",
+      "difficulty": 3,
+      "natural_language": "Replace raw CrossCoreSetFlag/WaitFlag with a typed WorkspaceQueue class that encapsulates workspace ring-buffer management. WorkspaceQueue provides ProducerAcquire() to get the next slot, ProducerReleaseFix() or ProducerReleaseMte3() to signal completion, and ConsumerAcquire() which waits with the correct PIPE_MTE2 mode.",
+      "structured_params": {
+        "parameters": {
+          "RING_SLOTS": {
+            "value": 3,
+            "note": "PRELAUNCH + 1"
+          },
+          "slot_calculation": {
+            "formula": "head_%DEPTH * slotSize_",
+            "description": "Ring-buffer slot offset"
+          }
+        },
+        "sync_modes": {
+          "producer_S": "CrossCoreSetFlag<0x2, PIPE_FIX>(SIG_S_READY)",
+          "producer_P": "CrossCoreSetFlag<0x2, PIPE_MTE3>(SIG_P_READY)",
+          "producer_O": "CrossCoreSetFlag<0x2, PIPE_FIX>(SIG_O_READY)",
+          "consumer": "CrossCoreWaitFlag<0x2, PIPE_MTE2>(notifyId)"
+        },
+        "expected_speedup": {
+          "min": 1.2,
+          "max": 1.5
+        },
+        "affected_files": [
+          "workspace_queue.h",
+          "flash_attention_kernel.h"
+        ]
+      },
+      "principles": [
+        {
+          "principle": "Minimal pipeline scope synchronization",
+          "description": "Use the minimal pipeline scope for each sync: FIX for S/O output (Fixpipe completion), MTE3 for P output (DataCopy completion), MTE2 for AIV consumption",
+          "rationale": "Eliminates mismatch between producer pipeline (FIX/MTE3) and consumer pipeline (MTE2), preserving overlap for unrelated channels"
+        },
+        {
+          "principle": "Ring-buffer slot encapsulation",
+          "description": "Encapsulate slot offset calculation (head/tail % RING_SLOTS * slotSize) in the queue class, eliminating manual offset tracking errors",
+          "rationale": "Manual offset calculation is error-prone; encapsulation ensures correct slot indexing across PRELAUNCH tiles"
+        },
+        {
+          "principle": "Producer-Consumer separation",
+          "description": "Producer side (AIC) uses Acquire/Release; Consumer side (AIV) uses Acquire with wait",
+          "rationale": "Clear separation of roles prevents sync misuse: producer signals completion, consumer waits for readiness"
+        }
+      ],
+      "performance_bottlenecks": [
+        {
+          "bottleneck": "Pipeline synchronization mismatch",
+          "description": "Original CrossCoreSetFlag/WaitFlag uses PIPE_ALL, draining all pipeline channels",
+          "impact": "Destroys pipeline overlap, adding ~20-30 cycles delay per sync"
+        },
+        {
+          "bottleneck": "Manual offset calculation overhead",
+          "description": "Each tile requires manual wsOffset = slot * BLOCK_M * BLOCK_N calculation",
+          "impact": "Scalar computation overhead per tile, ~5-10 cycles"
+        }
+      ],
+      "expected_speedup_interval": {
+        "min": 1.2,
+        "likely": 1.35,
+        "max": 1.5
+      }
+    }
+  ]
+}

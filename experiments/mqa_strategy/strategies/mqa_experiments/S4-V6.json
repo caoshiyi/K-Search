@@ -1,0 +1,59 @@
+{
+  "strategy_catalog": [
+    {
+      "id": "S4-V6",
+      "name": "Vectorized RowMuls/RowDivs - Code Examples",
+      "category": "compute",
+      "impact": "high",
+      "difficulty": 2,
+      "natural_language": "Replace scalar RowMulsImpl/RowDivsImpl loops with vectorized RowMuls/RowDivs helper functions. These functions use Mul/Div with BinaryRepeatParams to achieve row-wise broadcast scaling at vector width (64 fp16/cycle) instead of scalar width (1/cycle).",
+      "structured_params": {
+        "parameters": {
+          "BRCB_NUM": {
+            "value": "32/sizeof(float)",
+            "description": "Broadcast granularity = 8 for fp32"
+          },
+          "VEC2_row_ops": {
+            "RowMuls": "RowMuls(oPrevUb_, oPrevUb_, expStateUb, dealRows, dim, actualDim)",
+            "RowDivs": "RowDivs(oNewUb, oNewUb, sumStateUb, dealRows, dim, actualDim)"
+          }
+        },
+        "expected_speedup": {
+          "min": 1.1,
+          "max": 1.3
+        },
+        "affected_files": [
+          "flash_attention_vec.h"
+        ]
+      },
+      "api_references": [
+        {
+          "api_name": "RowMuls",
+          "signature": "RowMuls(dstUb, src0Ub, src1Ub, dealRowCount, columnCount, actualColumnCount)",
+          "implementation": "Mul(dst,src0,src1,count,repeatTimes,BinaryRepeatParams{src1BlkStride=0,src1RepStride=1})",
+          "source": "references/row_ops_source_reference/vector_common_row_ops.h"
+        },
+        {
+          "api_name": "BinaryRepeatParams",
+          "usage": "src1BlkStride=0 for broadcast, src1RepStride=1 for row-wise advance",
+          "description": "Controls high-dimensional stride for binary vector operations"
+        }
+      ],
+      "code_examples": [
+        {
+          "title": "Vec2 O accumulation with RowMuls",
+          "code": "// Prepare scale tensor from softmax state cache\nLocalTensor<float> expStateUb = expCacheBuf_.Get<float>();\nuint32_t prevStateBase = prevSlot * stateStride_;\nexpStateUb = expStateUb[prevStateBase];\n\n// Apply RowMuls for O accumulation\nRowMuls(oPrevUb_, oPrevUb_, expStateUb, dealRows, dimAlign_, dim_);"
+        },
+        {
+          "title": "RowMuls definition (simplified)",
+          "code": "template <typename T>\n__aicore__ inline void RowMuls(LocalTensor<T> dstUb, LocalTensor<T> src0Ub,\n                               LocalTensor<T> src1Ub, uint32_t dealRowCount,\n                               uint32_t columnCount, uint32_t actualColumnCount) {\n    AscendC::BinaryRepeatParams repeatParams;\n    repeatParams.src1BlkStride = 0;  // Broadcast mode\n    repeatParams.src1RepStride = 1; // Advance 1 block per row\n    AscendC::Mul(dstUb, src0Ub, src1Ub, columnCount, dealRowCount, repeatParams);\n}"
+        }
+      ],
+      "expected_speedup_interval": {
+        "min": 1.1,
+        "likely": 1.2,
+        "max": 1.3
+      }
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "strategy_catalog": [
+    {
+      "id": "S8-V1",
+      "name": "Targeted SetWaitFlag - Minimal",
+      "category": "pipeline",
+      "impact": "high",
+      "difficulty": 3,
+      "natural_language": "Replace all PipeBarrier<PIPE_ALL> with targeted SetWaitFlag<HardEvent::X_Y> calls. PipeBarrier<PIPE_ALL> drains all pipeline channels, destroying overlap. Targeted barriers only wait for the specific dependency needed.",
+      "structured_params": {
+        "barrier_map": {
+          "cube": {
+            "before_LoadData_L0": "SetWaitFlag<HardEvent::M_MTE1>",
+            "before_Mmad": "SetWaitFlag<HardEvent::MTE1_M> + PipeBarrier<PIPE_M>",
+            "before_Fixpipe": "SetWaitFlag<HardEvent::M_FIX>",
+            "after_Fixpipe": "SetWaitFlag<HardEvent::FIX_MTE2>"
+          },
+          "vector": {
+            "before_DataCopy_GM_to_UB": "SetWaitFlag<HardEvent::MTE3_MTE2>",
+            "before_vector_compute": "SetWaitFlag<HardEvent::MTE2_V>",
+            "after_vector_compute": "PipeBarrier<PIPE_V>",
+            "before_DataCopy_UB_to_GM": "SetWaitFlag<HardEvent::V_MTE3>",
+            "after_GM_write": "SetWaitFlag<HardEvent::MTE3_V>"
+          }
+        },
+        "expected_speedup": {
+          "min": 1.2,
+          "max": 1.5
+        },
+        "affected_files": [
+          "flash_attention_cube.h",
+          "flash_attention_vec.h"
+        ]
+      },
+      "expected_speedup_interval": {
+        "min": 1.2,
+        "likely": 1.35,
+        "max": 1.5
+      }
+    }
+  ]
+}

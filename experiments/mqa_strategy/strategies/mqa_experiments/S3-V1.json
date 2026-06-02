@@ -1,0 +1,36 @@
+{
+  "strategy_catalog": [
+    {
+      "id": "S3-V1",
+      "name": "Q L1 Cache Skip - Minimal",
+      "category": "memory",
+      "impact": "medium",
+      "difficulty": 2,
+      "natural_language": "Add a Q chunk caching mechanism in the Cube (AIC) side. Track qChunkStart_ and qChunkId_. When LoadQ is called with the same chunkId and qRowStart, skip the GM->L1 DataCopy and reuse Q data already in L1.",
+      "structured_params": {
+        "parameters": {
+          "qChunkStart_": {
+            "type": "uint32_t",
+            "initial": "0xffffffff"
+          },
+          "qChunkId_": {
+            "type": "uint32_t",
+            "initial": "0xffffffff"
+          }
+        },
+        "expected_speedup": {
+          "min": 1.05,
+          "max": 1.15
+        },
+        "affected_files": [
+          "flash_attention_cube.h"
+        ]
+      },
+      "expected_speedup_interval": {
+        "min": 1.05,
+        "likely": 1.1,
+        "max": 1.15
+      }
+    }
+  ]
+}

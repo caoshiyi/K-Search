@@ -1,0 +1,36 @@
+{
+  "strategy_catalog": [
+    {
+      "id": "S4-V1",
+      "name": "Vectorized RowMuls/RowDivs - Minimal",
+      "category": "compute",
+      "impact": "high",
+      "difficulty": 2,
+      "natural_language": "Replace scalar RowMulsImpl/RowDivsImpl loops with vectorized RowMuls/RowDivs helper functions. These functions use Mul/Div with BinaryRepeatParams to achieve row-wise broadcast scaling at vector width (64 fp16/cycle) instead of scalar width (1/cycle).",
+      "structured_params": {
+        "parameters": {
+          "BRCB_NUM": {
+            "value": "32/sizeof(float)",
+            "description": "Broadcast granularity = 8 for fp32"
+          },
+          "VEC2_row_ops": {
+            "RowMuls": "RowMuls(oPrevUb_, oPrevUb_, expStateUb, dealRows, dim, actualDim)",
+            "RowDivs": "RowDivs(oNewUb, oNewUb, sumStateUb, dealRows, dim, actualDim)"
+          }
+        },
+        "expected_speedup": {
+          "min": 1.1,
+          "max": 1.3
+        },
+        "affected_files": [
+          "flash_attention_vec.h"
+        ]
+      },
+      "expected_speedup_interval": {
+        "min": 1.1,
+        "likely": 1.2,
+        "max": 1.3
+      }
+    }
+  ]
+}

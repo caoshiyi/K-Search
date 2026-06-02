@@ -1,0 +1,35 @@
+{
+  "strategy_catalog": [
+    {
+      "id": "S7-V1",
+      "name": "Sub-block Row Handling - Minimal",
+      "category": "compute",
+      "impact": "low",
+      "difficulty": 2,
+      "natural_language": "Properly handle AIV sub-block processing. Each sub-block processes its own rows: subBlockRows_ = BLOCK_M / subBlockNum_, rowStart_ = subBlockIdx_ * subBlockRows_.",
+      "structured_params": {
+        "parameters": {
+          "subBlockRows_": {
+            "formula": "BLOCK_M / subBlockNum_",
+            "value": 64
+          },
+          "rowStart_": {
+            "formula": "subBlockIdx_ * subBlockRows_"
+          }
+        },
+        "expected_speedup": {
+          "min": 1.02,
+          "max": 1.08
+        },
+        "affected_files": [
+          "flash_attention_vec.h"
+        ]
+      },
+      "expected_speedup_interval": {
+        "min": 1.02,
+        "likely": 1.05,
+        "max": 1.08
+      }
+    }
+  ]
+}

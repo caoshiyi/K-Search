@@ -1,0 +1,74 @@
+{
+  "strategy_catalog": [
+    {
+      "id": "S10-V7",
+      "name": "Multi-level KV Outer Tiling - Principles",
+      "category": "tiling",
+      "impact": "high",
+      "difficulty": 4,
+      "natural_language": "Implement a two-level KV sequence tiling scheme with s2OuterBlocks and s2BaseSize. When kvSeqLen is large, split it into s2OuterBlocks outer blocks of size s2BaseSize. Q can be loaded once at the start of each outer block and reused across all inner micro-tiles.",
+      "structured_params": {
+        "parameters": {
+          "s2OuterBlocks": {
+            "type": "uint32_t",
+            "source": "computed in host tiling"
+          },
+          "s2BaseSize": {
+            "type": "uint32_t",
+            "description": "Outer KV block size in rows"
+          },
+          "microNLoops": {
+            "formula": "CeilDiv(s2Rows, BLOCK_N)",
+            "type": "uint32_t"
+          }
+        },
+        "loop_structure": {
+          "outer": "for s2OuterIdx in 0..s2OuterBlocks",
+          "inner": "for t in 0..(microNLoops + PRELAUNCH)"
+        },
+        "expected_speedup": {
+          "min": 1.3,
+          "max": 2.0
+        },
+        "affected_files": [
+          "flash_attention_tiling.h",
+          "flash_attention_kernel.h"
+        ]
+      },
+      "principles": [
+        {
+          "principle": "Q residency across inner tiles",
+          "description": "Load Q once per outer block (bz, qHead, qRowStart) and keep it resident in L1 across all inner micro-tiles",
+          "rationale": "Each inner tile reuses the same Q data, avoiding redundant GM->L1 loads"
+        },
+        {
+          "principle": "tileBase accumulation for slot indexing",
+          "description": "tileBase += microNLoops per outer block ensures correct Vec1/Vec2 slot indexing across outer blocks",
+          "rationale": "Slot index depends on total tile count, not just inner loop index"
+        },
+        {
+          "principle": "Hierarchical loop structure",
+          "description": "Outer loop iterates over s2OuterBlocks, inner loop over microNLoops within each outer block",
+          "rationale": "Separates Q residency scope (outer) from KV tile processing scope (inner)"
+        }
+      ],
+      "performance_bottlenecks": [
+        {
+          "bottleneck": "Repeated Q loading per KV tile",
+          "description": "Without outer tiling, Q is loaded for each KV tile even when Q is unchanged",
+          "impact": "For kvSeqLen=4096, BLOCK_N=128: 32 Q loads instead of s2OuterBlocks Q loads"
+        },
+        {
+          "bottleneck": "L1 Q buffer pressure",
+          "description": "Q chunk of size mBaseSize*dim must stay resident in L1",
+          "impact": "For mBaseSize=256, dim=512: Q buffer = 256KB, may overflow L1"
+        }
+      ],
+      "expected_speedup_interval": {
+        "min": 1.3,
+        "likely": 1.5,
+        "max": 2.0
+      }
+    }
+  ]
+}

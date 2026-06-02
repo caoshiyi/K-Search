@@ -1,0 +1,59 @@
+{
+  "strategy_catalog": [
+    {
+      "id": "S6-V2",
+      "name": "Softmax UB State Cache - Priorities",
+      "category": "memory",
+      "impact": "medium",
+      "difficulty": 3,
+      "natural_language": "Cache softmax max/sum/exp states per ring slot in UB (maxCacheBuf_, sumCacheBuf_, expCacheBuf_) instead of writing them to GM workspace (wsMeta). Each slot has a stateStride of AlignUp(subBlockRows_*BRCB_NUM*4, 32)/4 float elements. In Vec1, write state to UB cache instead of wsMetaGm. In Vec2, read from cached UB state. This eliminates GM round-trips for softmax state per KV tile.",
+      "structured_params": {
+        "parameters": {
+          "stateStride": {
+            "formula": "AlignUp(subBlockRows_*BRCB_NUM*4, 32)/4",
+            "unit": "float elements"
+          },
+          "RING_SLOTS": 3,
+          "default_state": {
+            "max": -1073741824.0,
+            "sum": 0.0
+          }
+        },
+        "buffer_allocations": {
+          "maxCacheBuf_": "TBuf<VECCALC> RING_SLOTS * stateStride * 4",
+          "sumCacheBuf_": "TBuf<VECCALC> RING_SLOTS * stateStride * 4",
+          "expCacheBuf_": "TBuf<VECCALC> RING_SLOTS * stateStride * 4"
+        },
+        "expected_speedup": {
+          "min": 1.05,
+          "max": 1.1
+        },
+        "affected_files": [
+          "flash_attention_vec.h"
+        ]
+      },
+      "implementation_priorities": [
+        {
+          "priority": "P0",
+          "action": "Add maxCacheBuf_, sumCacheBuf_, expCacheBuf_ buffer allocations in VECCALC position",
+          "dependency": null
+        },
+        {
+          "priority": "P1",
+          "action": "Modify Vec1 to write state to UB cache instead of GM workspace",
+          "dependency": "P0 verified"
+        },
+        {
+          "priority": "P2",
+          "action": "Modify Vec2 to read state from UB cache",
+          "dependency": "P1 verified"
+        }
+      ],
+      "expected_speedup_interval": {
+        "min": 1.05,
+        "likely": 1.08,
+        "max": 1.1
+      }
+    }
+  ]
+}

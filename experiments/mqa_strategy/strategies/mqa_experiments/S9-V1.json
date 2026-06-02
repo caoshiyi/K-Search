@@ -1,0 +1,32 @@
+{
+  "strategy_catalog": [
+    {
+      "id": "S9-V1",
+      "name": "oPrev Dedicated TBuf - Minimal",
+      "category": "memory",
+      "impact": "low",
+      "difficulty": 1,
+      "natural_language": "Allocate a dedicated TBuf<VECCALC> oPrevBuf_ for Vec2 O accumulation instead of using a TQue slot.",
+      "structured_params": {
+        "parameters": {
+          "oPrevBuf_": {
+            "type": "TBuf<TPosition::VECCALC>",
+            "size": "VEC2_M_CHUNK * dimAlign * sizeof(float)"
+          }
+        },
+        "expected_speedup": {
+          "min": 1.02,
+          "max": 1.05
+        },
+        "affected_files": [
+          "flash_attention_vec.h"
+        ]
+      },
+      "expected_speedup_interval": {
+        "min": 1.02,
+        "likely": 1.03,
+        "max": 1.05
+      }
+    }
+  ]
+}

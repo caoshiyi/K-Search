@@ -1,0 +1,68 @@
+{
+  "strategy_catalog": [
+    {
+      "id": "S6-V3",
+      "name": "Softmax UB State Cache - Anti Patterns",
+      "category": "memory",
+      "impact": "medium",
+      "difficulty": 3,
+      "natural_language": "Cache softmax max/sum/exp states per ring slot in UB (maxCacheBuf_, sumCacheBuf_, expCacheBuf_) instead of writing them to GM workspace (wsMeta). Each slot has a stateStride of AlignUp(subBlockRows_*BRCB_NUM*4, 32)/4 float elements. In Vec1, write state to UB cache instead of wsMetaGm. In Vec2, read from cached UB state. This eliminates GM round-trips for softmax state per KV tile.",
+      "structured_params": {
+        "parameters": {
+          "stateStride": {
+            "formula": "AlignUp(subBlockRows_*BRCB_NUM*4, 32)/4",
+            "unit": "float elements"
+          },
+          "RING_SLOTS": 3,
+          "default_state": {
+            "max": -1073741824.0,
+            "sum": 0.0
+          }
+        },
+        "buffer_allocations": {
+          "maxCacheBuf_": "TBuf<VECCALC> RING_SLOTS * stateStride * 4",
+          "sumCacheBuf_": "TBuf<VECCALC> RING_SLOTS * stateStride * 4",
+          "expCacheBuf_": "TBuf<VECCALC> RING_SLOTS * stateStride * 4"
+        },
+        "expected_speedup": {
+          "min": 1.05,
+          "max": 1.1
+        },
+        "affected_files": [
+          "flash_attention_vec.h"
+        ]
+      },
+      "anti_patterns": [
+        {
+          "id": "ap1",
+          "pattern": "Allocate cache buffers in TBuf<UB> instead of TBuf<VECCALC>",
+          "reason": "VECCALC position is required for softmax state tensors used in RowMuls/RowDivs operations",
+          "correct_approach": "Use TBuf<VECCALC> for maxCacheBuf_, sumCacheBuf_, expCacheBuf_"
+        },
+        {
+          "id": "ap2",
+          "pattern": "Forget to initialize default state buffers with -inf/0",
+          "reason": "First tile (isFirst=true) needs valid default state. Uninitialized buffers cause NaN",
+          "correct_approach": "Init softmaxMaxDefaultBuf_ with -1073741824.0, softmaxSumDefaultBuf_ with 0.0"
+        },
+        {
+          "id": "ap3",
+          "pattern": "Incorrect slot offset calculation: slot*subBlockRows_ instead of slot*stateStride",
+          "reason": "stateStride is aligned to 32 bytes, not equal to subBlockRows_*BRCB_NUM",
+          "correct_approach": "Use slot*stateStride for UB cache indexing"
+        }
+      ],
+      "precautions": [
+        "Verify VECCALC buffer budget: 3*RING_SLOTS*stateStride*4 bytes must fit in VECCALC (~32KB)",
+        "Test with isFirst=true case to ensure default state is correctly used",
+        "Monitor GM traffic reduction with profiling tools",
+        "Ensure slot indexing is consistent between Vec1 write and Vec2 read"
+      ],
+      "expected_speedup_interval": {
+        "min": 1.05,
+        "likely": 1.08,
+        "max": 1.1
+      }
+    }
+  ]
+}

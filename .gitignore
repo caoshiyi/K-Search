@@ -2,6 +2,7 @@ __pycache__/
 logs/
 .ksearch/
 .ksearch-output*/
+.ksearch-exp*/
 ksearch-output*.tar
 wandb/
 openevolve_output/

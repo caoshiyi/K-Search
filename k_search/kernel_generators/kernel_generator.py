@@ -95,7 +95,7 @@ class KernelGenerator:
 
         return files
 
-    def _clean_generated_code(self, code: str) -> str | dict:
+    def _clean_generated_code(self, code: str) -> str | Dict[str, str]:
         """Clean up generated code. For CUDA, try XML first, fall back to Python. For others, clean Python syntax.
         
         Returns:

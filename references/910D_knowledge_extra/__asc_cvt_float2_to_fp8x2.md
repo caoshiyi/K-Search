@@ -1,0 +1,122 @@
+# \_\_asc\_cvt\_float2\_to\_fp8x2<a name="ZH-CN_TOPIC_0000002523343630"></a>
+
+## 产品支持情况<a name="section1550532418810"></a>
+
+<a name="table1334714391211"></a>
+<table><thead align="left"><tr id="row1334743121213"><th class="cellrowborder" valign="top" width="57.99999999999999%" id="mcps1.1.3.1.1"><p id="p834713321216"><a name="p834713321216"></a><a name="p834713321216"></a><span id="ph834783101215"><a name="ph834783101215"></a><a name="ph834783101215"></a>产品</span></p>
+</th>
+<th class="cellrowborder" align="center" valign="top" width="42%" id="mcps1.1.3.1.2"><p id="p2347234127"><a name="p2347234127"></a><a name="p2347234127"></a>是否支持</p>
+</th>
+</tr>
+</thead>
+<tbody><tr id="row113472312122"><td class="cellrowborder" valign="top" width="57.99999999999999%" headers="mcps1.1.3.1.1 "><p id="p234710320128"><a name="p234710320128"></a><a name="p234710320128"></a><span id="ph103471336127"><a name="ph103471336127"></a><a name="ph103471336127"></a>Ascend 950PR/Ascend 950DT</span></p>
+</td>
+<td class="cellrowborder" align="center" valign="top" width="42%" headers="mcps1.1.3.1.2 "><p id="p4751940181211"><a name="p4751940181211"></a><a name="p4751940181211"></a>√</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+## 功能说明<a name="section618mcpsimp"></a>
+
+将float2类型数据的两个分量遵循CAST\_RINT模式，根据指定的饱和模式，转换为指定类型的8位浮点数，返回按bit位转换成的\_\_asc\_fp8x2\_storage\_t类型数据。
+
+## 函数原型<a name="section620mcpsimp"></a>
+
+```
+__simt_callee__ __asc_fp8x2_storage_t __asc_cvt_float2_to_fp8x2(const float2 x, const __asc_saturation_t saturate, const __asc_fp8_interpretation_t fp8_interpretation)
+```
+
+## 参数说明<a name="section0866173114710"></a>
+
+**表 1**  参数说明
+
+<a name="zh-cn_topic_0235751031_table33761356"></a>
+<table><thead align="left"><tr id="zh-cn_topic_0235751031_row27598891"><th class="cellrowborder" valign="top" width="18.54%" id="mcps1.2.4.1.1"><p id="zh-cn_topic_0235751031_p20917673"><a name="zh-cn_topic_0235751031_p20917673"></a><a name="zh-cn_topic_0235751031_p20917673"></a>参数名</p>
+</th>
+<th class="cellrowborder" valign="top" width="10.05%" id="mcps1.2.4.1.2"><p id="zh-cn_topic_0235751031_p16609919"><a name="zh-cn_topic_0235751031_p16609919"></a><a name="zh-cn_topic_0235751031_p16609919"></a>输入/输出</p>
+</th>
+<th class="cellrowborder" valign="top" width="71.41%" id="mcps1.2.4.1.3"><p id="zh-cn_topic_0235751031_p59995477"><a name="zh-cn_topic_0235751031_p59995477"></a><a name="zh-cn_topic_0235751031_p59995477"></a>描述</p>
+</th>
+</tr>
+</thead>
+<tbody><tr id="row42461942101815"><td class="cellrowborder" valign="top" width="18.54%" headers="mcps1.2.4.1.1 "><p id="p284425844311"><a name="p284425844311"></a><a name="p284425844311"></a>x</p>
+</td>
+<td class="cellrowborder" valign="top" width="10.05%" headers="mcps1.2.4.1.2 "><p id="p158449584436"><a name="p158449584436"></a><a name="p158449584436"></a>输入</p>
+</td>
+<td class="cellrowborder" valign="top" width="71.41%" headers="mcps1.2.4.1.3 "><p id="p6389114616514"><a name="p6389114616514"></a><a name="p6389114616514"></a>源操作数。</p>
+</td>
+</tr>
+<tr id="row12430151210134"><td class="cellrowborder" valign="top" width="18.54%" headers="mcps1.2.4.1.1 "><p id="p84311212131319"><a name="p84311212131319"></a><a name="p84311212131319"></a>saturate</p>
+</td>
+<td class="cellrowborder" valign="top" width="10.05%" headers="mcps1.2.4.1.2 "><p id="p194311212111317"><a name="p194311212111317"></a><a name="p194311212111317"></a>输入</p>
+</td>
+<td class="cellrowborder" valign="top" width="71.41%" headers="mcps1.2.4.1.3 "><p id="p643131211315"><a name="p643131211315"></a><a name="p643131211315"></a>控制饱和行为，取值可为__ASC_NOSAT、__ASC_SATFINITE</p>
+</td>
+</tr>
+<tr id="row1551031413138"><td class="cellrowborder" valign="top" width="18.54%" headers="mcps1.2.4.1.1 "><p id="p651071451319"><a name="p651071451319"></a><a name="p651071451319"></a>fp8_interpretation</p>
+</td>
+<td class="cellrowborder" valign="top" width="10.05%" headers="mcps1.2.4.1.2 "><p id="p165116148135"><a name="p165116148135"></a><a name="p165116148135"></a>输入</p>
+</td>
+<td class="cellrowborder" valign="top" width="71.41%" headers="mcps1.2.4.1.3 "><p id="p7511181416139"><a name="p7511181416139"></a><a name="p7511181416139"></a>指定转换类型，取值可为__ASC_E4M3、__ASC_E5M2</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+**表 2**  类型说明
+
+<a name="table2252102018244"></a>
+<table><thead align="left"><tr id="row525262013244"><th class="cellrowborder" valign="top" width="20.61%" id="mcps1.2.3.1.1"><p id="p132521920132418"><a name="p132521920132418"></a><a name="p132521920132418"></a>数据类型</p>
+</th>
+<th class="cellrowborder" valign="top" width="79.39%" id="mcps1.2.3.1.2"><p id="p825217203244"><a name="p825217203244"></a><a name="p825217203244"></a>描述</p>
+</th>
+</tr>
+</thead>
+<tbody><tr id="row625212205249"><td class="cellrowborder" valign="top" width="20.61%" headers="mcps1.2.3.1.1 "><p id="p52529209248"><a name="p52529209248"></a><a name="p52529209248"></a>__asc_fp8x2_storage_t</p>
+</td>
+<td class="cellrowborder" valign="top" width="79.39%" headers="mcps1.2.3.1.2 "><p id="p202529205240"><a name="p202529205240"></a><a name="p202529205240"></a>unsigned short int类型，16bits，用于存储float8_e4m3x2_t或float8_e5m2x2_t类型数据</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+## 返回值说明<a name="section640mcpsimp"></a>
+
+输入的两个分量遵循CAST\_RINT模式，根据指定的8位浮点数类型和指定的饱和模式，转换成的\_\_asc\_fp8x2\_storage\_t类型数据。
+
+float8\_e4m3\_t数据类型没有inf值，非饱和模式下其溢出结果为nan。
+
+对于float8\_e5m2\_t和float8\_e4m3\_t数据类型，当寄存器CTRL\[50\]=0时，nan值会被转换为0， 当寄存器CTRL\[50\]=1时，nan值被转化为fp8类型下的nan值。CTRL寄存器值可通过[GetCtrlSpr\(ISASI\)](GetCtrlSpr(ISASI).md)接口获取。
+
+## 约束说明<a name="section633mcpsimp"></a>
+
+使用此接口前需将CTRL\[60\]寄存器设置为0，否则饱和行为控制不生效。设置方式请参见[控制饱和行为的方式](简介-162.md#section1194916101549)。
+
+## 需要包含的头文件<a name="section7131139151810"></a>
+
+使用该接口需要包含"simt\_api/asc\_fp8.h"头文件。
+
+```
+#include "simt_api/asc_fp8.h"
+```
+
+## 调用示例<a name="section134121647154719"></a>
+
+```
+// 使用小向量可提升数据搬运效率
+__simt_vf__ __launch_bounds__(1024) inline void simt_asc_cvt_float2_to_fp8x2(__gm__ float2* input, __gm__ uint16_t* output, uint32_t input_total_length)
+{
+    uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // 每个线程处理1个float2类型的数据，即2个float类型的数据，因此idx >= input_total_length / 2的线程不处理数据
+    if (idx >= input_total_length / 2) {
+        return;
+    }
+    output[idx] = __asc_cvt_float2_to_fp8x2(input[idx], __ASC_NOSAT, __ASC_E4M3);
+}
+__global__ __vector__ void cast_kernel(__gm__ float* input, __gm__ uint16_t* output, uint32_t input_total_length)
+{
+    asc_vf_call<simt_asc_cvt_float2_to_fp8x2>(dim3(1024), (__gm__ float2*)input, output, input_total_length);
+}
+```
+

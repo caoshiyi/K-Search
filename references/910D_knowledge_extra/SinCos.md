@@ -1,0 +1,194 @@
+# SinCos<a name="ZH-CN_TOPIC_0000002523344316"></a>
+
+## 产品支持情况<a name="section461615521894"></a>
+
+<a name="table1334714391211"></a>
+<table><thead align="left"><tr id="row1334743121213"><th class="cellrowborder" valign="top" width="57.99999999999999%" id="mcps1.1.3.1.1"><p id="p834713321216"><a name="p834713321216"></a><a name="p834713321216"></a><span id="ph834783101215"><a name="ph834783101215"></a><a name="ph834783101215"></a>产品</span></p>
+</th>
+<th class="cellrowborder" align="center" valign="top" width="42%" id="mcps1.1.3.1.2"><p id="p2347234127"><a name="p2347234127"></a><a name="p2347234127"></a>是否支持</p>
+</th>
+</tr>
+</thead>
+<tbody><tr id="row113472312122"><td class="cellrowborder" valign="top" width="57.99999999999999%" headers="mcps1.1.3.1.1 "><p id="p234710320128"><a name="p234710320128"></a><a name="p234710320128"></a><span id="ph103471336127"><a name="ph103471336127"></a><a name="ph103471336127"></a>Ascend 950PR/Ascend 950DT</span></p>
+</td>
+<td class="cellrowborder" align="center" valign="top" width="42%" headers="mcps1.1.3.1.2 "><p id="p4751940181211"><a name="p4751940181211"></a><a name="p4751940181211"></a>√</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+## 功能说明<a name="section618mcpsimp"></a>
+
+按元素进行正弦计算和余弦计算，分别获得正弦和余弦的结果。
+
+<!-- img2text -->
+$$
+\begin{aligned}
+y_1 &= \sin(x) \\
+y_2 &= \cos(x)
+\end{aligned}
+$$
+
+<!-- img2text -->
+$$
+\text{sinOut} = \sin(x)
+$$
+
+$$
+\text{cosOut} = \cos(x)
+$$
+
+## 函数原型<a name="section620mcpsimp"></a>
+
+-   通过sharedTmpBuffer入参传入临时空间
+
+    ```
+    template <const SinCosConfig& config = DEFAULT_SINCOS_CONFIG, typename T>
+    __aicore__ inline void SinCos(const LocalTensor<T>& dst0, const LocalTensor<T>& dst1, const LocalTensor<T>& src, const LocalTensor<uint8_t>& sharedTmpBuffer, const uint32_t count)
+    ```
+
+-   接口框架申请临时空间
+
+    ```
+    template <const SinCosConfig& config = DEFAULT_SINCOS_CONFIG, typename T>
+    __aicore__ inline void SinCos(const LocalTensor<T>& dst0, const LocalTensor<T>& dst1, const LocalTensor<T>& src, const uint32_t count)
+    ```
+
+由于该接口的内部实现中涉及复杂的数学计算，需要额外的临时空间来存储计算过程中的中间变量。临时空间支持开发者**通过sharedTmpBuffer入参传入**和**接口框架申请**两种方式。
+
+-   通过sharedTmpBuffer入参传入，使用该tensor作为临时空间进行处理，接口框架不再申请。该方式开发者可以自行管理sharedTmpBuffer内存空间，并在接口调用完成后，复用该部分内存，内存不会反复申请释放，灵活性较高，内存利用率也较高。
+-   接口框架申请临时空间，开发者无需申请，但是需要预留临时空间的大小。
+
+通过sharedTmpBuffer传入的情况，开发者需要为tensor申请空间；接口框架申请的方式，开发者需要预留临时空间。临时空间大小BufferSize的获取方式如下：通过[GetSinCosMaxMinTmpSize](GetSinCosMaxMinTmpSize.md)中提供的接口获取需要预留空间范围的大小。
+
+## 参数说明<a name="section622mcpsimp"></a>
+
+**表 1**  模板参数说明
+
+<a name="table575571914269"></a>
+<table><thead align="left"><tr id="row18755131942614"><th class="cellrowborder" valign="top" width="19.39%" id="mcps1.2.3.1.1"><p id="p675519193268"><a name="p675519193268"></a><a name="p675519193268"></a>参数名</p>
+</th>
+<th class="cellrowborder" valign="top" width="80.61%" id="mcps1.2.3.1.2"><p id="p375511918267"><a name="p375511918267"></a><a name="p375511918267"></a>描述</p>
+</th>
+</tr>
+</thead>
+<tbody><tr id="row253181861619"><td class="cellrowborder" valign="top" width="19.39%" headers="mcps1.2.3.1.1 "><p id="p12121182251614"><a name="p12121182251614"></a><a name="p12121182251614"></a>SinCosConfig</p>
+</td>
+<td class="cellrowborder" valign="top" width="80.61%" headers="mcps1.2.3.1.2 "><p id="p512120221166"><a name="p512120221166"></a><a name="p512120221166"></a>SinCos算法的相关配置。此参数可选配，SinCosConfig类型，具体定义如下方代码所示，其中参数的含义为：</p>
+<p id="p1641713597257"><a name="p1641713597257"></a><a name="p1641713597257"></a>isReuseSource：是否允许修改源操作数。该参数预留，传入默认值false即可。</p>
+</td>
+</tr>
+<tr id="row14755141911264"><td class="cellrowborder" valign="top" width="19.39%" headers="mcps1.2.3.1.1 "><p id="p47551198266"><a name="p47551198266"></a><a name="p47551198266"></a>T</p>
+</td>
+<td class="cellrowborder" valign="top" width="80.61%" headers="mcps1.2.3.1.2 "><p id="p125969172719"><a name="p125969172719"></a><a name="p125969172719"></a>操作数的数据类型。</p>
+<p id="p3784111051020"><a name="p3784111051020"></a><a name="p3784111051020"></a><span id="ph578461091013"><a name="ph578461091013"></a><a name="ph578461091013"></a>Ascend 950PR/Ascend 950DT</span>，支持的数据类型为：half、float。</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+```
+struct SinCosConfig {
+    bool isReuseSource;
+};
+```
+
+**表 2**  参数说明
+
+<a name="table148471830151913"></a>
+<table><thead align="left"><tr id="row1984733010194"><th class="cellrowborder" valign="top" width="16.45%" id="mcps1.2.4.1.1"><p id="p2847730181917"><a name="p2847730181917"></a><a name="p2847730181917"></a>参数名</p>
+</th>
+<th class="cellrowborder" valign="top" width="11.31%" id="mcps1.2.4.1.2"><p id="p58476303197"><a name="p58476303197"></a><a name="p58476303197"></a>输入/输出</p>
+</th>
+<th class="cellrowborder" valign="top" width="72.24000000000001%" id="mcps1.2.4.1.3"><p id="p10847203021913"><a name="p10847203021913"></a><a name="p10847203021913"></a>描述</p>
+</th>
+</tr>
+</thead>
+<tbody><tr id="row98477303196"><td class="cellrowborder" valign="top" width="16.45%" headers="mcps1.2.4.1.1 "><p id="p15847183018194"><a name="p15847183018194"></a><a name="p15847183018194"></a>dst0、dst1</p>
+</td>
+<td class="cellrowborder" valign="top" width="11.31%" headers="mcps1.2.4.1.2 "><p id="p148471930161917"><a name="p148471930161917"></a><a name="p148471930161917"></a>输出</p>
+</td>
+<td class="cellrowborder" valign="top" width="72.24000000000001%" headers="mcps1.2.4.1.3 "><p id="p3989161814016"><a name="p3989161814016"></a><a name="p3989161814016"></a>目的操作数。</p>
+<p id="p16703131355116"><a name="p16703131355116"></a><a name="p16703131355116"></a><span id="zh-cn_topic_0000002523303824_ph173308471594"><a name="zh-cn_topic_0000002523303824_ph173308471594"></a><a name="zh-cn_topic_0000002523303824_ph173308471594"></a><span id="zh-cn_topic_0000002523303824_ph9902231466"><a name="zh-cn_topic_0000002523303824_ph9902231466"></a><a name="zh-cn_topic_0000002523303824_ph9902231466"></a><span id="zh-cn_topic_0000002523303824_ph1782115034816"><a name="zh-cn_topic_0000002523303824_ph1782115034816"></a><a name="zh-cn_topic_0000002523303824_ph1782115034816"></a>类型为<a href="LocalTensor.md">LocalTensor</a>，支持的TPosition为VECIN/VECCALC/VECOUT。</span></span></span></p>
+</td>
+</tr>
+<tr id="row11848103091920"><td class="cellrowborder" valign="top" width="16.45%" headers="mcps1.2.4.1.1 "><p id="p58481330191917"><a name="p58481330191917"></a><a name="p58481330191917"></a>src</p>
+</td>
+<td class="cellrowborder" valign="top" width="11.31%" headers="mcps1.2.4.1.2 "><p id="p158485305196"><a name="p158485305196"></a><a name="p158485305196"></a>输入</p>
+</td>
+<td class="cellrowborder" valign="top" width="72.24000000000001%" headers="mcps1.2.4.1.3 "><p id="p6914123244017"><a name="p6914123244017"></a><a name="p6914123244017"></a>源操作数。</p>
+<p id="p1493334184019"><a name="p1493334184019"></a><a name="p1493334184019"></a><span id="zh-cn_topic_0000002523303824_ph173308471594_1"><a name="zh-cn_topic_0000002523303824_ph173308471594_1"></a><a name="zh-cn_topic_0000002523303824_ph173308471594_1"></a><span id="zh-cn_topic_0000002523303824_ph9902231466_1"><a name="zh-cn_topic_0000002523303824_ph9902231466_1"></a><a name="zh-cn_topic_0000002523303824_ph9902231466_1"></a><span id="zh-cn_topic_0000002523303824_ph1782115034816_1"><a name="zh-cn_topic_0000002523303824_ph1782115034816_1"></a><a name="zh-cn_topic_0000002523303824_ph1782115034816_1"></a>类型为<a href="LocalTensor.md">LocalTensor</a>，支持的TPosition为VECIN/VECCALC/VECOUT。</span></span></span></p>
+<p id="p515144315188"><a name="p515144315188"></a><a name="p515144315188"></a>源操作数的数据类型与目的操作数保持一致。</p>
+</td>
+</tr>
+<tr id="row4848123011192"><td class="cellrowborder" valign="top" width="16.45%" headers="mcps1.2.4.1.1 "><p id="p1313415271911"><a name="p1313415271911"></a><a name="p1313415271911"></a>sharedTmpBuffer</p>
+</td>
+<td class="cellrowborder" valign="top" width="11.31%" headers="mcps1.2.4.1.2 "><p id="p5133352201914"><a name="p5133352201914"></a><a name="p5133352201914"></a>输入</p>
+</td>
+<td class="cellrowborder" valign="top" width="72.24000000000001%" headers="mcps1.2.4.1.3 "><p id="p191160465422"><a name="p191160465422"></a><a name="p191160465422"></a>临时缓存。</p>
+<p id="p979635010404"><a name="p979635010404"></a><a name="p979635010404"></a><span id="zh-cn_topic_0000002523303824_ph173308471594_2"><a name="zh-cn_topic_0000002523303824_ph173308471594_2"></a><a name="zh-cn_topic_0000002523303824_ph173308471594_2"></a><span id="zh-cn_topic_0000002523303824_ph9902231466_2"><a name="zh-cn_topic_0000002523303824_ph9902231466_2"></a><a name="zh-cn_topic_0000002523303824_ph9902231466_2"></a><span id="zh-cn_topic_0000002523303824_ph1782115034816_2"><a name="zh-cn_topic_0000002523303824_ph1782115034816_2"></a><a name="zh-cn_topic_0000002523303824_ph1782115034816_2"></a>类型为<a href="LocalTensor.md">LocalTensor</a>，支持的TPosition为VECIN/VECCALC/VECOUT。</span></span></span></p>
+<p id="p5881016172817"><a name="p5881016172817"></a><a name="p5881016172817"></a>临时空间大小BufferSize的获取方式请参考<a href="GetSinCosMaxMinTmpSize.md">GetSinCosMaxMinTmpSize</a>。</p>
+</td>
+</tr>
+<tr id="row16421712252"><td class="cellrowborder" valign="top" width="16.45%" headers="mcps1.2.4.1.1 "><p id="p1949611581317"><a name="p1949611581317"></a><a name="p1949611581317"></a>count</p>
+</td>
+<td class="cellrowborder" valign="top" width="11.31%" headers="mcps1.2.4.1.2 "><p id="p174961758436"><a name="p174961758436"></a><a name="p174961758436"></a>输入</p>
+</td>
+<td class="cellrowborder" valign="top" width="72.24000000000001%" headers="mcps1.2.4.1.3 "><p id="p11378261546"><a name="p11378261546"></a><a name="p11378261546"></a>参与计算的元素个数。</p>
+</td>
+</tr>
+</tbody>
+</table>
+
+## 返回值说明<a name="section38228281712"></a>
+
+无
+
+## 约束说明<a name="section633mcpsimp"></a>
+
+-   **不支持源操作数与目的操作数地址重叠。**
+-   不支持sharedTmpBuffer与源操作数和目的操作数地址重叠。
+-   操作数地址对齐要求请参见[通用地址对齐约束](通用说明和约束.md#section796754519912)。
+
+## 调用示例<a name="section642mcpsimp"></a>
+
+```
+AscendC::TPipe pipe;
+AscendC::TQue<AscendC::TPosition::VECCALC, 1> tmpQue;
+pipe.InitBuffer(tmpQue, 1, bufferSize); // bufferSize 通过Host侧tiling参数获取
+LocalTensor<uint8_t> sharedTmpBuffer = tmpQue.AllocTensor<uint8_t>();
+// 输入tensor长度为1024, 算子输入的数据类型为half, 实际计算个数为512
+static constexpr AscendC::SinCosConfig sincosConfig = { false };
+AscendC::SinCos<sincosConfig, half>(dst0, dst1, src, sharedTmpBuffer, 512);
+```
+
+结果示例如下：
+
+```
+输入数据(src0):
+[ 0, -6.2831855, -6.2831855, -14.137167, -7.8539815, -12.566371,
+ 6.2831855, -9.424778, 4.712389, 6.2831855, -14.137167, -4.712389,
+ 9.424778, 7.8539815, 14.137167, -14.137167, 0, 4.712389,
+ 0, 10.995574, -1.5707964, 9.424778, -10.995574, 0,
+ -12.566371, -14.137167, 9.424778, -10.995574, -10.995574, 4.712389,
+ 14.137167, 10.995574 ]
+输出数据(dst0):
+[ 0.0000000e+00, -1.7484557e-07, -1.7484557e-07, -1.0000000e+00,
+ -1.0000000e+00, -3.4969113e-07, 1.7484557e-07, 2.3849761e-08,
+ -1.0000000e+00, 1.7484557e-07, -1.0000000e+00, 1.0000000e+00,
+ -2.3849761e-08, 1.0000000e+00, 1.0000000e+00, -1.0000000e+00,
+ 0.0000000e+00, -1.0000000e+00, 0.0000000e+00, -1.0000000e+00,
+ -1.0000000e+00, -2.3849761e-08, 1.0000000e+00, 0.0000000e+00,
+ -3.4969113e-07, -1.0000000e+00, -2.3849761e-08, 1.0000000e+00,
+ 1.0000000e+00, -1.0000000e+00, 1.0000000e+00, -1.0000000e+00]
+输出数据(dst1):
+[ 1.0000000e+00, 1.0000000e+00, 1.0000000e+00, -3.5774644e-08,
+ 1.3907092e-07, 1.0000000e+00, 1.0000000e+00, -1.0000000e+00,
+ 1.1924881e-08, 1.0000000e+00, -3.5774644e-08, 1.1924881e-08,
+ -1.0000000e+00, 1.3907092e-07, -3.5774644e-08, -3.5774644e-08,
+ 1.0000000e+00, 1.1924881e-08, 1.0000000e+00, -2.9006674e-07,
+ -4.3711392e-08, -1.0000000e+00, -2.9006674e-07, 1.0000000e+00,
+ 1.0000000e+00, -3.5774644e-08, -1.0000000e+00, -2.9006674e-07,
+ -2.9006674e-07, 1.1924881e-08, -3.5774644e-08, -2.9006674e-07]
+```
+

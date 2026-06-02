@@ -3,7 +3,8 @@
 #
 # Pre-conditions:
 #   1. Claude Agent SDK installed:   uv pip install claude-agent-sdk
-#   2. cv_agent baseline measured;   export BASELINE_MS=<float>  (mean_us/1000 from utils/run_perf.py)
+#   2. cv_agent baseline measured;   export BASELINE_MS=<float>  (ascendc kernel mean_us/1000 from
+#      utils/run_perf.py --mode profiler — use the ascendc column, NOT the PyTorch base column)
 #   3. ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL exported, or present in
 #      ~/.claude/settings.json (auto-loaded below if jq is installed).
 set -euo pipefail
@@ -47,6 +48,8 @@ export API_TIMEOUT_MS=7200000
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-64000}"
 # Cap max turns per session so the agent doesn't spin indefinitely.
 export CLAUDE_AGENT_MAX_TURNS=50
+
+export BASELINE_MS=0.437
 
 cd "$KSEARCH_ROOT"
 

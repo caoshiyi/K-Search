@@ -109,7 +109,7 @@ Key variables you can customize (see the script header for the full list):
 | `WANDB_API_KEY` | W&B API key | — |
 | `MODEL_NAME` | LLM model identifier | `gpt-5.2` |
 | `BASE_URL` | OpenAI-compatible API base URL | `https://us.api.openai.com/v1` |
-| `LANGUAGE` | Target language (`triton`, `cuda`) | `triton` |
+| `KSEARCH_LANGUAGE` | Target language (`triton`, `cuda`) | `triton` |
 | `MAX_OPT_ROUNDS` | Maximum optimization rounds | `300` |
 
 ### FlashInfer-Bench
@@ -139,7 +139,7 @@ Key variables you can customize (see the script header for the full list):
 | `MODEL_NAME` | LLM model identifier | `gemini-3-pro-preview` |
 | `BASE_URL` | OpenAI-compatible API base URL | Gemini endpoint |
 | `DEFINITION` | Target kernel definition | `mla_paged_decode_h16_ckv512_kpe64_ps1` |
-| `LANGUAGE` | Target language (`triton`, `cuda`) | `cuda` |
+| `KSEARCH_LANGUAGE` | Target language (`triton`, `cuda`) | `cuda` |
 | `MAX_OPT_ROUNDS` | Maximum optimization rounds | `20` |
 
 ### KernelBench
@@ -169,7 +169,7 @@ This script can be used with any of the kernels in the [KernelBench dataset](htt
 | `PROBLEM_ID` | Problem ID within the level | `1` |
 | `EVAL_MODE` | Evaluation mode (`local` or `modal`) | `local` |
 | `TARGET_GPU` | Target GPU (e.g., `H100`, `A100-80GB`) | `H100` |
-| `LANGUAGE` | Target language (`cuda` or `triton`) | `triton` |
+| `KSEARCH_LANGUAGE` | Target language (`cuda` or `triton`) | `triton` |
 | `MAX_OPT_ROUNDS` | Maximum optimization rounds | `50` |
 | `ARTIFACTS_DIR` | Base output directory | `.ksearch-output-kernelbench` |
 | `NUM_CORRECT_TRIALS` | Number of correctness validation trials | `5` |

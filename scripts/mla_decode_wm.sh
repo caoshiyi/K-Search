@@ -7,7 +7,7 @@ API_KEY="${API_KEY:-}"
 BASE_URL="${BASE_URL:-https://generativelanguage.googleapis.com/v1beta/}"
 
 DEFINITION="${DEFINITION:-mla_paged_decode_h16_ckv512_kpe64_ps1}"
-LANGUAGE="${LANGUAGE:-cuda}"
+KSEARCH_LANGUAGE="${KSEARCH_LANGUAGE:-cuda}"
 TARGET_GPU="${TARGET_GPU:-H100}"
 
 BASELINE_SOLUTION="${BASELINE_SOLUTION:-flashinfer_wrapper_03f7b0}"
@@ -19,7 +19,7 @@ WM_STAGNATION_WINDOW="${WM_STAGNATION_WINDOW:-7}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-.ksearch-output}"
 
 WANDB_PROJECT="${WANDB_PROJECT:-test}"
-RUN_NAME="${RUN_NAME:-${MODEL_NAME}-${LANGUAGE}-wm-${DEFINITION}-seed-opt${MAX_OPT_ROUNDS}}"
+RUN_NAME="${RUN_NAME:-${MODEL_NAME}-${KSEARCH_LANGUAGE}-wm-${DEFINITION}-seed-opt${MAX_OPT_ROUNDS}}"
 
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
 sudo -E env "PATH=$PATH" python3 -u "${KSEARCH_ROOT}/generate_kernels_and_eval.py" \
@@ -30,7 +30,7 @@ sudo -E env "PATH=$PATH" python3 -u "${KSEARCH_ROOT}/generate_kernels_and_eval.p
   --model-name "${MODEL_NAME}" \
   --api-key "${API_KEY}" \
   --base-url "${BASE_URL}" \
-  --language "${LANGUAGE}" \
+  --language "${KSEARCH_LANGUAGE}" \
   --target-gpu "${TARGET_GPU}" \
   --world-model \
   --wm-stagnation-window "${WM_STAGNATION_WINDOW}" \

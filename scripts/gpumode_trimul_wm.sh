@@ -7,7 +7,7 @@
 # - BASE_URL: OpenAI-compatible base url (optional)
 #
 # Environment variables (task/generation):
-# - LANGUAGE: triton|python|cuda (default: triton)
+# - KSEARCH_LANGUAGE: triton|python|cuda (default: triton)
 # - TARGET_GPU: e.g. H100 (default: H100)
 # - MAX_OPT_ROUNDS: (default: 5)
 # - ARTIFACTS_DIR: base output dir (default: .ksearch-output)
@@ -36,7 +36,7 @@ MODEL_NAME="${MODEL_NAME:-gpt-5.2}"
 API_KEY="${API_KEY:-${LLM_API_KEY:-}}"
 BASE_URL="${BASE_URL:-https://us.api.openai.com/v1}"
 
-LANGUAGE="${LANGUAGE:-triton}"
+KSEARCH_LANGUAGE="${KSEARCH_LANGUAGE:-triton}"
 TARGET_GPU="${TARGET_GPU:-H100}"
 MAX_OPT_ROUNDS="${MAX_OPT_ROUNDS:-300}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-.ksearch-output-gpumode}"
@@ -52,7 +52,7 @@ GPUMODE_TASK_DIR="${GPUMODE_TASK_DIR:-$KSEARCH_ROOT/k_search/tasks/gpu_mode/trim
 
 WANDB="${WANDB:-0}"
 WANDB_PROJECT="${WANDB_PROJECT:-test}"
-RUN_NAME="${RUN_NAME:-${MODEL_NAME}-${LANGUAGE}-gpumode-trimul-wm-opt${MAX_OPT_ROUNDS}}"
+RUN_NAME="${RUN_NAME:-${MODEL_NAME}-${KSEARCH_LANGUAGE}-gpumode-trimul-wm-opt${MAX_OPT_ROUNDS}}"
 
 if [[ -z "${MODEL_NAME}" ]]; then
   echo "ERROR: MODEL_NAME is required" >&2
@@ -80,7 +80,7 @@ sudo -E env "PATH=$PATH" python3 -u "${KSEARCH_ROOT}/generate_kernels_and_eval.p
   --model-name "${MODEL_NAME}" \
   --api-key "${API_KEY}" \
   --base-url "${BASE_URL}" \
-  --language "${LANGUAGE}" \
+  --language "${KSEARCH_LANGUAGE}" \
   --target-gpu "${TARGET_GPU}" \
   --max-opt-rounds "${MAX_OPT_ROUNDS}" \
   --save-solutions \

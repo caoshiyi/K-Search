@@ -7,7 +7,7 @@
 # - BASE_URL: OpenAI-compatible base url (optional)
 #
 # Environment variables (task/generation):
-# - LANGUAGE: triton|cuda (default: triton)
+# - KSEARCH_LANGUAGE: triton|cuda (default: triton)
 # - TARGET_GPU: e.g. A100-80GB, H100 (default: H100)
 # - MAX_OPT_ROUNDS: (default: 50)
 # - ARTIFACTS_DIR: base output dir (default: .ksearch-output-kernelbench)
@@ -37,7 +37,7 @@ API_KEY="${API_KEY:-${LLM_API_KEY:-}}"
 BASE_URL="${BASE_URL:-https://api.openai.com/v1}"
 
 # Generation configuration
-LANGUAGE="${LANGUAGE:-triton}"
+KSEARCH_LANGUAGE="${KSEARCH_LANGUAGE:-triton}"
 MAX_OPT_ROUNDS="${MAX_OPT_ROUNDS:-50}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-.ksearch-output-kernelbench}"
 CONTINUE_FROM_SOLUTION="${CONTINUE_FROM_SOLUTION:-}"
@@ -97,7 +97,7 @@ echo "Model: ${MODEL_NAME}"
 echo "KernelBench Level: ${LEVEL}, Problem ID: ${PROBLEM_ID}"
 echo "Eval Mode: ${EVAL_MODE}"
 echo "GPU: ${TARGET_GPU}"
-echo "Language: ${LANGUAGE}"
+echo "Language: ${KSEARCH_LANGUAGE}"
 echo "Max Opt Rounds: ${MAX_OPT_ROUNDS}"
 echo "World Model: ${WM}"
 echo "Artifacts Dir: ${ARTIFACTS_DIR}"
@@ -109,7 +109,7 @@ env "PYTHONPATH=$KSEARCH_ROOT" python -u "${KSEARCH_ROOT}/generate_kernels_and_e
   --model-name "${MODEL_NAME}" \
   --api-key "${API_KEY}" \
   --base-url "${BASE_URL}" \
-  --language "${LANGUAGE}" \
+  --language "${KSEARCH_LANGUAGE}" \
   --target-gpu "${TARGET_GPU}" \
   --max-opt-rounds "${MAX_OPT_ROUNDS}" \
   --save-solutions \

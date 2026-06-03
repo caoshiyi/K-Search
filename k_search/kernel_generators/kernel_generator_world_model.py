@@ -161,6 +161,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             self._strategy_catalog = load_strategy_catalog(strategy_file)
             if not strategy_form:
                 strategy_form = "natural_language"
+            self._strategy_form = strategy_form
             print(f"[STRATEGY] Loaded {len(self._strategy_catalog)} strategies from {strategy_file}, form={strategy_form}")
 
         def _llm_call(prompt: str) -> str:

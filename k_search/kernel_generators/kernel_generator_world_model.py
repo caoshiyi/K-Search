@@ -76,30 +76,40 @@ def _definition_text_for_codegen_prompt(
 class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
     """Baseline-aware generator variant that maintains and injects a persistent world model."""
 
-    def _default_world_model_path(self, *, task: Any) -> Optional[Path]:
+    def _default_world_model_path(self, *, task: Any, run_id: str | None = None, include_run: bool = True) -> Optional[Path]:
         try:
             root = get_ksearch_artifacts_dir(
-                base_dir=self._artifacts_dir, task_name=str(getattr(task, "name", "") or "")
+                base_dir=self._artifacts_dir,
+                task_name=str(getattr(task, "name", "") or ""),
+                run_id=run_id,
+                include_run=include_run,
             )
             return root / "world_model" / "world_model.json"
         except Exception:
             return None
 
-    def _persist_world_model_snapshot(self, *, task: Any) -> None:
+    def _persist_world_model_snapshot(self, *, task: Any, run_id: str | None = None) -> None:
         """Best-effort: persist the current WM JSON to disk so future runs can resume."""
         try:
-            p = self._default_world_model_path(task=task)
-            if p is None:
-                return
-            wm_s = str(self._wm.get(str(getattr(task, "name", "") or "")) or "").strip()
-            if not wm_s:
-                return
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(wm_s, encoding="utf-8")
+            # Save to current run directory
+            p = self._default_world_model_path(task=task, run_id=run_id, include_run=True)
+            if p is not None:
+                wm_s = str(self._wm.get(str(getattr(task, "name", "") or "")) or "").strip()
+                if wm_s:
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    p.write_text(wm_s, encoding="utf-8")
+
+            # Also save to top-level (backward compatibility - latest WM state)
+            p_top = self._default_world_model_path(task=task, run_id=None, include_run=False)
+            if p_top is not None:
+                wm_s = str(self._wm.get(str(getattr(task, "name", "") or "")) or "").strip()
+                if wm_s:
+                    p_top.parent.mkdir(parents=True, exist_ok=True)
+                    p_top.write_text(wm_s, encoding="utf-8")
         except Exception:
             pass
 
-    def _resume_world_model_from_snapshot(self, *, task: Any, ref: str) -> None:
+    def _resume_world_model_from_snapshot(self, *, task: Any, ref: str, run_id: str | None = None) -> None:
         """
         Load+normalize a world model JSON snapshot and set it into the in-memory WorldModelManager.
         """
@@ -107,10 +117,13 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         if not wm_ref:
             return
         if wm_ref.lower() == "auto":
-            p = self._default_world_model_path(task=task)
+            # Try run-specific path first, then fall back to top-level
+            p = self._default_world_model_path(task=task, run_id=run_id, include_run=True)
+            if p is None or not p.exists():
+                p = self._default_world_model_path(task=task, run_id=None, include_run=False)
             if p is None or not p.exists():
                 raise FileNotFoundError(
-                    "continue-from-world-model=auto but default <artifacts>/<task>/world_model/world_model.json not found"
+                    "continue-from-world-model=auto but no world_model.json found"
                 )
         else:
             p = Path(wm_ref).expanduser().resolve()
@@ -181,6 +194,8 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         num_debug_and_improve_rounds: int = 5,
         continue_from_solution: Optional[str] = None,
         continue_from_world_model: Optional[str] = None,
+        continue_from_run: Optional[str] = None,  # New: resume from a historical run
+        run_id: Optional[str] = None,  # New: explicit run_id override
         # Workload selection is owned by the Task; configure it when constructing `task`.
     ) -> Any:
         """
@@ -195,6 +210,19 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             max_dai = 5
         if max_dai < 1:
             max_dai = 1
+
+        # Determine run_id: either explicit, from continue_from_run, or generate new
+        from k_search.utils.paths import get_run_id
+        if continue_from_run:
+            effective_run_id = continue_from_run
+        elif run_id:
+            effective_run_id = run_id
+        else:
+            effective_run_id = get_run_id()
+
+        # Store run_id in task for downstream use
+        if hasattr(task, "_ksearch_run_id"):
+            task._ksearch_run_id = effective_run_id
 
         def _stage(msg: str) -> None:
             m = (msg or "").strip()
@@ -256,7 +284,11 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             _stage("init SolutionDB")
             try:
                 db_path = (
-                    get_ksearch_artifacts_dir(base_dir=self._artifacts_dir, task_name=str(getattr(task, "name", "") or ""))
+                    get_ksearch_artifacts_dir(
+                        base_dir=self._artifacts_dir,
+                        task_name=str(getattr(task, "name", "") or ""),
+                        run_id=effective_run_id,
+                    )
                     / "world_model"
                     / "solution_db.jsonl"
                 )
@@ -284,9 +316,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         # Optional: resume world model from a JSON snapshot on disk.
         wm_ref = str(continue_from_world_model or "").strip()
         if wm_ref:
-            self._resume_world_model_from_snapshot(task=task, ref=wm_ref)
+            self._resume_world_model_from_snapshot(task=task, ref=wm_ref, run_id=effective_run_id)
             _emit(render_world_model_status(self._wm.get(task.name)))
-            self._persist_world_model_snapshot(task=task)
+            self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
 
         # Optional W&B support
         try:
@@ -348,7 +380,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         )
                     _emit("[WM] Initialized+seeded root from continue_from_solution (code+eval).")
                     _emit(render_world_model_status(self._wm.get(task.name)))
-                    self._persist_world_model_snapshot(task=task)
+                    self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
             except LLMProviderFatalError as exc:
                 _emit(f"[ERROR] world model seed init failed with fatal provider error: {exc}")
                 raise
@@ -390,7 +422,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             dt = time.perf_counter() - t0
             _emit(render_world_model_status(wm))
             _emit(f"[STAGE] world model init latency: {dt:.2f}s")
-            self._persist_world_model_snapshot(task=task)
+            self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
             try:
                 _nar = getattr(self, "_narrative", None)
                 if _nar is not None:
@@ -1326,7 +1358,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         diff_summary=cycle_best_diff_summary,
                     )
                     _emit(render_world_model_status(self._wm.get(task.name)))
-                    self._persist_world_model_snapshot(task=task)
+                    self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
 
                 with llm_log_context(
                     operator=str(getattr(task, "name", "") or ""),
@@ -1348,7 +1380,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         round_index=cycle_best_round,
                     )
                 _emit(render_world_model_status(self._wm.get(task.name)))
-                self._persist_world_model_snapshot(task=task)
+                self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
                 try:
                     _nar = getattr(self, "_narrative", None)
                     if _nar is not None:
@@ -1391,7 +1423,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             round_index=cycle_start_round + max(0, rounds_consumed - 1),
                         )
                     _emit(render_world_model_status(self._wm.get(task.name)))
-                    self._persist_world_model_snapshot(task=task)
+                    self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
                     try:
                         _nar = getattr(self, "_narrative", None)
                         if _nar is not None:

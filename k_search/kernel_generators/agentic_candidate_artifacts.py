@@ -35,6 +35,7 @@ def write_agentic_candidate_artifacts(
     *,
     artifacts_dir: str | Path | None,
     task_name: str,
+    run_id: str,  # New parameter: run_id for organizing runs
     round_num: int,
     attempt_idx: int,
     prompt: str,
@@ -50,7 +51,7 @@ def write_agentic_candidate_artifacts(
     model_name: str,
     metadata: dict[str, Any] | None = None,
 ) -> tuple[CandidatePatch, dict[str, str]]:
-    root = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=task_name)
+    root = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=task_name, run_id=run_id)
     candidate_id = f"round_{int(round_num):04d}_attempt_{int(attempt_idx):02d}"
     out_dir = root / "candidates" / candidate_id
     out_dir.mkdir(parents=True, exist_ok=True)

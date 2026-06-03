@@ -96,6 +96,7 @@ def create_project_snapshot(
     eval_result: dict[str, Any] | None = None,
     diff_from_parent: str | None = None,
     archive_dir: str | Path | None = None,
+    run_id: str | None = None,  # New parameter for organizing runs
 ) -> ProjectSnapshot:
     root = Path(project_dir).expanduser().resolve()
     manifest: dict[str, FileMeta] = {}

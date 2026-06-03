@@ -19,7 +19,7 @@ from k_search.tasks.task_base import EvalResult, Solution
 from k_search.telemetry.context import TelemetryContext
 from k_search.telemetry.recorder import build_file_recorder
 from k_search.utils.path_sanitize import sanitize_worktree_paths
-from k_search.utils.paths import get_ksearch_artifacts_dir
+from k_search.utils.paths import get_ksearch_artifacts_dir, get_run_id
 
 
 AgenticMode = Literal["generate", "action", "debug", "improve"]
@@ -35,6 +35,8 @@ class AscendCAgenticCodegenRequest:
     round_num: int
     attempt_idx: int
     mode: AgenticMode
+    run_id: str | None = None  # New: run_id for organizing runs
+    task_name: str | None = None  # New: task_name for artifacts directory
     parent_candidate_id: str | None = None
     action_node_id: str | None = None
 
@@ -331,9 +333,10 @@ class AscendCAgenticCodegenRunner:
             cleaned = {src.path: src.content for src in solution.sources or []}
             candidate_id = f"round_{int(request.round_num):04d}_attempt_{int(request.attempt_idx):02d}"
             snapshot_id = f"{candidate_id}_snapshot"
-            task_name = getattr(task, "definition_name", None) or getattr(task, "name", "ascendc")
+            task_name = request.task_name or getattr(task, "definition_name", None) or getattr(task, "name", "ascendc")
+            run_id = request.run_id or get_run_id()
             artifacts_dir = getattr(task, "artifacts_dir", None)
-            snapshot_archive_dir = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=str(task_name)) / "snapshots"
+            snapshot_archive_dir = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=str(task_name), run_id=run_id) / "snapshots"
             project_snapshot = create_project_snapshot(
                 project_dir=session.project_dir,
                 snapshot_id=snapshot_id,
@@ -343,10 +346,12 @@ class AscendCAgenticCodegenRunner:
                 eval_result=eval_result.to_dict(include_log_excerpt=True, max_log_chars=8000),
                 diff_from_parent=diff_text,
                 archive_dir=snapshot_archive_dir,
+                run_id=run_id,
             )
             candidate_patch, artifact_paths = write_agentic_candidate_artifacts(
                 artifacts_dir=artifacts_dir,
                 task_name=str(task_name),
+                run_id=run_id,
                 round_num=request.round_num,
                 attempt_idx=request.attempt_idx,
                 prompt=prompt,
@@ -581,9 +586,10 @@ class AscendCAgenticCodegenRunner:
             cleaned = {src.path: src.content for src in solution.sources or []}
             candidate_id = f"round_{int(request.round_num):04d}_attempt_{int(request.attempt_idx):02d}"
             snapshot_id = f"{candidate_id}_snapshot"
-            task_name = getattr(task, "definition_name", None) or getattr(task, "name", "ascendc")
+            task_name = request.task_name or getattr(task, "definition_name", None) or getattr(task, "name", "ascendc")
+            run_id = request.run_id or get_run_id()
             artifacts_dir = getattr(task, "artifacts_dir", None)
-            snapshot_archive_dir = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=str(task_name)) / "snapshots"
+            snapshot_archive_dir = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=str(task_name), run_id=run_id) / "snapshots"
             project_snapshot = create_project_snapshot(
                 project_dir=wt_session.project_dir,
                 snapshot_id=snapshot_id,
@@ -593,10 +599,12 @@ class AscendCAgenticCodegenRunner:
                 eval_result=eval_result.to_dict(include_log_excerpt=True, max_log_chars=8000),
                 diff_from_parent=diff_text,
                 archive_dir=snapshot_archive_dir,
+                run_id=run_id,
             )
             candidate_patch, artifact_paths = write_agentic_candidate_artifacts(
                 artifacts_dir=artifacts_dir,
                 task_name=str(task_name),
+                run_id=run_id,
                 round_num=request.round_num,
                 attempt_idx=request.attempt_idx,
                 prompt=prompt,

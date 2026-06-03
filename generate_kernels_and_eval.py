@@ -22,13 +22,13 @@ def _resolve_llm_config_from_args(args: Any) -> tuple[str, Optional[str]]:
     return llm_provider, api_key
 
 def _persist_ksearch_solution(
-    solution: Any, *, definition_name: str, artifacts_dir: Optional[str]
+    solution: Any, *, definition_name: str, artifacts_dir: Optional[str], run_id: Optional[str] = None
 ) -> Optional[Path]:
     """
     Persist a k-search task_base.Solution JSON under the k-search artifacts dir.
     """
     try:
-        from k_search.utils.paths import get_ksearch_artifacts_dir
+        from k_search.utils.paths import get_ksearch_artifacts_dir, get_run_id
     except Exception:
         return None
     try:
@@ -39,7 +39,7 @@ def _persist_ksearch_solution(
     try:
         # Note: base_dir is provided by caller; default remains ./ .ksearch
         root = get_ksearch_artifacts_dir(
-            base_dir=artifacts_dir, task_name=str(definition_name or "")
+            base_dir=artifacts_dir, task_name=str(definition_name or ""), run_id=run_id or get_run_id()
         ).resolve()
         out_dir = root / "solutions" / str(definition_name or "__unknown__")
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -85,17 +85,18 @@ def _persist_ksearch_eval_report(
     definition_name: str,
     solution_name: Optional[str],
     artifacts_dir: Optional[str],
+    run_id: Optional[str] = None,
 ) -> Optional[Path]:
     """
     Persist a final-eval report JSON under the k-search artifacts dir.
     """
     try:
-        from k_search.utils.paths import get_ksearch_artifacts_dir
+        from k_search.utils.paths import get_ksearch_artifacts_dir, get_run_id
     except Exception:
         return None
     try:
         root = get_ksearch_artifacts_dir(
-            base_dir=artifacts_dir, task_name=str(definition_name or "")
+            base_dir=artifacts_dir, task_name=str(definition_name or ""), run_id=run_id or get_run_id()
         ).resolve()
         out_dir = root / "eval" / str(definition_name or "__unknown__")
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -126,6 +127,8 @@ def generate_and_evaluate(
     save_results: bool,
     continue_from_solution: Optional[str] = None,
     continue_from_world_model: Optional[str] = None,
+    continue_from_run: Optional[str] = None,  # New: resume from historical run
+    run_id: Optional[str] = None,  # New: explicit run_id override
     num_eval_workload: Optional[int] = None,
     # W&B options
     enable_wandb: bool = False,
@@ -143,7 +146,56 @@ def generate_and_evaluate(
     """
     Generate exactly one solution for the task, then run final evaluation.
     """
-    
+    from k_search.utils.paths import get_ksearch_artifacts_dir, get_run_id
+
+    # Determine run_id
+    if continue_from_run:
+        effective_run_id = continue_from_run
+    elif run_id:
+        effective_run_id = run_id
+    else:
+        effective_run_id = get_run_id()
+
+    task_name = str(getattr(task, "name", "") or "")
+
+    # Write run_meta.json
+    run_root = get_ksearch_artifacts_dir(
+        base_dir=artifacts_dir,
+        task_name=task_name,
+        run_id=effective_run_id,
+    )
+    run_meta_path = run_root / "run_meta.json"
+    run_meta = {
+        "run_id": effective_run_id,
+        "start_time": datetime.utcnow().isoformat() + "Z",
+        "task_name": task_name,
+        "model_name": model_name,
+        "language": language,
+        "target_gpu": target_gpu,
+        "llm_provider": llm_provider,
+        "max_opt_rounds": max_opt_rounds,
+        "enable_world_model": enable_world_model,
+        "wm_stagnation_window": wm_stagnation_window,
+        "wm_max_difficulty": wm_max_difficulty,
+        "continue_from_solution": continue_from_solution,
+        "continue_from_world_model": continue_from_world_model,
+        "continue_from_run": continue_from_run,
+        "strategy_file": strategy_file,
+        "strategy_form": strategy_form,
+        "status": "running",
+    }
+    try:
+        run_meta_path.parent.mkdir(parents=True, exist_ok=True)
+        run_meta_path.write_text(json.dumps(run_meta, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"[RUN] Run ID: {effective_run_id}")
+        print(f"[RUN] Run metadata: {run_meta_path}")
+    except Exception as e:
+        print(f"[WARN] Failed to write run_meta.json: {e}")
+
+    # Store run_id in task for downstream use
+    if hasattr(task, "_ksearch_run_id"):
+        task._ksearch_run_id = effective_run_id
+
     # Optional Weights & Biases support
     try:
         import wandb  # type: ignore
@@ -199,6 +251,7 @@ def generate_and_evaluate(
                 definition_name=def_name,
                 solution_name=sol_name,
                 artifacts_dir=artifacts_dir,
+                run_id=getattr(task, "_ksearch_run_id", None),
             )
             if saved:
                 print(f"[{def_name}] Saved eval report to: {saved}")

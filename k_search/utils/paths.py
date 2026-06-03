@@ -45,16 +45,28 @@ def resolve_output_base(base_dir: Optional[PathLike] = None) -> Path:
     return root.expanduser().resolve()
 
 
-def get_ksearch_artifacts_dir(*, base_dir: Optional[PathLike] = None, task_name: Optional[str] = None) -> Path:
+def get_ksearch_artifacts_dir(
+    *,
+    base_dir: Optional[PathLike] = None,
+    task_name: Optional[str] = None,
+    run_id: Optional[str] = None,
+    include_run: bool = True,
+) -> Path:
     """
     Default k-search artifacts directory (independent of flashinfer-bench dataset paths).
 
     Artifacts (solutions, eval, candidates, snapshots, world_model, memory) live at
     `<base>/<task>`. Base resolution is shared with logs via resolve_output_base().
+
+    When include_run=True and run_id is provided, artifacts are scoped under
+    `<base>/<task>/runs/<run_id>/` for run-level isolation.
     """
     root = resolve_output_base(base_dir)
     if task_name:
-        return root / safe_path_component(task_name, default="__unknown__")
+        root = root / safe_path_component(task_name, default="__unknown__")
+    if include_run:
+        rid = run_id or get_run_id()
+        root = root / "runs" / safe_path_component(rid, default="run")
     return root
 
 

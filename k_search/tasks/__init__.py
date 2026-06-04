@@ -34,7 +34,7 @@ except Exception:
 
 try:  # pragma: no cover
     from k_search.tasks.kernelbench_task import KernelBenchTask
-    
+
     __all__.append("KernelBenchTask")
 except Exception:
     KernelBenchTask = None  # type: ignore

@@ -76,7 +76,7 @@ class KernelGenerator:
 
     # NOTE: baseline-aware generation lives on `KernelGenerator.generate(task=..., ...)`.
 
-    def _parse_xml_files(self, code: str) -> Dict[str, str]:
+    def _parse_xml_files(self, code: str, verbose: bool = True) -> Dict[str, str]:
         files = {}
 
         patterns = {
@@ -90,7 +90,7 @@ class KernelGenerator:
             if match:
                 content = match.group(1).strip()
                 files[filename] = content
-            else:
+            elif verbose:
                 print(f"Warning: Could not find {filename} in generated code")
 
         return files
@@ -104,7 +104,7 @@ class KernelGenerator:
         """
         if self.language.lower() == "cuda":
             # Try to parse as XML first (3-file format)
-            xml_result = self._parse_xml_files(code)
+            xml_result = self._parse_xml_files(code, verbose=False)
             # If XML parsing found all 3 files, return the dict
             if xml_result and len(xml_result) == 3:
                 return xml_result
@@ -155,7 +155,6 @@ class KernelGenerator:
 
         return code
 
-    
     def _generate_code_from_prompt(self, prompt: str):
         # If we fail to parse CUDA XML (missing kernel.h/kernel.cu/main.cpp), retry generation.
         max_parse_retries = 5
@@ -191,7 +190,8 @@ class KernelGenerator:
                             raise ValueError(f"missing required XML files: {missing}")
                     elif not isinstance(cleaned_code, str) or not cleaned_code.strip():
                         raise ValueError("CUDA generation returned neither valid XML dict nor Python string")
-                    # If it's a string, it's Python with inline CUDA - no further validation needed here
+                    elif not any(marker in cleaned_code for marker in ("import torch", "class Model", "torch.cuda")):
+                        raise ValueError("CUDA Python fallback lacks expected indicators (import torch / class Model / torch.cuda)")
 
                 return {"raw": generated_code, "cleaned": cleaned_code}
 

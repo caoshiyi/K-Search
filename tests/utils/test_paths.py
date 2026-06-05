@@ -50,9 +50,16 @@ def test_get_run_logs_dir_layout(monkeypatch, tmp_path):
     assert root == (tmp_path / "logs" / "vec_add" / "run_1").resolve()
 
 
-def test_artifacts_dir_unchanged_layout(monkeypatch, tmp_path):
+def test_artifacts_dir_is_run_scoped_by_default(monkeypatch, tmp_path):
     monkeypatch.delenv("KSEARCH_ARTIFACTS_DIR", raising=False)
+    monkeypatch.setenv("KSEARCH_RUN_ID", "run:1")
     p = get_ksearch_artifacts_dir(base_dir=tmp_path, task_name="vec/add")
+    assert p == (tmp_path / "vec_add" / "runs" / "run_1").resolve()
+
+
+def test_artifacts_dir_can_use_task_layout_without_run(monkeypatch, tmp_path):
+    monkeypatch.delenv("KSEARCH_ARTIFACTS_DIR", raising=False)
+    p = get_ksearch_artifacts_dir(base_dir=tmp_path, task_name="vec/add", include_run=False)
     assert p == (tmp_path / "vec_add").resolve()
 
 

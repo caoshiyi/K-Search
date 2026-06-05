@@ -54,13 +54,14 @@ class RunNarrativeLogger:
         self.events_path = self.run_dir / "events.jsonl"
         self.meta_path = self.run_dir / "run_meta.json"
         self.excerpt_chars = _default_excerpt_chars()
+        self.meta = dict(meta or {})
         self._ok = True
         try:
             self.run_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
             self._ok = False
-        if meta is not None:
-            self._write_meta(dict(meta))
+        if self.meta:
+            self._write_meta(self.meta)
 
     # ------------------------------------------------------------------ internals
     @staticmethod
@@ -104,7 +105,10 @@ class RunNarrativeLogger:
     # ------------------------------------------------------------------ events
     def run_start(self, meta: Optional[Mapping[str, Any]] = None) -> None:
         try:
-            m = dict(meta or {})
+            m = dict(self.meta)
+            if meta:
+                m.update(dict(meta))
+                self.meta = dict(m)
             if m:
                 self._write_meta(m)
             lines = ["# K-Search Run Summary", ""]

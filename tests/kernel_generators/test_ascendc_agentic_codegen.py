@@ -19,11 +19,18 @@ def _py_cmd(code: str) -> str:
     return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
 
 
+def _write_native_handoffs(root: Path, code_map: str = "# CODE_MAP\nkernel/foo.h\n") -> None:
+    (root / "CODE_MAP.md").write_text(code_map, encoding="utf-8")
+    (root / "IMPLEMENTATION_PLAN.md").write_text(
+        "# IMPLEMENTATION_PLAN\nApply the requested focused source edit.\n",
+        encoding="utf-8",
+    )
+    (root / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
+
+
 @pytest.fixture(autouse=True)
 def _code_map_disabled_by_default(monkeypatch):
-    # Keep agentic runner tests hermetic and fast: with code_map enabled the runner
-    # would fire a real CodeReaderAgent SDK call on the first round. Tests that
-    # exercise code_map opt back in with monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1").
+    # Keep memory-store tests hermetic unless they explicitly opt into persisted code_map behavior.
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
 
 
@@ -35,6 +42,7 @@ class EditingClient:
     def edit_project(self, *, project_dir, prompt):
         root = Path(project_dir)
         self.calls.append((root, prompt))
+        _write_native_handoffs(root)
         target = root / "kernel" / "foo.h"
         target.write_text(self.new_text, encoding="utf-8")
         return ClaudeProjectEditResult(
@@ -46,8 +54,87 @@ class EditingClient:
         )
 
 
+class NativeEditingClient:
+    def __init__(
+        self,
+        new_text: str = "alpha\nBETA\ngamma\n",
+        *,
+        write_code_map: bool = True,
+        write_plan: bool = True,
+        write_review: bool = True,
+        review_text: str = "status: ok\neval_ready: true\n",
+    ):
+        self.new_text = new_text
+        self.write_code_map = write_code_map
+        self.write_plan = write_plan
+        self.write_review = write_review
+        self.review_text = review_text
+        self.calls = []
+        self.assets_seen: dict[str, bool] = {}
+
+    def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
+        root = Path(project_dir)
+        self.calls.append((root, prompt))
+        self.assets_seen = {
+            "code_reader": (root / ".claude" / "agents" / "code-reader.md").exists(),
+            "plan": (root / ".claude" / "agents" / "plan.md").exists(),
+            "codegen": (root / ".claude" / "agents" / "codegen.md").exists(),
+            "reviewer": (root / ".claude" / "agents" / "reviewer.md").exists(),
+            "bug_fixer": (root / ".claude" / "agents" / "bug-fixer.md").exists(),
+            "ascendc_codegen_skill": (root / ".claude" / "skills" / "ascendc-codegen" / "SKILL.md").exists(),
+            "ascendc_api_reference_skill": (root / ".claude" / "skills" / "ascendc-api-reference" / "SKILL.md").exists(),
+        }
+        if self.write_code_map:
+            (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h is the kernel file\n", encoding="utf-8")
+        if self.write_plan:
+            (root / "IMPLEMENTATION_PLAN.md").write_text(
+                "# IMPLEMENTATION_PLAN\nChange beta to BETA in kernel/foo.h.\n",
+                encoding="utf-8",
+            )
+        if self.write_review:
+            (root / "REVIEW_NOTES.md").write_text(self.review_text, encoding="utf-8")
+        (root / "kernel" / "foo.h").write_text(self.new_text, encoding="utf-8")
+        return ClaudeProjectEditResult(
+            text="status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md\nnext: python_eval",
+            transcript="native subagents completed",
+            prompt=prompt,
+            prompt_chars=len(prompt),
+            prompt_lines=prompt.count("\n") + 1,
+        )
+
+
+class NativeSessionClient:
+    def __init__(self):
+        self.prompts = []
+        self.project_dir: Path | None = None
+
+    def open_session(self, *, project_dir, telemetry_recorder=None):
+        from types import SimpleNamespace
+
+        self.project_dir = Path(project_dir)
+        return SimpleNamespace(_closed=False, project_dir=self.project_dir)
+
+    def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+        self.prompts.append(prompt)
+        root = Path(session.project_dir)
+        _write_native_handoffs(root)
+        text = "alpha\nBETA\ngamma\n" if len(self.prompts) == 1 else "alpha\nGAMMA\ngamma\n"
+        (root / "kernel" / "foo.h").write_text(text, encoding="utf-8")
+        return ClaudeProjectEditResult(
+            text="status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md\nnext: python_eval",
+            transcript="native session completed",
+            prompt=prompt,
+            prompt_chars=len(prompt),
+            prompt_lines=prompt.count("\n") + 1,
+        )
+
+    def close_session(self, session):
+        session._closed = True
+
+
 class NoChangeClient:
     def edit_project(self, *, project_dir, prompt):
+        _write_native_handoffs(Path(project_dir), code_map="# CODE_MAP\nkernel.cpp\n")
         return ClaudeProjectEditResult(
             text="no changes",
             transcript="no changes",
@@ -77,6 +164,11 @@ def test_prompt_builder_omits_full_project_container_and_includes_action():
     assert "compile ok" in prompt
     assert "<ascendc_project>" not in prompt
     assert "Read/Grep/Glob/Edit/Write" in prompt
+    assert "code-reader -> plan -> codegen -> reviewer" in prompt
+    assert "IMPLEMENTATION_PLAN.md" in prompt
+    assert "REVIEW_NOTES.md" in prompt
+    assert "bug-fixer" in prompt
+    assert "must not be invoked" in prompt
 
 
 def test_prompt_builder_raises_section_aware_error_when_budget_exceeded():
@@ -239,6 +331,7 @@ def test_runner_overlays_base_solution_before_editing(tmp_path, monkeypatch):
             self.project_dirs.append(root)
             pre_overlay = (root / "kernel" / "foo.h").read_text(encoding="utf-8")
             assert pre_overlay == "overlaid_base\n"
+            _write_native_handoffs(root)
             (root / "kernel" / "foo.h").write_text("overlaid_base\nBETA\n", encoding="utf-8")
             return ClaudeProjectEditResult(
                 text="edited",
@@ -281,6 +374,7 @@ def test_runner_creates_attempt_telemetry_files(tmp_path, monkeypatch):
     class TelemetryAwareClient:
         def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
             root = Path(project_dir)
+            _write_native_handoffs(root)
             (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
             if telemetry_recorder is not None:
                 from k_search.telemetry.events import TelemetryEvent
@@ -351,7 +445,9 @@ def test_runner_disables_telemetry_with_env(tmp_path, monkeypatch):
 
     class Client:
         def edit_project(self, *, project_dir, prompt):
-            Path(project_dir, "kernel", "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+            root = Path(project_dir)
+            _write_native_handoffs(root)
+            (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
             return ClaudeProjectEditResult(
                 text="edited",
                 transcript="edited",
@@ -448,12 +544,34 @@ def test_prompt_builder_uses_code_map_branch_when_present():
     assert "CODE_MAP.md" in with_map
     assert "Read it first" in with_map
     assert "update the affected sections" in with_map
-    assert "CODE_MAP.md" not in without_map
-    assert "First inspect the project with Glob, Grep, and Read" in without_map
+    assert "CODE_MAP.md already exists: yes" in with_map
+    assert "CODE_MAP.md already exists: no" in without_map
+    assert "Use the code-reader subagent to create CODE_MAP.md" in without_map
+
+
+def test_prompt_builder_requires_file_handoff_and_short_subagent_summaries():
+    builder = AscendCAgenticPromptBuilder(max_chars=20_000)
+    request = AscendCAgenticCodegenRequest(
+        definition_text="Task: x",
+        action_text="optimize",
+        trace_logs="",
+        perf_summary="",
+        target_gpu="ascend_910b",
+        round_num=1,
+        attempt_idx=1,
+        mode="action",
+    )
+
+    prompt = builder.build(request, has_code_map=False)
+
+    assert "CODE_MAP.md, IMPLEMENTATION_PLAN.md, and REVIEW_NOTES.md are the only trusted cross-subagent handoff" in prompt
+    assert "status, files_written, and next" in prompt
+    assert "Do not paste CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md, or source files" in prompt
 
 
 def test_runner_generates_and_persists_code_map_on_first_round(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "test-native-map")
     task_dir = tmp_path / "task"
     (task_dir / "kernel").mkdir(parents=True)
     (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
@@ -466,12 +584,9 @@ def test_runner_generates_and_persists_code_map_on_first_round(tmp_path, monkeyp
         def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
             self.prompts.append(prompt)
             root = Path(project_dir)
-            if "CODE_MAP.md using EXACTLY" in prompt:
-                (root / "CODE_MAP.md").write_text("# CODE_MAP\nfoo.h is the kernel\n", encoding="utf-8")
-                text = "wrote CODE_MAP.md"
-            else:
-                (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
-                text = "edited"
+            _write_native_handoffs(root, code_map="# CODE_MAP\nfoo.h is the kernel\n")
+            (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+            text = "native subagents completed"
             return ClaudeProjectEditResult(
                 text=text, transcript=text, prompt=prompt,
                 prompt_chars=len(prompt), prompt_lines=prompt.count("\n") + 1,
@@ -490,8 +605,8 @@ def test_runner_generates_and_persists_code_map_on_first_round(tmp_path, monkeyp
         base_solution=None,
     )
 
-    assert any("CODE_MAP.md using EXACTLY" in p for p in client.prompts)
-    assert any("Read it first instead of grepping" in p for p in client.prompts)
+    assert len(client.prompts) == 1
+    assert "Use the code-reader subagent to create CODE_MAP.md" in client.prompts[0]
     from k_search.kernel_generators.memory import CODE_MAP, MemoryStore
     store = MemoryStore.for_task(task)
     assert store.load(CODE_MAP) is not None
@@ -502,6 +617,7 @@ def test_runner_generates_and_persists_code_map_on_first_round(tmp_path, monkeyp
 
 def test_runner_reuses_existing_code_map_without_reader(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "test-preseeded-map")
     task_dir = tmp_path / "task"
     (task_dir / "kernel").mkdir(parents=True)
     (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
@@ -515,9 +631,9 @@ def test_runner_reuses_existing_code_map_without_reader(tmp_path, monkeypatch):
 
         def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
             self.prompts.append(prompt)
-            assert "CODE_MAP.md using EXACTLY" not in prompt
             root = Path(project_dir)
             assert (root / "CODE_MAP.md").read_text(encoding="utf-8") == "# CODE_MAP\npreseeded\n"
+            _write_native_handoffs(root, code_map="# CODE_MAP\npreseeded\n")
             (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
             return ClaudeProjectEditResult(
                 text="edited", transcript="edited", prompt=prompt,
@@ -537,11 +653,12 @@ def test_runner_reuses_existing_code_map_without_reader(tmp_path, monkeypatch):
         base_solution=None,
     )
     assert len(client.prompts) == 1
-    assert "Read it first instead of grepping" in client.prompts[0]
+    assert "CODE_MAP.md already exists: yes" in client.prompts[0]
+    assert "Read it first" in client.prompts[0]
     assert "CODE_MAP.md" not in result.changed_paths
 
 
-def test_runner_code_map_disabled_keeps_legacy_behavior(tmp_path, monkeypatch):
+def test_runner_code_map_disabled_skips_memory_persistence_only(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
     task_dir = tmp_path / "task"
     (task_dir / "kernel").mkdir(parents=True)
@@ -557,9 +674,9 @@ def test_runner_code_map_disabled_keeps_legacy_behavior(tmp_path, monkeypatch):
         ),
         base_solution=None,
     )
-    assert "First inspect the project" in client.calls[0][1]
-    assert "CODE_MAP.md" not in client.calls[0][1]
-    assert result.code_map_text is None
+    assert "CODE_MAP.md already exists: no" in client.calls[0][1]
+    assert "Use the code-reader subagent to create CODE_MAP.md" in client.calls[0][1]
+    assert result.code_map_text is not None
 
 
 def test_runner_code_map_not_in_diff(tmp_path, monkeypatch):
@@ -572,12 +689,9 @@ def test_runner_code_map_not_in_diff(tmp_path, monkeypatch):
     class C:
         def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
             root = Path(project_dir)
-            if "CODE_MAP.md using EXACTLY" in prompt:
-                (root / "CODE_MAP.md").write_text("# CODE_MAP\nmapped\n", encoding="utf-8")
-                t = "wrote map"
-            else:
-                (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
-                t = "edited"
+            _write_native_handoffs(root, code_map="# CODE_MAP\nmapped\n")
+            (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+            t = "edited"
             return ClaudeProjectEditResult(
                 text=t, transcript=t, prompt=prompt,
                 prompt_chars=len(prompt), prompt_lines=prompt.count("\n") + 1,
@@ -597,3 +711,314 @@ def test_runner_code_map_not_in_diff(tmp_path, monkeypatch):
     assert "kernel/foo.h" in result.diff_text
     if result.project_snapshot is not None:
         assert "CODE_MAP.md" not in result.project_snapshot.manifest
+
+
+def test_runner_materializes_native_assets_and_uses_single_project_edit(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    client = NativeEditingClient()
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+
+    assert len(client.calls) == 1
+    project_dir, prompt = client.calls[0]
+    assert project_dir
+    assert all(client.assets_seen.values())
+    assert "code-reader -> plan -> codegen -> reviewer" in prompt
+    assert "BETA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
+
+
+def test_runner_uses_configured_subagent_stages_in_one_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+
+    class StagedSessionClient:
+        def __init__(self):
+            self.open_count = 0
+            self.closed = False
+            self.prompts: list[str] = []
+            self.project_dir: Path | None = None
+
+        def open_session(self, *, project_dir, telemetry_recorder=None):
+            from types import SimpleNamespace
+
+            self.open_count += 1
+            self.project_dir = Path(project_dir)
+            return SimpleNamespace(_closed=False, project_dir=self.project_dir)
+
+        def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+            self.prompts.append(prompt)
+            root = Path(session.project_dir)
+            if "Stage 1/4: code-reader" in prompt:
+                assert "Use the code-reader subagent" in prompt
+                (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
+                text = "reader done"
+            elif "Stage 2/4: plan" in prompt:
+                assert (root / "CODE_MAP.md").exists()
+                assert "Use the plan subagent" in prompt
+                (root / "IMPLEMENTATION_PLAN.md").write_text("# plan\nchange beta\n", encoding="utf-8")
+                text = "plan done"
+            elif "Stage 3/4: codegen" in prompt:
+                assert (root / "IMPLEMENTATION_PLAN.md").exists()
+                assert "Use the codegen subagent" in prompt
+                (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+                (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h updated\n", encoding="utf-8")
+                text = "codegen done"
+            elif "Stage 4/4: reviewer" in prompt:
+                assert "Use the reviewer subagent" in prompt
+                (root / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
+                text = "review done"
+            else:
+                raise AssertionError(f"unexpected stage prompt: {prompt}")
+            return ClaudeProjectEditResult(
+                text=text,
+                transcript=text,
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+        def close_session(self, session):
+            self.closed = True
+            session._closed = True
+
+    client = StagedSessionClient()
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+
+    assert client.open_count == 1
+    assert client.closed is True
+    assert [prompt.splitlines()[0] for prompt in client.prompts] == [
+        "Stage 1/4: code-reader",
+        "Stage 2/4: plan",
+        "Stage 3/4: codegen",
+        "Stage 4/4: reviewer",
+    ]
+    assert result.changed_paths == ["kernel/foo.h"]
+    assert "BETA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
+
+
+def test_runner_does_not_import_old_python_project_agents(tmp_path, monkeypatch):
+    from types import ModuleType
+
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    forbidden = ModuleType("k_search.kernel_generators.agents")
+
+    def _blocked_getattr(name):
+        raise AssertionError(f"old Python agent import used: {name}")
+
+    forbidden.__getattr__ = _blocked_getattr
+    monkeypatch.setitem(sys.modules, "k_search.kernel_generators.agents", forbidden)
+
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=NativeEditingClient())
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+
+    assert result.changed_paths == ["kernel/foo.h"]
+
+
+def test_runner_fails_when_implementation_plan_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=NativeEditingClient(write_plan=False))
+
+    with pytest.raises(RuntimeError, match="IMPLEMENTATION_PLAN.md"):
+        runner.run(
+            task=task,
+            request=AscendCAgenticCodegenRequest(
+                definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+                target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+            ),
+            base_solution=None,
+        )
+
+
+def test_runner_fails_when_review_notes_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=NativeEditingClient(write_review=False))
+
+    with pytest.raises(RuntimeError, match="REVIEW_NOTES.md"):
+        runner.run(
+            task=task,
+            request=AscendCAgenticCodegenRequest(
+                definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+                target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+            ),
+            base_solution=None,
+        )
+
+
+def test_runner_fails_when_reviewer_marks_candidate_not_eval_ready(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    runner = AscendCAgenticCodegenRunner(
+        model_name="claude",
+        editor_client=NativeEditingClient(
+            review_text="status: needs_fix\neval_ready: false\nrequired_fixes: fix tiling contract\n",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="REVIEW_NOTES.md"):
+        runner.run(
+            task=task,
+            request=AscendCAgenticCodegenRequest(
+                definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+                target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+            ),
+            base_solution=None,
+        )
+
+
+def test_runner_fails_when_code_map_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=NativeEditingClient(write_code_map=False))
+
+    with pytest.raises(RuntimeError, match="CODE_MAP.md"):
+        runner.run(
+            task=task,
+            request=AscendCAgenticCodegenRequest(
+                definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+                target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+            ),
+            base_solution=None,
+        )
+
+
+def test_runner_filters_handoff_and_claude_asset_paths_from_candidate_outputs(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=NativeEditingClient())
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+
+    assert result.changed_paths == ["kernel/foo.h"]
+    assert "CODE_MAP.md" not in result.diff_text
+    assert "IMPLEMENTATION_PLAN.md" not in result.diff_text
+    assert "REVIEW_NOTES.md" not in result.diff_text
+    assert ".claude/agents" not in result.diff_text
+    assert result.project_snapshot is not None
+    assert "CODE_MAP.md" not in result.project_snapshot.manifest
+    assert "IMPLEMENTATION_PLAN.md" not in result.project_snapshot.manifest
+    assert "REVIEW_NOTES.md" not in result.project_snapshot.manifest
+    assert not any(path.startswith(".claude/") for path in result.project_snapshot.manifest)
+    assert result.artifact_paths is not None
+    manifest = json.loads(Path(result.artifact_paths["manifest_path"]).read_text(encoding="utf-8"))
+    handoff_paths = manifest["native_handoff_paths"]
+    assert sorted(handoff_paths) == ["CODE_MAP.md", "IMPLEMENTATION_PLAN.md", "REVIEW_NOTES.md"]
+    assert "Change beta to BETA" in Path(handoff_paths["IMPLEMENTATION_PLAN.md"]).read_text(encoding="utf-8")
+
+
+def test_continue_fix_uses_native_prompt_and_run_scoped_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "native-continue")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(
+        task_path=task_dir,
+        definition_name="x",
+        artifacts_dir=str(tmp_path / "artifacts"),
+        build_cmd=_py_cmd("print('build ok')"),
+        test_cmd=_py_cmd("print('correctness ok')"),
+        bench_cmd=_py_cmd("print('latency_ms=1.0')"),
+        reference_latency_ms=2.0,
+        timeout_seconds=30,
+    )
+    client = NativeSessionClient()
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+    first_request = AscendCAgenticCodegenRequest(
+        definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+        target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action", run_id="native-continue",
+    )
+
+    first = runner.run_multi_turn(task=task, request=first_request, base_solution=None, max_fix_rounds=0)
+    try:
+        second_request = AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="continue action", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=2, mode="debug", run_id="native-continue",
+        )
+        second = runner.continue_fix(
+            task=task,
+            editor_session=first.editor_session,
+            wt_session=first.worktree_session,
+            fix_prompt="raw compile fix context",
+            request=second_request,
+        )
+    finally:
+        if first.editor_session is not None:
+            client.close_session(first.editor_session)
+        if first.worktree_session is not None:
+            first.worktree_session.cleanup()
+
+    assert len(client.prompts) == 6
+    assert [prompt.splitlines()[0] for prompt in client.prompts[:4]] == [
+        "Stage 1/4: code-reader",
+        "Stage 2/4: plan",
+        "Stage 3/4: codegen",
+        "Stage 4/4: reviewer",
+    ]
+    assert [prompt.splitlines()[0] for prompt in client.prompts[4:]] == [
+        "Stage 1/2: bug-fixer",
+        "Stage 2/2: reviewer",
+    ]
+    assert "raw compile fix context" in client.prompts[4]
+    assert "Use the bug-fixer subagent" in client.prompts[4]
+    assert second.artifact_paths is not None
+    assert "/runs/native-continue/" in second.artifact_paths["manifest_path"]

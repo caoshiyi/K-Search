@@ -69,7 +69,7 @@ def test_claude_project_editor_client_uses_sdk_client_with_cwd_and_file_tools(mo
     call = sdk.client_calls[0]
     assert call.prompt == "Please edit the project."
     assert call.options.kwargs["cwd"] == str(tmp_path)
-    assert call.options.kwargs["allowed_tools"] == ["Read", "Grep", "Glob", "Edit", "Write"]
+    assert call.options.kwargs["allowed_tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill", "Agent"]
     assert call.options.kwargs["disallowed_tools"][0] == "Bash"
     assert call.options.kwargs["permission_mode"] == "acceptEdits"
     assert call.options.kwargs["model"] == "claude-sonnet-4-6"
@@ -88,17 +88,23 @@ def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
 
     def first_edit(prompt, options, call_index):
         project_dir = Path(options.kwargs["cwd"])
+        (project_dir / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
+        (project_dir / "IMPLEMENTATION_PLAN.md").write_text("# IMPLEMENTATION_PLAN\nInitial safe edit.\n", encoding="utf-8")
+        (project_dir / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
         (project_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n// initial agent edit\n", encoding="utf-8")
-        return "kept initial project"
+        return "status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md\nnext: python_eval"
 
     def second_edit(prompt, options, call_index):
         project_dir = Path(options.kwargs["cwd"])
+        (project_dir / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
+        (project_dir / "IMPLEMENTATION_PLAN.md").write_text("# IMPLEMENTATION_PLAN\nChange beta to BETA.\n", encoding="utf-8")
+        (project_dir / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
         (project_dir / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
-        return "edited kernel/foo.h"
+        return "status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md\nnext: python_eval"
 
     sdk = install_mock_claude_agent_sdk(
         monkeypatch,
-        responses=[first_edit, second_edit],
+        responses=[first_edit, first_edit, first_edit, first_edit, second_edit, second_edit, second_edit, second_edit],
     )
 
     task = AscendCTask(
@@ -130,11 +136,25 @@ def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
 
     foo = next(src for src in solution.sources if src.path == "kernel/foo.h")
     assert "BETA" in foo.content
-    assert len(sdk.client_calls) == 2
+    assert len(sdk.client_calls) == 8
     assert sdk.calls == []
-    assert "<ascendc_project>" not in sdk.client_calls[0].prompt
-    assert "<ascendc_project>" not in sdk.client_calls[1].prompt
+    assert all("<ascendc_project>" not in call.prompt for call in sdk.client_calls)
+    assert [call.prompt.splitlines()[0] for call in sdk.client_calls[:4]] == [
+        "Stage 1/4: code-reader",
+        "Stage 2/4: plan",
+        "Stage 3/4: codegen",
+        "Stage 4/4: reviewer",
+    ]
+    assert [call.prompt.splitlines()[0] for call in sdk.client_calls[4:]] == [
+        "Stage 1/4: code-reader",
+        "Stage 2/4: plan",
+        "Stage 3/4: codegen",
+        "Stage 4/4: reviewer",
+    ]
     assert sdk.client_calls[0].options.kwargs["cwd"]
+    assert sdk.client_calls[0].options.kwargs["setting_sources"] == ["project"]
+    assert "Skill" in sdk.client_calls[0].options.kwargs["allowed_tools"]
+    assert "Agent" in sdk.client_calls[0].options.kwargs["allowed_tools"]
 
 
 def test_claude_project_editor_writes_tool_timeline_and_cost(monkeypatch, tmp_path):
@@ -190,3 +210,56 @@ def test_claude_project_editor_writes_tool_timeline_and_cost(monkeypatch, tmp_pa
     assert [row["event_type"] for row in rows if row["event_type"] == "tool_use"] == ["tool_use", "tool_use"]
     assert "tool_use: Glob" in Path(result.timeline_path).read_text(encoding="utf-8")
     assert json.loads(Path(result.cost_path).read_text(encoding="utf-8"))["summary"]["session_id"] == "sess-1"
+
+
+def test_claude_project_editor_enables_project_skills_and_agent_tool(monkeypatch, tmp_path):
+    from pathlib import Path
+    from k_search.kernel_generators.claude_agent_project_editor import ClaudeAgentProjectEditorClient
+
+    (tmp_path / "kernel").mkdir()
+    (tmp_path / "kernel" / "foo.h").write_text("alpha\nbeta\n", encoding="utf-8")
+
+    def edit_project(prompt, options, call_index):
+        project_dir = Path(options.kwargs["cwd"])
+        (project_dir / "kernel" / "foo.h").write_text("alpha\nBETA\n", encoding="utf-8")
+        return "edited"
+
+    sdk = install_mock_claude_agent_sdk(monkeypatch, responses=[edit_project])
+    client = ClaudeAgentProjectEditorClient(model_name="claude", timeout_seconds=30)
+
+    client.edit_project(project_dir=tmp_path, prompt="Use native subagents.")
+
+    options = sdk.client_calls[0].options.kwargs
+    assert options["setting_sources"] == ["project"]
+    assert options["skills"] == ["ascendc-codegen", "ascendc-api-reference"]
+    assert "Skill" in options["allowed_tools"]
+    assert "Agent" in options["allowed_tools"]
+    assert "Bash" in options["disallowed_tools"]
+
+
+def test_claude_project_editor_session_uses_same_native_options(monkeypatch, tmp_path):
+    from pathlib import Path
+    from k_search.kernel_generators.claude_agent_project_editor import ClaudeAgentProjectEditorClient
+
+    (tmp_path / "kernel").mkdir()
+    (tmp_path / "kernel" / "foo.h").write_text("alpha\nbeta\n", encoding="utf-8")
+
+    def edit_project(prompt, options, call_index):
+        project_dir = Path(options.kwargs["cwd"])
+        (project_dir / "kernel" / "foo.h").write_text("alpha\nBETA\n", encoding="utf-8")
+        return "edited"
+
+    sdk = install_mock_claude_agent_sdk(monkeypatch, responses=[edit_project])
+    client = ClaudeAgentProjectEditorClient(model_name="claude", timeout_seconds=30)
+
+    session = client.open_session(project_dir=tmp_path)
+    try:
+        client.send_prompt(session, prompt="Use native subagents.")
+    finally:
+        client.close_session(session)
+
+    options = sdk.client_calls[0].options.kwargs
+    assert options["setting_sources"] == ["project"]
+    assert options["skills"] == ["ascendc-codegen", "ascendc-api-reference"]
+    assert "Skill" in options["allowed_tools"]
+    assert "Agent" in options["allowed_tools"]

@@ -50,6 +50,7 @@ def write_agentic_candidate_artifacts(
     action_node_id: str | None,
     model_name: str,
     metadata: dict[str, Any] | None = None,
+    handoff_files: dict[str, str] | None = None,
 ) -> tuple[CandidatePatch, dict[str, str]]:
     root = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=task_name, run_id=run_id)
     candidate_id = f"round_{int(round_num):04d}_attempt_{int(attempt_idx):02d}"
@@ -75,6 +76,15 @@ def write_agentic_candidate_artifacts(
         json.dumps(project_snapshot.to_dict(), indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    handoff_paths: dict[str, str] = {}
+    for name, text in sorted((handoff_files or {}).items()):
+        safe_name = Path(str(name)).name
+        if not safe_name:
+            continue
+        p = out_dir / "handoff" / safe_name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(str(text or ""), encoding="utf-8")
+        handoff_paths[safe_name] = str(p)
 
     candidate = CandidatePatch(
         candidate_id=candidate_id,
@@ -101,5 +111,7 @@ def write_agentic_candidate_artifacts(
         "snapshot_archive_path": project_snapshot.archive_path,
         **(metadata or {}),
     }
+    if handoff_paths:
+        manifest["native_handoff_paths"] = handoff_paths
     paths["manifest_path"].write_text(json.dumps(_jsonable(manifest), indent=2, sort_keys=True), encoding="utf-8")
     return candidate, {key: str(path) for key, path in paths.items()}

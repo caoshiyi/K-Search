@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "name": "ascendc-native-subagent-flows",
+  "description": "K-Search AscendC Claude native subagent flows.",
+  "default_flow": "initial_codegen",
+  "flows": {
+    "initial_codegen": {
+      "name": "ascendc-native-codegen",
+      "description": "Initial candidate codegen flow.",
+      "stages": [
+        {
+          "name": "code-reader",
+          "agent": "code-reader",
+          "instruction": "Read the candidate project and write CODE_MAP.md. Do not edit source files.",
+          "required_files": ["CODE_MAP.md"],
+          "run_when_missing_files": ["CODE_MAP.md"]
+        },
+        {
+          "name": "plan",
+          "agent": "plan",
+          "instruction": "Read CODE_MAP.md and the attempt context, then write IMPLEMENTATION_PLAN.md.",
+          "required_files": ["IMPLEMENTATION_PLAN.md"]
+        },
+        {
+          "name": "codegen",
+          "agent": "codegen",
+          "instruction": "Read CODE_MAP.md and IMPLEMENTATION_PLAN.md, edit the project according to the plan, and update CODE_MAP.md if project contracts changed.",
+          "required_files": ["CODE_MAP.md"]
+        },
+        {
+          "name": "reviewer",
+          "agent": "reviewer",
+          "instruction": "Review the edited project, CODE_MAP.md, and IMPLEMENTATION_PLAN.md, then write REVIEW_NOTES.md.",
+          "required_files": ["REVIEW_NOTES.md"]
+        }
+      ]
+    },
+    "eval_failure_repair": {
+      "name": "ascendc-eval-failure-repair",
+      "description": "Repair flow triggered by Python after benchmark/evaluation failure.",
+      "trigger": {
+        "event": "python_eval_failed",
+        "statuses": ["compile_failed", "failed", "benchmark_failed", "timeout"]
+      },
+      "stages": [
+        {
+          "name": "bug-fixer",
+          "agent": "bug-fixer",
+          "instruction": "Read the Python evaluation failure context from the base prompt, inspect the current project, and make the minimal source edits needed to fix the failure. Update CODE_MAP.md if project contracts changed.",
+          "required_files": ["CODE_MAP.md"]
+        },
+        {
+          "name": "reviewer",
+          "agent": "reviewer",
+          "instruction": "Review the repair, CODE_MAP.md, and the failure context, then write REVIEW_NOTES.md before Python re-evaluates.",
+          "required_files": ["REVIEW_NOTES.md"]
+        }
+      ]
+    }
+  }
+}

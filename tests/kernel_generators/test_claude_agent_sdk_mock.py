@@ -104,7 +104,7 @@ def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
 
     sdk = install_mock_claude_agent_sdk(
         monkeypatch,
-        responses=[first_edit, second_edit],
+        responses=[first_edit, first_edit, first_edit, first_edit, second_edit, second_edit, second_edit, second_edit],
     )
 
     task = AscendCTask(
@@ -136,10 +136,21 @@ def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
 
     foo = next(src for src in solution.sources if src.path == "kernel/foo.h")
     assert "BETA" in foo.content
-    assert len(sdk.client_calls) == 2
+    assert len(sdk.client_calls) == 8
     assert sdk.calls == []
-    assert "<ascendc_project>" not in sdk.client_calls[0].prompt
-    assert "<ascendc_project>" not in sdk.client_calls[1].prompt
+    assert all("<ascendc_project>" not in call.prompt for call in sdk.client_calls)
+    assert [call.prompt.splitlines()[0] for call in sdk.client_calls[:4]] == [
+        "Stage 1/4: code-reader",
+        "Stage 2/4: plan",
+        "Stage 3/4: codegen",
+        "Stage 4/4: reviewer",
+    ]
+    assert [call.prompt.splitlines()[0] for call in sdk.client_calls[4:]] == [
+        "Stage 1/4: code-reader",
+        "Stage 2/4: plan",
+        "Stage 3/4: codegen",
+        "Stage 4/4: reviewer",
+    ]
     assert sdk.client_calls[0].options.kwargs["cwd"]
     assert sdk.client_calls[0].options.kwargs["setting_sources"] == ["project"]
     assert "Skill" in sdk.client_calls[0].options.kwargs["allowed_tools"]

@@ -270,13 +270,14 @@ python generate_kernels_and_eval.py \
   --max-opt-rounds 1
 ```
 
-Claude+AscendC uses agentic worktree codegen by default. K-Search creates an isolated candidate git worktree, gives Claude a compact optimization request, and lets Claude use `Read`, `Grep`, `Glob`, `Edit`, and `Write` inside that worktree. Bash is disabled. K-Search then scans the edited project into a `Solution` and still owns benchmark execution, world-model updates, and artifact persistence.
+Claude+AscendC uses agentic worktree codegen by default. K-Search creates an isolated candidate git worktree, materializes Claude native agents/skills, and drives configured subagent flows stage-by-stage in one Claude SDK session. The default flow config is `k_search/kernel_generators/claude_assets/subagent_flow.json`: `initial_codegen` runs `code-reader`, `plan`, `codegen`, and `reviewer`; `eval_failure_repair` runs `bug-fixer` and `reviewer` after Python evaluation fails. Bash is disabled. K-Search then scans the edited project into a `Solution` and still owns benchmark execution, world-model updates, and artifact persistence.
 
 Useful environment variables:
 
 | Variable | Description | Default |
 | --- | --- | --- |
 | `KSEARCH_AGENTIC_PROMPT_MAX_CHARS` | Hard budget for compact agentic codegen prompts | `20000` |
+| `KSEARCH_SUBAGENT_FLOW_CONFIG` | Optional path to a custom JSON subagent flow config | unset |
 | `KSEARCH_KEEP_AGENTIC_WORKTREES` | Set to `1` to preserve temporary candidate worktrees for inspection | unset |
 | `KSEARCH_DISABLE_ASCENDC_AGENTIC_CODEGEN` | Set to `1` to force the legacy prompt-to-text AscendC path | unset |
 | `KSEARCH_ASCENDC_AGENTIC_FALLBACK` | Set to `legacy` to allow legacy fallback after an agentic codegen failure | unset |

@@ -16,6 +16,12 @@ from k_search.kernel_generators.claude_agent_project_editor import (
     ClaudeProjectEditorSession,
 )
 from k_search.kernel_generators.project_snapshot import ProjectSnapshot, create_project_snapshot
+from k_search.kernel_generators.subagent_orchestration import (
+    SubagentFlowConfig,
+    load_subagent_flows,
+    run_configured_subagent_flow,
+    supports_configured_subagent_flow,
+)
 from k_search.tasks.task_base import EvalResult, Solution
 from k_search.telemetry.context import TelemetryContext
 from k_search.telemetry.recorder import build_file_recorder
@@ -125,7 +131,16 @@ def _edit_project_with_optional_telemetry(
     project_dir: Path,
     prompt: str,
     telemetry_recorder: Any,
+    subagent_flow: SubagentFlowConfig | None = None,
 ) -> ClaudeProjectEditResult:
+    if subagent_flow is not None and supports_configured_subagent_flow(editor_client):
+        return run_configured_subagent_flow(
+            editor_client=editor_client,
+            project_dir=project_dir,
+            base_prompt=prompt,
+            flow=subagent_flow,
+            telemetry_recorder=telemetry_recorder,
+        )
     try:
         return editor_client.edit_project(
             project_dir=project_dir,
@@ -178,15 +193,24 @@ def _validate_review_notes(review_text: str) -> None:
         )
 
 
-def _require_native_handoff_files(project_dir: Path) -> dict[str, str]:
-    missing = [name for name in sorted(NATIVE_HANDOFF_FILES) if not (project_dir / name).is_file()]
+def _flow_handoff_files(flow: SubagentFlowConfig) -> set[str]:
+    required: set[str] = set()
+    for stage in flow.stages:
+        required.update(path for path in stage.required_files if path in NATIVE_HANDOFF_FILES)
+    return required or set(NATIVE_HANDOFF_FILES)
+
+
+def _require_native_handoff_files(project_dir: Path, required_files: set[str] | None = None) -> dict[str, str]:
+    required = set(required_files or NATIVE_HANDOFF_FILES)
+    missing = [name for name in sorted(required) if not (project_dir / name).is_file()]
     if missing:
         raise RuntimeError(f"Claude native subagent flow did not produce required handoff file(s): {', '.join(missing)}")
     handoffs = {
         name: (project_dir / name).read_text(encoding="utf-8", errors="replace")
-        for name in sorted(NATIVE_HANDOFF_FILES)
+        for name in sorted(required)
     }
-    _validate_review_notes(handoffs.get("REVIEW_NOTES.md", ""))
+    if "REVIEW_NOTES.md" in required:
+        _validate_review_notes(handoffs.get("REVIEW_NOTES.md", ""))
     return handoffs
 
 
@@ -205,6 +229,13 @@ def _native_metadata() -> dict[str, Any]:
         "native_claude_agents": True,
         "native_handoff_files": sorted(NATIVE_HANDOFF_FILES),
     }
+
+
+def _configured_flow_or_default(flow_set: Any, name: str) -> SubagentFlowConfig:
+    try:
+        return flow_set.get(name)
+    except KeyError:
+        return flow_set.get()
 
 
 def _materialize_native_assets_baseline(wt_session: Any) -> None:
@@ -287,11 +318,20 @@ class AscendCAgenticCodegenRunner:
         editor_client: Any | None = None,
         reader_editor_client: Any | None = None,
         prompt_builder: AscendCAgenticPromptBuilder | None = None,
+        subagent_flow: SubagentFlowConfig | None = None,
+        repair_subagent_flow: SubagentFlowConfig | None = None,
     ) -> None:
         self.model_name = str(model_name)
         self.editor_client = editor_client or ClaudeAgentProjectEditorClient(model_name=self.model_name)
         self.reader_editor_client = reader_editor_client
         self.prompt_builder = prompt_builder or AscendCAgenticPromptBuilder()
+        flow_set = load_subagent_flows()
+        self.subagent_flow = subagent_flow or _configured_flow_or_default(flow_set, "initial_codegen")
+        try:
+            default_repair_flow = flow_set.get("eval_failure_repair")
+        except KeyError:
+            default_repair_flow = self.subagent_flow
+        self.repair_subagent_flow = repair_subagent_flow or default_repair_flow
 
     def run(
         self,
@@ -345,10 +385,11 @@ class AscendCAgenticCodegenRunner:
                     project_dir=session.project_dir,
                     prompt=prompt,
                     telemetry_recorder=telemetry_recorder,
+                    subagent_flow=self.subagent_flow,
                 )
             finally:
                 telemetry_recorder.close()
-            handoff_texts = _require_native_handoff_files(session.project_dir)
+            handoff_texts = _require_native_handoff_files(session.project_dir, _flow_handoff_files(self.subagent_flow))
             code_map_text = _code_map_from_handoffs(handoff_texts)
             if store is not None and code_map_text:
                 store.save(CODE_MAP, code_map_text)
@@ -534,14 +575,19 @@ class AscendCAgenticCodegenRunner:
             )
             telemetry_recorder = build_file_recorder(context=telemetry_context, prompt=prompt)
             try:
-                edit_result = self.editor_client.send_prompt(
-                    editor_session, prompt=prompt,
+                edit_result = run_configured_subagent_flow(
+                    editor_client=self.editor_client,
+                    project_dir=wt_session.project_dir,
+                    base_prompt=prompt,
+                    flow=self.subagent_flow,
                     telemetry_recorder=telemetry_recorder,
+                    session=editor_session,
+                    close_session_on_exit=False,
                 )
             finally:
                 telemetry_recorder.close()
 
-            handoff_texts = _require_native_handoff_files(wt_session.project_dir)
+            handoff_texts = _require_native_handoff_files(wt_session.project_dir, _flow_handoff_files(self.subagent_flow))
             code_map_text = _code_map_from_handoffs(handoff_texts)
             if store is not None and code_map_text:
                 store.save(CODE_MAP, code_map_text)
@@ -611,13 +657,21 @@ class AscendCAgenticCodegenRunner:
                 )
                 fix_telemetry_recorder = build_file_recorder(context=fix_telemetry_context, prompt=fix_prompt)
                 try:
-                    edit_result = self.editor_client.send_prompt(
-                        editor_session, prompt=fix_prompt,
+                    edit_result = run_configured_subagent_flow(
+                        editor_client=self.editor_client,
+                        project_dir=wt_session.project_dir,
+                        base_prompt=fix_prompt,
+                        flow=self.repair_subagent_flow,
                         telemetry_recorder=fix_telemetry_recorder,
+                        session=editor_session,
+                        close_session_on_exit=False,
                     )
                 finally:
                     fix_telemetry_recorder.close()
-                fix_handoff_texts = _require_native_handoff_files(wt_session.project_dir)
+                fix_handoff_texts = _require_native_handoff_files(
+                    wt_session.project_dir,
+                    _flow_handoff_files(self.repair_subagent_flow),
+                )
                 produced_code_map = _code_map_from_handoffs(fix_handoff_texts)
                 if store is not None and produced_code_map:
                     code_map_text = produced_code_map
@@ -793,14 +847,22 @@ class AscendCAgenticCodegenRunner:
         )
         telemetry_recorder = build_file_recorder(context=telemetry_context, prompt=prompt)
         try:
-            edit_result = self.editor_client.send_prompt(
-                editor_session, prompt=prompt,
+            edit_result = run_configured_subagent_flow(
+                editor_client=self.editor_client,
+                project_dir=wt_session.project_dir,
+                base_prompt=prompt,
+                flow=self.repair_subagent_flow,
                 telemetry_recorder=telemetry_recorder,
+                session=editor_session,
+                close_session_on_exit=False,
             )
         finally:
             telemetry_recorder.close()
 
-        handoff_texts = _require_native_handoff_files(wt_session.project_dir)
+        handoff_texts = _require_native_handoff_files(
+            wt_session.project_dir,
+            _flow_handoff_files(self.repair_subagent_flow),
+        )
         code_map_text = _code_map_from_handoffs(handoff_texts)
         if store is not None and code_map_text:
             store.save(CODE_MAP, code_map_text)

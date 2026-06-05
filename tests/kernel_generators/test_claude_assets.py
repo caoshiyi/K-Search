@@ -67,8 +67,9 @@ def test_asset_files_contain_required_handoff_contracts(tmp_path):
     assert "IMPLEMENTATION_PLAN.md" in planner
     assert "IMPLEMENTATION_PLAN.md" in codegen
     assert "REVIEW_NOTES.md" in reviewer
-    assert "reserved" in bug_fixer.lower()
-    assert "not active" in bug_fixer.lower()
+    assert "python evaluation" in bug_fixer.lower()
+    assert "tools: Read, Grep, Glob, Edit, Write" in bug_fixer
+    assert "next: reviewer" in bug_fixer
     for text in (code_reader, planner, codegen, reviewer, bug_fixer):
         assert "status" in text
         assert "files_written" in text

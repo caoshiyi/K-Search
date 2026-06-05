@@ -739,6 +739,87 @@ def test_runner_materializes_native_assets_and_uses_single_project_edit(tmp_path
     assert "BETA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
 
 
+def test_runner_uses_configured_subagent_stages_in_one_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+
+    class StagedSessionClient:
+        def __init__(self):
+            self.open_count = 0
+            self.closed = False
+            self.prompts: list[str] = []
+            self.project_dir: Path | None = None
+
+        def open_session(self, *, project_dir, telemetry_recorder=None):
+            from types import SimpleNamespace
+
+            self.open_count += 1
+            self.project_dir = Path(project_dir)
+            return SimpleNamespace(_closed=False, project_dir=self.project_dir)
+
+        def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+            self.prompts.append(prompt)
+            root = Path(session.project_dir)
+            if "Stage 1/4: code-reader" in prompt:
+                assert "Use the code-reader subagent" in prompt
+                (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
+                text = "reader done"
+            elif "Stage 2/4: plan" in prompt:
+                assert (root / "CODE_MAP.md").exists()
+                assert "Use the plan subagent" in prompt
+                (root / "IMPLEMENTATION_PLAN.md").write_text("# plan\nchange beta\n", encoding="utf-8")
+                text = "plan done"
+            elif "Stage 3/4: codegen" in prompt:
+                assert (root / "IMPLEMENTATION_PLAN.md").exists()
+                assert "Use the codegen subagent" in prompt
+                (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+                (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h updated\n", encoding="utf-8")
+                text = "codegen done"
+            elif "Stage 4/4: reviewer" in prompt:
+                assert "Use the reviewer subagent" in prompt
+                (root / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
+                text = "review done"
+            else:
+                raise AssertionError(f"unexpected stage prompt: {prompt}")
+            return ClaudeProjectEditResult(
+                text=text,
+                transcript=text,
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+        def close_session(self, session):
+            self.closed = True
+            session._closed = True
+
+    client = StagedSessionClient()
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+
+    assert client.open_count == 1
+    assert client.closed is True
+    assert [prompt.splitlines()[0] for prompt in client.prompts] == [
+        "Stage 1/4: code-reader",
+        "Stage 2/4: plan",
+        "Stage 3/4: codegen",
+        "Stage 4/4: reviewer",
+    ]
+    assert result.changed_paths == ["kernel/foo.h"]
+    assert "BETA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
+
+
 def test_runner_does_not_import_old_python_project_agents(tmp_path, monkeypatch):
     from types import ModuleType
 
@@ -926,9 +1007,18 @@ def test_continue_fix_uses_native_prompt_and_run_scoped_artifacts(tmp_path, monk
         if first.worktree_session is not None:
             first.worktree_session.cleanup()
 
-    assert len(client.prompts) == 2
-    assert "code-reader -> plan -> codegen -> reviewer" in client.prompts[1]
-    assert "raw compile fix context" in client.prompts[1]
-    assert "IMPLEMENTATION_PLAN.md" in client.prompts[1]
+    assert len(client.prompts) == 6
+    assert [prompt.splitlines()[0] for prompt in client.prompts[:4]] == [
+        "Stage 1/4: code-reader",
+        "Stage 2/4: plan",
+        "Stage 3/4: codegen",
+        "Stage 4/4: reviewer",
+    ]
+    assert [prompt.splitlines()[0] for prompt in client.prompts[4:]] == [
+        "Stage 1/2: bug-fixer",
+        "Stage 2/2: reviewer",
+    ]
+    assert "raw compile fix context" in client.prompts[4]
+    assert "Use the bug-fixer subagent" in client.prompts[4]
     assert second.artifact_paths is not None
     assert "/runs/native-continue/" in second.artifact_paths["manifest_path"]

@@ -133,6 +133,7 @@ k_search/kernel_generators/claude_assets/
 
 - 审查 codegen 改动是否越界。
 - 检查 AscendC host/kernel contract、tiling、dtype、shape、entry point、build layout。
+- 将审查结论写入 worktree 根目录的 `REVIEW_NOTES.md`。
 - 如果发现风险,要求主 agent 修正后再结束。
 
 `bug-fixer`
@@ -159,6 +160,28 @@ k_search/kernel_generators/claude_assets/
 
 skills 提供工作流和知识查阅方法,不承担强约束执行。权限仍由
 `ClaudeAgentProjectEditorClient` 的 session options 控制。
+
+### 文件交接协议
+
+跨 subagent 的有效结果必须通过约定文件落盘,不能依赖 subagent final
+message 或主 agent 记住 subagent 内部上下文。
+
+本期约定文件:
+
+| 文件 | 写入者 | 读取者 | 用途 |
+|------|--------|--------|------|
+| `CODE_MAP.md` | `code-reader`, `codegen` | `plan`, `codegen`, `reviewer`, Python | 项目结构、host/kernel contract、关键约束 |
+| `IMPLEMENTATION_PLAN.md` | `plan` | `codegen`, `reviewer`, Python | 本轮策略实施方案和改动边界 |
+| `REVIEW_NOTES.md` | `reviewer` | main agent, Python, 后续 `bug-fixer` | 审查结论、风险、必须修正项 |
+
+Subagent 返回给 main agent 的 final message 必须尽可能短,只包含:
+
+- `status`: ok / needs_fix / failed
+- `files_written`: 本次写入的约定文件或修改的源码路径
+- `next`: 下一步应调用的 subagent 或交给 Python eval
+
+Subagent 不应在 final message 中粘贴完整计划、完整 code map、完整 review
+notes 或大段源码。需要保真的内容必须写入文件。
 
 ## SDK 配置
 
@@ -188,7 +211,7 @@ skills 提供工作流和知识查阅方法,不承担强约束执行。权限仍
    `code-reader -> plan -> codegen -> reviewer`。
 6. `plan` subagent 写 `IMPLEMENTATION_PLAN.md`。
 7. `codegen` subagent 按计划修改文件。
-8. `reviewer` subagent 审查并推动必要修正。
+8. `reviewer` subagent 审查,写 `REVIEW_NOTES.md`,并推动必要修正。
 9. Python 收集 changed files、diff、transcript、telemetry。
 10. Python 运行评测。
 11. Python 读取 `CODE_MAP.md` 并保存回 `MemoryStore`。
@@ -218,6 +241,9 @@ skills 提供工作流和知识查阅方法,不承担强约束执行。权限仍
 - `CODE_MAP.md` 是否已存在。
 - 必须使用 `code-reader -> plan -> codegen -> reviewer`。
 - `IMPLEMENTATION_PLAN.md` 是 plan subagent 的输出。
+- `CODE_MAP.md`、`IMPLEMENTATION_PLAN.md`、`REVIEW_NOTES.md` 是跨 subagent
+  的唯一可信交接面。
+- 每个 subagent 返回 main agent 的 summary 必须短,不得粘贴大段文件内容。
 - `bug-fixer` 本期不得调用。
 - 结束时给出 concise summary 和 changed-file list。
 
@@ -240,6 +266,7 @@ skills 提供工作流和知识查阅方法,不承担强约束执行。权限仍
 - subagent 不可用:当前 attempt 失败,不回退到旧 Python agents。
 - 应生成 `CODE_MAP.md` 但缺失:当前 attempt 失败。
 - `IMPLEMENTATION_PLAN.md` 缺失:当前 attempt 失败。
+- `REVIEW_NOTES.md` 缺失:当前 attempt 失败。
 - reviewer 报告未修正风险:当前 attempt 失败。
 - Claude 未修改任何候选源码:沿用现有 `did not change any files` 失败逻辑。
 - SDK/timeout/auth 错误:沿用现有 provider exception 和 telemetry 逻辑。

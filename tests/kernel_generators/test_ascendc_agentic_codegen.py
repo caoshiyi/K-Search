@@ -77,6 +77,11 @@ def test_prompt_builder_omits_full_project_container_and_includes_action():
     assert "compile ok" in prompt
     assert "<ascendc_project>" not in prompt
     assert "Read/Grep/Glob/Edit/Write" in prompt
+    assert "code-reader -> plan -> codegen -> reviewer" in prompt
+    assert "IMPLEMENTATION_PLAN.md" in prompt
+    assert "REVIEW_NOTES.md" in prompt
+    assert "bug-fixer" in prompt
+    assert "must not be invoked" in prompt
 
 
 def test_prompt_builder_raises_section_aware_error_when_budget_exceeded():
@@ -448,8 +453,29 @@ def test_prompt_builder_uses_code_map_branch_when_present():
     assert "CODE_MAP.md" in with_map
     assert "Read it first" in with_map
     assert "update the affected sections" in with_map
-    assert "CODE_MAP.md" not in without_map
-    assert "First inspect the project with Glob, Grep, and Read" in without_map
+    assert "CODE_MAP.md already exists: yes" in with_map
+    assert "CODE_MAP.md already exists: no" in without_map
+    assert "Use the code-reader subagent to create CODE_MAP.md" in without_map
+
+
+def test_prompt_builder_requires_file_handoff_and_short_subagent_summaries():
+    builder = AscendCAgenticPromptBuilder(max_chars=20_000)
+    request = AscendCAgenticCodegenRequest(
+        definition_text="Task: x",
+        action_text="optimize",
+        trace_logs="",
+        perf_summary="",
+        target_gpu="ascend_910b",
+        round_num=1,
+        attempt_idx=1,
+        mode="action",
+    )
+
+    prompt = builder.build(request, has_code_map=False)
+
+    assert "CODE_MAP.md, IMPLEMENTATION_PLAN.md, and REVIEW_NOTES.md are the only trusted cross-subagent handoff" in prompt
+    assert "status, files_written, and next" in prompt
+    assert "Do not paste CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md, or source files" in prompt
 
 
 def test_runner_generates_and_persists_code_map_on_first_round(tmp_path, monkeypatch):

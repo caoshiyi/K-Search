@@ -17,9 +17,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
-import os
 
-from k_search.kernel_generators.claude_assets import NATIVE_AGENT_TOOL_NAMES, NATIVE_SKILLS
+from k_search.kernel_generators.claude_assets import NATIVE_AGENT_FILES, NATIVE_AGENT_TOOL_NAMES, NATIVE_SKILLS
 from k_search.kernel_generators.llm_clients import (
     ClaudeAgentLLMClient,
     LLMProviderFatalError,
@@ -35,6 +34,7 @@ from k_search.telemetry.recorder import TelemetryRecorder, noop_recorder
 
 DEFAULT_PROJECT_EDITOR_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write"]
 DEFAULT_CLAUDE_NATIVE_TOOLS = ["Skill", *NATIVE_AGENT_TOOL_NAMES]
+DEFAULT_NATIVE_AGENT_NAMES = [Path(name).stem for name in NATIVE_AGENT_FILES]
 
 
 def _dedupe_tools(tools: list[str]) -> list[str]:
@@ -51,6 +51,57 @@ def _dedupe_tools(tools: list[str]) -> list[str]:
 
 def _with_claude_native_tools(tools: list[str]) -> list[str]:
     return _dedupe_tools(list(tools or []) + list(DEFAULT_CLAUDE_NATIVE_TOOLS))
+
+
+def _tool_input_value(input_data: Any, *keys: str) -> str | None:
+    if not isinstance(input_data, dict):
+        return None
+    for key in keys:
+        value = input_data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _permission_allow() -> Any:
+    try:
+        from claude_agent_sdk import PermissionResultAllow  # type: ignore
+
+        return PermissionResultAllow()
+    except Exception:
+        return {"behavior": "allow"}
+
+
+def _permission_deny(message: str) -> Any:
+    try:
+        from claude_agent_sdk import PermissionResultDeny  # type: ignore
+
+        return PermissionResultDeny(message=message)
+    except Exception:
+        return {"behavior": "deny", "message": message}
+
+
+def _make_project_tool_permission_callback(
+    *,
+    allowed_tools: set[str],
+    allowed_agents: set[str],
+    allowed_skills: set[str],
+) -> Any:
+    async def _can_use_tool(tool: str, input_data: dict[str, Any], context: Any) -> Any:
+        tool_name = str(tool or "").strip()
+        if tool_name not in allowed_tools:
+            return _permission_deny(f"K-Search denied unavailable Claude SDK tool: {tool_name or '<empty>'}")
+        if tool_name == "Agent":
+            subagent = _tool_input_value(input_data, "subagent_type", "agent", "name")
+            if subagent is not None and subagent not in allowed_agents:
+                return _permission_deny(f"K-Search denied unavailable native subagent: {subagent}")
+        if tool_name == "Skill":
+            skill = _tool_input_value(input_data, "skill", "skill_name", "name")
+            if skill is not None and skill not in allowed_skills:
+                return _permission_deny(f"K-Search denied unavailable native skill: {skill}")
+        return _permission_allow()
+
+    return _can_use_tool
 
 
 @dataclass
@@ -89,15 +140,25 @@ class ClaudeAgentProjectEditorClient:
     disallowed_tools: list[str] = field(default_factory=lambda: ["Bash", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"])
     setting_sources: list[str] = field(default_factory=lambda: ["project"])
     skills: list[str] | str | None = field(default_factory=lambda: list(NATIVE_SKILLS))
+    native_agents: list[str] = field(default_factory=lambda: list(DEFAULT_NATIVE_AGENT_NAMES))
+    require_agent_tool_use: bool = True
     thinking_enabled: bool = field(default_factory=_default_claude_agent_thinking_enabled)
     timeout_seconds: float = field(default_factory=_default_claude_agent_timeout_seconds)
 
     def _build_options_kwargs(self, project_root: Path) -> dict[str, Any]:
+        tool_names = _with_claude_native_tools(list(self.allowed_tools))
+        skill_names = set(NATIVE_SKILLS if self.skills is None or isinstance(self.skills, str) else self.skills)
         options_kwargs: dict[str, Any] = {
             "cwd": str(project_root),
-            "allowed_tools": _with_claude_native_tools(list(self.allowed_tools)),
+            "tools": list(tool_names),
+            "allowed_tools": list(tool_names),
             "disallowed_tools": list(self.disallowed_tools),
-            "permission_mode": os.getenv("CLAUDE_AGENT_PERMISSION_MODE", "acceptEdits"),
+            "permission_mode": "dontAsk",
+            "can_use_tool": _make_project_tool_permission_callback(
+                allowed_tools=set(tool_names),
+                allowed_agents=set(self.native_agents),
+                allowed_skills=skill_names,
+            ),
             "model": self.model_name,
             "setting_sources": list(self.setting_sources),
         }

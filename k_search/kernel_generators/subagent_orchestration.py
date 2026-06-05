@@ -201,12 +201,19 @@ def run_configured_subagent_flow(
                 active_stage_count=len(active_stages),
                 base_prompt=base_prompt,
             )
+            event_start = len(getattr(telemetry_recorder, "events", []) or [])
             result = editor_client.send_prompt(
                 session,
                 prompt=prompt,
                 telemetry_recorder=telemetry_recorder,
             )
             _require_stage_files(project_root, stage)
+            if bool(getattr(editor_client, "require_agent_tool_use", False)) and bool(getattr(telemetry_recorder, "enabled", False)):
+                _require_agent_tool_invocation(
+                    telemetry_recorder=telemetry_recorder,
+                    event_start=event_start,
+                    stage=stage,
+                )
             stage_results.append(result)
             transcript = _merge_transcript(transcript, result.transcript)
     finally:
@@ -239,6 +246,30 @@ def _require_stage_files(project_root: Path, stage: SubagentStageConfig) -> None
     if missing:
         joined = ", ".join(missing)
         raise RuntimeError(f"subagent stage {stage.name!r} did not produce required file(s): {joined}")
+
+
+def _require_agent_tool_invocation(*, telemetry_recorder: Any | None, event_start: int, stage: SubagentStageConfig) -> None:
+    events = list(getattr(telemetry_recorder, "events", []) or [])[int(event_start) :]
+    agent_calls = [event for event in events if getattr(event, "event_type", None) == "tool_use" and getattr(event, "tool_name", None) == "Agent"]
+    if len(agent_calls) != 1:
+        raise RuntimeError(
+            f"subagent stage {stage.name!r} must invoke exactly one Agent tool call; observed {len(agent_calls)}"
+        )
+    subagent = _subagent_name_from_tool_input(getattr(agent_calls[0], "tool_input", None))
+    if subagent != stage.agent:
+        raise RuntimeError(
+            f"subagent stage {stage.name!r} invoked Agent subagent {subagent or '<missing>'!r}; expected {stage.agent!r}"
+        )
+
+
+def _subagent_name_from_tool_input(tool_input: Any) -> str | None:
+    if not isinstance(tool_input, dict):
+        return None
+    for key in ("subagent_type", "agent", "name"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _merge_transcript(current: str, new: str) -> str:

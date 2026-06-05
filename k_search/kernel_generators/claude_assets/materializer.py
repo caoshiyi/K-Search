@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
+
+from k_search.kernel_generators.runtime_artifacts import NATIVE_HANDOFF_FILES
 
 
 logger = logging.getLogger(__name__)
@@ -61,13 +64,6 @@ NATIVE_REFERENCE_DIRS = [
 
 NATIVE_AGENT_TOOL_NAMES = ["Agent"]
 
-NATIVE_HANDOFF_FILES = {
-    "CODE_MAP.md",
-    "IMPLEMENTATION_PLAN.md",
-    "REVIEW_NOTES.md",
-}
-
-
 @dataclass(frozen=True)
 class ClaudeAssetMaterializationResult:
     claude_dir: Path
@@ -85,9 +81,12 @@ def _asset_text(relative_path: str) -> str:
 
 def _write_managed_text(target: Path, text: str) -> None:
     if target.exists():
-        current = target.read_text(encoding="utf-8", errors="replace")
-        if not current.startswith(CLAUDE_ASSET_MANAGED_MARKER):
-            raise FileExistsError(f"refusing to overwrite unmanaged Claude asset: {target}")
+        if target.is_file() or target.is_symlink():
+            current = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
+            if not current.startswith(CLAUDE_ASSET_MANAGED_MARKER):
+                _remove_existing_path(target)
+        else:
+            _remove_existing_path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     body = text if text.startswith(CLAUDE_ASSET_MANAGED_MARKER) else f"{CLAUDE_ASSET_MANAGED_MARKER}\n{text}"
     target.write_text(body, encoding="utf-8")
@@ -100,14 +99,28 @@ def _remove_existing_path(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-def _copy_dir(source: Path, target: Path, copied: list[Path]) -> None:
+def _allow_missing_dev_knowledge() -> bool:
+    return os.getenv("KSEARCH_ALLOW_MISSING_DEV_KNOWLEDGE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _copy_dir(source: Path, target: Path, copied: list[Path], *, required: bool = False) -> None:
     """Copy ``source`` into ``target`` for isolated candidate-local references.
 
-    Missing source is a soft failure: the agent still works, it just can't read
-    local docs. This keeps ungated (e.g. dev-knowledge not yet installed) setups
-    from breaking codegen.
+    Missing non-critical source is a soft failure. Required source packs fail fast
+    unless the caller explicitly opts into degraded operation.
     """
     if not source.is_dir():
+        if required and not _allow_missing_dev_knowledge():
+            raise RuntimeError(
+                "required Claude asset reference dir missing: "
+                f"{source}. Install ascendc-dev-knowledge/references or set "
+                "KSEARCH_ALLOW_MISSING_DEV_KNOWLEDGE=1 to run without it."
+            )
         logger.warning("claude asset reference dir missing, skipping copy: %s", source)
         return
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -140,7 +153,7 @@ def materialize_claude_project_assets(project_dir: str | Path) -> ClaudeAssetMat
     for skill in NATIVE_SKILL_REFERENCE_DIRS:
         source = asset_root / "skills" / skill / "references"
         target = claude_dir / "skills" / skill / "references"
-        _copy_dir(source, target, copied)
+        _copy_dir(source, target, copied, required=(skill == "ascendc-dev-knowledge"))
 
     # Shared reference packs under .claude/references/.
     for name in NATIVE_REFERENCE_DIRS:

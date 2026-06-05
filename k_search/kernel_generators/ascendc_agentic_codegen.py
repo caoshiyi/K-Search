@@ -9,7 +9,7 @@ from typing import Any, Literal
 from k_search.kernel_generators.agentic_candidate_artifacts import write_agentic_candidate_artifacts
 from k_search.kernel_generators.agentic_worktree import create_agentic_worktree
 from k_search.kernel_generators.candidate_patch import CandidatePatch
-from k_search.kernel_generators.claude_assets import NATIVE_HANDOFF_FILES, materialize_claude_project_assets
+from k_search.kernel_generators.claude_assets import materialize_claude_project_assets
 from k_search.kernel_generators.memory import CODE_MAP, KNOWLEDGE, MemoryStore
 from k_search.kernel_generators.claude_agent_project_editor import (
     ClaudeAgentProjectEditorClient,
@@ -17,6 +17,12 @@ from k_search.kernel_generators.claude_agent_project_editor import (
     ClaudeProjectEditorSession,
 )
 from k_search.kernel_generators.project_snapshot import ProjectSnapshot, create_project_snapshot
+from k_search.kernel_generators.runtime_artifacts import (
+    NATIVE_DEBUG_EVIDENCE_FILES,
+    NATIVE_HANDOFF_FILES,
+    NATIVE_RUNTIME_FILES,
+    is_native_runtime_path,
+)
 from k_search.kernel_generators.subagent_orchestration import (
     SubagentFlowConfig,
     load_subagent_flows,
@@ -32,10 +38,7 @@ from k_search.utils.paths import get_ksearch_artifacts_dir, get_run_id
 
 AgenticMode = Literal["generate", "action", "debug", "improve"]
 
-DEBUG_EVIDENCE_FILES = {
-    "debug_packet.json",
-    "debug_log.md",
-}
+DEBUG_EVIDENCE_FILES = set(NATIVE_DEBUG_EVIDENCE_FILES)
 
 CURATOR_CONTEXT_FILES = set(NATIVE_HANDOFF_FILES) | {KNOWLEDGE.filename} | set(DEBUG_EVIDENCE_FILES)
 
@@ -163,18 +166,7 @@ def _edit_project_with_optional_telemetry(
 
 
 def _is_native_handoff_path(path: str) -> bool:
-    rel = str(path or "").replace("\\", "/").strip()
-    if not rel:
-        return True
-    if rel.startswith(".claude/"):
-        return True
-    # KNOWLEDGE.md is a persisted memory file (like CODE_MAP.md), materialized into
-    # the worktree for plan/codegen to read. It is not a candidate source artifact.
-    if rel == KNOWLEDGE.filename:
-        return True
-    if rel in DEBUG_EVIDENCE_FILES:
-        return True
-    return rel in NATIVE_HANDOFF_FILES
+    return is_native_runtime_path(path)
 
 
 def _candidate_changed_paths(paths: list[str]) -> list[str]:
@@ -239,6 +231,16 @@ def _remove_native_handoff_files(project_dir: Path) -> None:
         (project_dir / name).unlink(missing_ok=True)
 
 
+def _write_runtime_file(project_dir: Path, name: str, text: str | None) -> bool:
+    if name not in NATIVE_RUNTIME_FILES:
+        raise ValueError(f"not a native runtime file: {name}")
+    if not text or not str(text).strip():
+        return False
+    target = project_dir / name
+    target.write_text(str(text), encoding="utf-8")
+    return True
+
+
 def _capture_project_files(project_dir: Path, names: set[str]) -> dict[str, str]:
     captured: dict[str, str] = {}
     for name in sorted(names):
@@ -269,6 +271,7 @@ def _native_metadata() -> dict[str, Any]:
     return {
         "native_claude_agents": True,
         "native_handoff_files": sorted(NATIVE_HANDOFF_FILES),
+        "native_runtime_files": sorted(NATIVE_RUNTIME_FILES),
     }
 
 
@@ -558,8 +561,6 @@ class AscendCAgenticCodegenRunner:
                 telemetry_recorder.close()
             handoff_texts = _require_native_handoff_files(session.project_dir, _flow_handoff_files(self.subagent_flow))
             code_map_text = _code_map_from_handoffs(handoff_texts)
-            if store is not None and code_map_text:
-                store.save(CODE_MAP, code_map_text)
             _remove_native_handoff_files(session.project_dir)
             curator_context = dict(handoff_texts)
             curator_context.update(_capture_and_remove_non_candidate_files(session.project_dir))
@@ -708,10 +709,7 @@ class AscendCAgenticCodegenRunner:
         or precision), follow-up fix prompts are sent within the same session
         up to ``max_fix_rounds`` times.
         """
-        # The native bug-fixer subagent is reserved but not active in this release.
-        # Keep retry ownership in the caller/world-model cycle instead of running
-        # hidden generic fix turns inside this method.
-        max_fix_rounds = 0
+        max_fix_rounds = max(0, int(max_fix_rounds or 0))
         wt_session = create_agentic_worktree(task_path=getattr(task, "task_path", None))
         editor_session: ClaudeProjectEditorSession | None = None
         try:
@@ -772,8 +770,6 @@ class AscendCAgenticCodegenRunner:
 
             handoff_texts = _require_native_handoff_files(wt_session.project_dir, _flow_handoff_files(self.subagent_flow))
             code_map_text = _code_map_from_handoffs(handoff_texts)
-            if store is not None and code_map_text:
-                store.save(CODE_MAP, code_map_text)
             _remove_native_handoff_files(wt_session.project_dir)
             curator_context = dict(handoff_texts)
             curator_context.update(_capture_and_remove_non_candidate_files(wt_session.project_dir))
@@ -823,7 +819,10 @@ class AscendCAgenticCodegenRunner:
                     wt_session.commit_all(f"ksearch eval mutations (fix round {fix_round})")
                     diff_text = wt_session.project_diff_text()
 
-                _materialize_existing_code_map(store, wt_session.project_dir)
+                if not _write_runtime_file(wt_session.project_dir, CODE_MAP.filename, code_map_text):
+                    _materialize_existing_code_map(store, wt_session.project_dir)
+                if not _write_runtime_file(wt_session.project_dir, KNOWLEDGE.filename, curator_context.get(KNOWLEDGE.filename)):
+                    _materialize_existing_knowledge(store, wt_session.project_dir)
                 fix_prompt = _build_fix_prompt(eval_result, fix_round)
                 fix_prompt = sanitize_worktree_paths(fix_prompt)
 
@@ -834,11 +833,11 @@ class AscendCAgenticCodegenRunner:
                     stage="fix",
                     round_index=request.round_num,
                     attempt_index=request.attempt_idx,
-                    fix_round_index=fix_round,
                     model_name=self.model_name,
                     provider="claude-agent",
                     target_gpu=request.target_gpu,
                     language="ascendc",
+                    extra={"fix_round_index": fix_round},
                 )
                 fix_telemetry_recorder = build_file_recorder(context=fix_telemetry_context, prompt=fix_prompt)
                 try:
@@ -858,9 +857,8 @@ class AscendCAgenticCodegenRunner:
                     _flow_handoff_files(self.repair_subagent_flow),
                 )
                 produced_code_map = _code_map_from_handoffs(fix_handoff_texts)
-                if store is not None and produced_code_map:
+                if produced_code_map:
                     code_map_text = produced_code_map
-                    store.save(CODE_MAP, produced_code_map)
                 handoff_texts = fix_handoff_texts
                 _remove_native_handoff_files(wt_session.project_dir)
                 curator_context = dict(fix_handoff_texts)
@@ -873,6 +871,7 @@ class AscendCAgenticCodegenRunner:
                     break  # LLM didn't change anything, stop trying
 
                 # Re-evaluate
+                diff_text = wt_session.project_diff_text()
                 eval_result = run_in_project_dir(project_dir=wt_session.project_dir, round_num=request.round_num)
                 diff_after_eval = wt_session.project_diff_text()
                 evaluator_mutated_project = diff_after_eval != diff_text
@@ -944,6 +943,7 @@ class AscendCAgenticCodegenRunner:
                     **_native_metadata(),
                 },
             )
+            _write_runtime_file(wt_session.project_dir, CODE_MAP.filename, code_map_text)
             return AscendCAgenticCodegenResult(
                 solution=solution,
                 eval_result=eval_result,
@@ -1005,7 +1005,9 @@ class AscendCAgenticCodegenRunner:
             "0", "false", "no", "off",
         }
         store = MemoryStore.for_task(task) if code_map_enabled else None
-        has_code_map = _materialize_existing_code_map(store, wt_session.project_dir)
+        has_code_map = (wt_session.project_dir / CODE_MAP.filename).is_file()
+        if not has_code_map:
+            has_code_map = _materialize_existing_code_map(store, wt_session.project_dir)
         _materialize_existing_knowledge(store, wt_session.project_dir)
         fix_prompt = sanitize_worktree_paths(fix_prompt)
         action_with_fix_context = (
@@ -1066,8 +1068,6 @@ class AscendCAgenticCodegenRunner:
             _flow_handoff_files(self.repair_subagent_flow),
         )
         code_map_text = _code_map_from_handoffs(handoff_texts)
-        if store is not None and code_map_text:
-            store.save(CODE_MAP, code_map_text)
         _remove_native_handoff_files(wt_session.project_dir)
         curator_context = dict(handoff_texts)
         curator_context.update(_capture_and_remove_non_candidate_files(wt_session.project_dir))
@@ -1154,6 +1154,7 @@ class AscendCAgenticCodegenRunner:
                 **_native_metadata(),
             },
         )
+        _write_runtime_file(wt_session.project_dir, CODE_MAP.filename, code_map_text)
         return AscendCAgenticCodegenResult(
             solution=solution,
             eval_result=eval_result,

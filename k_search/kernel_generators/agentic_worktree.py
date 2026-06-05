@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from k_search.kernel_generators.runtime_artifacts import NATIVE_RUNTIME_DIRS
+
 
 class AgenticWorktreeError(RuntimeError):
     """Raised when K-Search cannot prepare or inspect an agentic worktree."""
@@ -46,7 +48,7 @@ def _find_git_root(path: Path) -> Optional[Path]:
 
 
 def _copy_project(src: Path, dst: Path) -> None:
-    ignore = shutil.ignore_patterns(".git", ".ksearch", "__pycache__", "build", "cmake-build-debug", "logs")
+    ignore = shutil.ignore_patterns(".git", *NATIVE_RUNTIME_DIRS, "__pycache__", "build", "cmake-build-debug", "logs")
     shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
 
 

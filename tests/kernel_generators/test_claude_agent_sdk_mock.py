@@ -1,6 +1,8 @@
+import asyncio
 import json
 import shlex
 import sys
+from types import SimpleNamespace
 
 from k_search.kernel_generators.kernel_generator import KernelGenerator
 from k_search.kernel_generators.llm_clients import ClaudeAgentLLMClient
@@ -37,8 +39,10 @@ def test_mock_claude_agent_sdk_records_options_and_streams_messages(monkeypatch)
 
     assert sdk.calls[0].prompt == "optimize this"
     assert sdk.calls[0].options.kwargs["model"] == "claude-sonnet-4-6"
+    assert sdk.calls[0].options.kwargs["tools"] == ["Read"]
     assert sdk.calls[0].options.kwargs["allowed_tools"] == ["Read"]
     assert sdk.calls[0].options.kwargs["disallowed_tools"] == ["Bash"]
+    assert sdk.calls[0].options.kwargs["permission_mode"] == "dontAsk"
 
 
 def test_claude_project_editor_client_uses_sdk_client_with_cwd_and_file_tools(monkeypatch, tmp_path):
@@ -69,10 +73,41 @@ def test_claude_project_editor_client_uses_sdk_client_with_cwd_and_file_tools(mo
     call = sdk.client_calls[0]
     assert call.prompt == "Please edit the project."
     assert call.options.kwargs["cwd"] == str(tmp_path)
+    assert call.options.kwargs["tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill", "Agent"]
     assert call.options.kwargs["allowed_tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill", "Agent"]
     assert call.options.kwargs["disallowed_tools"][0] == "Bash"
-    assert call.options.kwargs["permission_mode"] == "acceptEdits"
+    assert call.options.kwargs["permission_mode"] == "dontAsk"
+    assert callable(call.options.kwargs["can_use_tool"])
     assert call.options.kwargs["model"] == "claude-sonnet-4-6"
+
+
+def test_claude_project_editor_tool_permission_callback_rejects_unknown_tools_and_agents(tmp_path):
+    from k_search.kernel_generators.claude_agent_project_editor import ClaudeAgentProjectEditorClient
+
+    client = ClaudeAgentProjectEditorClient(model_name="claude", timeout_seconds=30)
+    options = client._build_options_kwargs(tmp_path)
+    can_use_tool = options["can_use_tool"]
+
+    allowed_read = asyncio.run(can_use_tool("Read", {"file_path": "kernel/foo.h"}, None))
+    denied_web = asyncio.run(can_use_tool("WebFetch", {"url": "https://example.com"}, None))
+    allowed_agent = asyncio.run(can_use_tool("Agent", {"subagent_type": "code-reader"}, None))
+    denied_agent = asyncio.run(can_use_tool("Agent", {"subagent_type": "general-purpose"}, None))
+
+    assert _permission_behavior(allowed_read) == "allow"
+    assert _permission_behavior(denied_web) == "deny"
+    assert _permission_behavior(allowed_agent) == "allow"
+    assert _permission_behavior(denied_agent) == "deny"
+
+
+def _permission_behavior(result):
+    if isinstance(result, dict):
+        return result.get("behavior") or result.get("decision")
+    name = type(result).__name__.lower()
+    if "deny" in name:
+        return "deny"
+    if "allow" in name:
+        return "allow"
+    return getattr(result, "behavior", None)
 
 
 def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
@@ -89,19 +124,47 @@ def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
 
     def first_edit(prompt, options, call_index):
         project_dir = Path(options.kwargs["cwd"])
+        first_line = prompt.splitlines()[0]
+        agent = first_line.split(":", 1)[1].strip() if ":" in first_line else "codegen"
         (project_dir / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
         (project_dir / "IMPLEMENTATION_PLAN.md").write_text("# IMPLEMENTATION_PLAN\nInitial safe edit.\n", encoding="utf-8")
         (project_dir / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
         (project_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n// initial agent edit\n", encoding="utf-8")
-        return "status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md\nnext: python_eval"
+        return [
+            MockClaudeMessage(
+                content=[
+                    SimpleNamespace(
+                        type="tool_use",
+                        id=f"toolu_{call_index}",
+                        name="Agent",
+                        input={"subagent_type": agent},
+                    )
+                ]
+            ),
+            MockClaudeMessage(result="status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md\nnext: python_eval"),
+        ]
 
     def second_edit(prompt, options, call_index):
         project_dir = Path(options.kwargs["cwd"])
+        first_line = prompt.splitlines()[0]
+        agent = first_line.split(":", 1)[1].strip() if ":" in first_line else "codegen"
         (project_dir / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
         (project_dir / "IMPLEMENTATION_PLAN.md").write_text("# IMPLEMENTATION_PLAN\nChange beta to BETA.\n", encoding="utf-8")
         (project_dir / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
         (project_dir / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
-        return "status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md\nnext: python_eval"
+        return [
+            MockClaudeMessage(
+                content=[
+                    SimpleNamespace(
+                        type="tool_use",
+                        id=f"toolu_{call_index}",
+                        name="Agent",
+                        input={"subagent_type": agent},
+                    )
+                ]
+            ),
+            MockClaudeMessage(result="status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md\nnext: python_eval"),
+        ]
 
     sdk = install_mock_claude_agent_sdk(
         monkeypatch,
@@ -156,6 +219,8 @@ def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
     assert sdk.client_calls[0].options.kwargs["setting_sources"] == ["project"]
     assert "Skill" in sdk.client_calls[0].options.kwargs["allowed_tools"]
     assert "Agent" in sdk.client_calls[0].options.kwargs["allowed_tools"]
+    assert sdk.client_calls[0].options.kwargs["tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill", "Agent"]
+    assert sdk.client_calls[0].options.kwargs["permission_mode"] == "dontAsk"
 
 
 def test_claude_project_editor_writes_tool_timeline_and_cost(monkeypatch, tmp_path):
@@ -236,6 +301,8 @@ def test_claude_project_editor_enables_project_skills_and_agent_tool(monkeypatch
     assert options["skills"] == list(NATIVE_SKILLS)
     assert "Skill" in options["allowed_tools"]
     assert "Agent" in options["allowed_tools"]
+    assert options["tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill", "Agent"]
+    assert options["permission_mode"] == "dontAsk"
     assert "Bash" in options["disallowed_tools"]
 
 
@@ -266,3 +333,83 @@ def test_claude_project_editor_session_uses_same_native_options(monkeypatch, tmp
     assert options["skills"] == list(NATIVE_SKILLS)
     assert "Skill" in options["allowed_tools"]
     assert "Agent" in options["allowed_tools"]
+    assert options["tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill", "Agent"]
+    assert options["permission_mode"] == "dontAsk"
+
+
+def test_claude_project_editor_validates_native_agent_tool_invocation(monkeypatch, tmp_path):
+    from pathlib import Path
+    from k_search.kernel_generators.ascendc_agentic_codegen import AscendCAgenticCodegenRunner
+    from k_search.kernel_generators.claude_agent_project_editor import ClaudeAgentProjectEditorClient
+
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
+    (tmp_path / "spec.md").write_text("Optimize a tiny AscendC project.", encoding="utf-8")
+    (tmp_path / "kernel").mkdir()
+    (tmp_path / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+
+    def stage_edit(prompt, options, call_index):
+        project_dir = Path(options.kwargs["cwd"])
+        first_line = prompt.splitlines()[0]
+        if "code-reader" in first_line:
+            agent = "code-reader"
+            (project_dir / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
+        elif "plan" in first_line:
+            agent = "plan"
+            (project_dir / "IMPLEMENTATION_PLAN.md").write_text("# plan\n", encoding="utf-8")
+        elif "codegen" in first_line:
+            agent = "codegen"
+            (project_dir / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+        elif "reviewer" in first_line:
+            agent = "reviewer"
+            (project_dir / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
+        else:
+            raise AssertionError(first_line)
+        return [
+            MockClaudeMessage(
+                content=[
+                    SimpleNamespace(
+                        type="tool_use",
+                        id=f"toolu_{call_index}",
+                        name="Agent",
+                        input={"subagent_type": agent},
+                    )
+                ]
+            ),
+            MockClaudeMessage(result=f"{agent} done"),
+        ]
+
+    sdk = install_mock_claude_agent_sdk(monkeypatch, responses=[stage_edit, stage_edit, stage_edit, stage_edit])
+    task = AscendCTask(
+        task_path=tmp_path,
+        definition_name="mock_ascendc",
+        build_cmd=_py_cmd("print('build ok')"),
+        test_cmd=_py_cmd("print('correctness ok')"),
+        bench_cmd=_py_cmd("print('latency_ms=1.0')"),
+        reference_latency_ms=2.0,
+        timeout_seconds=30,
+    )
+    runner = AscendCAgenticCodegenRunner(
+        model_name="claude",
+        editor_client=ClaudeAgentProjectEditorClient(model_name="claude", timeout_seconds=30),
+    )
+
+    result = runner.run(task=task, request=runner_request(task), base_solution=None)
+
+    assert result.changed_paths == ["kernel/foo.h"]
+    assert len(sdk.client_calls) == 4
+
+
+def runner_request(task):
+    from k_search.kernel_generators.ascendc_agentic_codegen import AscendCAgenticCodegenRequest
+
+    return AscendCAgenticCodegenRequest(
+        definition_text=task.get_agentic_definition_text(language="ascendc"),
+        action_text="Change beta to BETA.",
+        trace_logs="",
+        perf_summary="",
+        target_gpu="ascend_910b",
+        round_num=1,
+        attempt_idx=1,
+        mode="action",
+    )

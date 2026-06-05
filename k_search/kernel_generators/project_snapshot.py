@@ -8,17 +8,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from k_search.kernel_generators.runtime_artifacts import NATIVE_RUNTIME_DIRS, NATIVE_RUNTIME_FILES
+
 
 SNAPSHOT_SKIP_DIRS = {
     ".git",
-    ".ksearch",
-    ".claude",
-    "CODE_MAP.md",
-    "IMPLEMENTATION_PLAN.md",
-    "REVIEW_NOTES.md",
-    "KNOWLEDGE.md",
-    "debug_packet.json",
-    "debug_log.md",
+    *NATIVE_RUNTIME_DIRS,
+    *NATIVE_RUNTIME_FILES,
     "__pycache__",
     "build",
     "cmake-build-debug",

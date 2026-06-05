@@ -569,7 +569,7 @@ def test_prompt_builder_requires_file_handoff_and_short_subagent_summaries():
     assert "Do not paste CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md, or source files" in prompt
 
 
-def test_runner_generates_and_persists_code_map_on_first_round(tmp_path, monkeypatch):
+def test_runner_returns_code_map_for_adopted_writeback_on_first_round(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
     monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
     monkeypatch.setenv("KSEARCH_RUN_ID", "test-native-map")
@@ -608,12 +608,60 @@ def test_runner_generates_and_persists_code_map_on_first_round(tmp_path, monkeyp
 
     assert len(client.prompts) == 1
     assert "Use the code-reader subagent to create CODE_MAP.md" in client.prompts[0]
-    from k_search.kernel_generators.memory import CODE_MAP, MemoryStore
+    from k_search.kernel_generators.memory import CODE_MAP, MemoryStore, save_code_map_if_adopted
     store = MemoryStore.for_task(task)
-    assert store.load(CODE_MAP) is not None
     assert result.code_map_text is not None
+    assert store.load(CODE_MAP) is None
+    save_code_map_if_adopted(task=task, code_map_text=result.code_map_text, adopted=True)
+    assert store.load(CODE_MAP) is not None
     assert "CODE_MAP.md" not in result.changed_paths
     assert "kernel/foo.h" in result.changed_paths
+
+
+def test_runner_does_not_persist_code_map_from_failed_candidate(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "test-failed-map-not-adopted")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(
+        task_path=task_dir,
+        definition_name="x",
+        artifacts_dir=str(tmp_path / "artifacts"),
+        build_cmd=_py_cmd("import sys; print('compile failed'); sys.exit(1)"),
+        test_cmd=_py_cmd("print('not reached')"),
+        bench_cmd=_py_cmd("print('not reached')"),
+        timeout_seconds=30,
+    )
+
+    class FailedCandidateClient:
+        def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
+            root = Path(project_dir)
+            _write_native_handoffs(root, code_map="# CODE_MAP\nfailed candidate map\n")
+            (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+            return ClaudeProjectEditResult(
+                text="edited",
+                transcript="edited",
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+    result = AscendCAgenticCodegenRunner(model_name="claude", editor_client=FailedCandidateClient()).run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+
+    from k_search.kernel_generators.memory import CODE_MAP, MemoryStore
+
+    assert result.eval_result.status == "compile_failed"
+    assert result.code_map_text == "# CODE_MAP\nfailed candidate map\n"
+    assert MemoryStore.for_task(task).load(CODE_MAP) is None
 
 
 def test_runner_runs_curator_after_eval_and_persists_knowledge(tmp_path, monkeypatch):
@@ -1249,6 +1297,106 @@ def test_continue_fix_uses_native_prompt_and_run_scoped_artifacts(tmp_path, monk
     assert "Use the bug-fixer subagent" in client.prompts[4]
     assert second.artifact_paths is not None
     assert "/runs/native-continue/" in second.artifact_paths["manifest_path"]
+
+
+def test_run_multi_turn_uses_repair_flow_when_eval_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "native-repair-loop")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(
+        task_path=task_dir,
+        definition_name="x",
+        artifacts_dir=str(tmp_path / "artifacts"),
+        build_cmd=_py_cmd(
+            "from pathlib import Path; "
+            "text = Path('kernel/foo.h').read_text(); "
+            "assert 'GAMMA' in text, text; "
+            "print('build ok')"
+        ),
+        test_cmd=_py_cmd("print('correctness ok')"),
+        bench_cmd=_py_cmd("print('latency_ms=1.0')"),
+        reference_latency_ms=2.0,
+        timeout_seconds=30,
+    )
+
+    class RepairLoopClient:
+        def __init__(self):
+            self.prompts: list[str] = []
+
+        def open_session(self, *, project_dir, telemetry_recorder=None):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(_closed=False, project_dir=Path(project_dir))
+
+        def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+            self.prompts.append(prompt)
+            root = Path(session.project_dir)
+            first = prompt.splitlines()[0]
+            if first == "Stage 1/4: code-reader":
+                (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
+                text = "reader done"
+            elif first == "Stage 2/4: plan":
+                (root / "IMPLEMENTATION_PLAN.md").write_text("# plan\nchange beta\n", encoding="utf-8")
+                text = "plan done"
+            elif first == "Stage 3/4: codegen":
+                (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+                (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h updated\n", encoding="utf-8")
+                text = "codegen done"
+            elif first == "Stage 4/4: reviewer":
+                (root / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
+                text = "review done"
+            elif first == "Stage 1/2: bug-fixer":
+                assert (root / "CODE_MAP.md").is_file()
+                (root / "kernel" / "foo.h").write_text("alpha\nBETA\nGAMMA\n", encoding="utf-8")
+                (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h fixed\n", encoding="utf-8")
+                text = "bug fix done"
+            elif first == "Stage 2/2: reviewer":
+                (root / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
+                text = "repair review done"
+            else:
+                raise AssertionError(first)
+            return ClaudeProjectEditResult(
+                text=text,
+                transcript=text,
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+        def close_session(self, session):
+            session._closed = True
+
+    client = RepairLoopClient()
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+    result = runner.run_multi_turn(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action", run_id="native-repair-loop",
+        ),
+        base_solution=None,
+        max_fix_rounds=1,
+    )
+    try:
+        assert result.eval_result.status == "passed"
+        assert [prompt.splitlines()[0] for prompt in client.prompts] == [
+            "Stage 1/4: code-reader",
+            "Stage 2/4: plan",
+            "Stage 3/4: codegen",
+            "Stage 4/4: reviewer",
+            "Stage 1/2: bug-fixer",
+            "Stage 2/2: reviewer",
+        ]
+        assert "GAMMA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
+        assert "+GAMMA" in result.diff_text
+    finally:
+        if result.editor_session is not None:
+            client.close_session(result.editor_session)
+        if result.worktree_session is not None:
+            result.worktree_session.cleanup()
 
 
 def test_continue_fix_filters_debug_evidence_files_from_candidate_outputs(tmp_path, monkeypatch):

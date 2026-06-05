@@ -398,9 +398,10 @@ class ClaudeAgentLLMClient:
         async def _run_query() -> str:
             options_kwargs: dict[str, Any] = {
                 "model": self.model_name,
+                "tools": list(self.allowed_tools),
                 "allowed_tools": list(self.allowed_tools),
                 "disallowed_tools": list(self.disallowed_tools),
-                "permission_mode": os.getenv("CLAUDE_AGENT_PERMISSION_MODE", "acceptEdits"),
+                "permission_mode": "dontAsk",
             }
             if self.max_turns is not None:
                 options_kwargs["max_turns"] = self.max_turns

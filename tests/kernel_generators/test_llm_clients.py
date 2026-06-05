@@ -299,7 +299,9 @@ def test_claude_agent_client_passes_model_and_disables_tools(monkeypatch):
     assert client.generate("hello") == "claude text"
     assert seen["prompt"] == "hello"
     assert seen["options"].kwargs["model"] == "claude-sonnet-4-6"
+    assert seen["options"].kwargs["tools"] == []
     assert seen["options"].kwargs["allowed_tools"] == []
+    assert seen["options"].kwargs["permission_mode"] == "dontAsk"
 
 
 def test_claude_agent_client_extracts_assistant_content_when_result_is_absent(monkeypatch):
@@ -1066,3 +1068,98 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
     assert len(fake_runner.requests) == 1
     assert fake_runner.requests[0].action_text
     assert "<ascendc_project>" not in fake_runner.requests[0].action_text
+
+
+def test_baseline_agentic_memory_writeback_only_for_new_best(tmp_path, monkeypatch):
+    from k_search.kernel_generators.kernel_generator import KernelGenerator
+    from k_search.kernel_generators.ascendc_agentic_codegen import AscendCAgenticCodegenResult
+    from k_search.kernel_generators.memory import CODE_MAP, MemoryStore
+    from k_search.tasks.task_base import BuildSpec, EvalResult, Solution, SourceFile, SupportedLanguages
+
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+
+    class FakeTask:
+        name = "x"
+        definition_name = "x"
+        task_path = task_dir
+        artifacts_dir = str(tmp_path / "artifacts")
+
+        def get_definition_text(self, language):
+            return "spec"
+
+        def get_agentic_definition_text(self, *, language):
+            return "agentic spec"
+
+        def get_baseline_targets_text(self):
+            return ""
+
+        def make_solution_from_project_dir(self, **kwargs):
+            raise AssertionError("fake runner supplies solutions directly")
+
+        def code_for_world_model_from_raw(self, raw, language):
+            return str(raw)
+
+        def get_last_round_trace_logs_for_prompt(self):
+            return ""
+
+    def solution(label):
+        return Solution(
+            name=f"sol-{label}",
+            definition="x",
+            author="fake",
+            spec=BuildSpec(
+                language=SupportedLanguages.ASCENDC,
+                target_hardware=["ascend_910b"],
+                entry_point="kernel/foo.h::run",
+            ),
+            sources=[SourceFile(path="kernel/foo.h", content=f"{label}\n")],
+        )
+
+    class FakeAgenticRunner:
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, *, task, request, base_solution):
+            self.calls += 1
+            score = 2.0 if self.calls == 1 else 1.0
+            label = "best" if self.calls == 1 else "worse"
+            sol = solution(label)
+            raw = {src.path: src.content for src in sol.sources}
+            return AscendCAgenticCodegenResult(
+                solution=sol,
+                eval_result=EvalResult(
+                    status="passed",
+                    latency_ms=1.0 / score,
+                    metrics={"score": score, "score_name": "inv_latency"},
+                ),
+                raw=raw,
+                cleaned=raw,
+                transcript=label,
+                prompt=label,
+                prompt_chars=len(label),
+                changed_paths=["kernel/foo.h"],
+                diff_text=label,
+                project_path=str(task_dir),
+                code_map_text=f"# CODE_MAP\n{label}\n",
+            )
+
+        def run_multi_turn(self, *, task, request, base_solution, max_fix_rounds=0):
+            return self.run(task=task, request=request, base_solution=base_solution)
+
+    task = FakeTask()
+    generator = KernelGenerator(
+        model_name="fake",
+        language="ascendc",
+        target_gpu="ascend_910b",
+        llm_provider="claude-agent",
+        llm_client=SimpleNamespace(generate=lambda prompt: ""),
+    )
+    generator._ascendc_agentic_runner = FakeAgenticRunner()
+
+    result = generator.generate(task=task, max_opt_rounds=2)
+
+    assert next(src.content for src in result.sources if src.path == "kernel/foo.h") == "best\n"
+    assert MemoryStore.for_task(task).load(CODE_MAP) == "# CODE_MAP\nbest\n"

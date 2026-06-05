@@ -44,14 +44,25 @@ def test_materialize_claude_project_assets_copies_reference_dirs_not_symlinks(tm
         assert not reference_dir.is_symlink()
 
 
-def test_materializer_refuses_to_overwrite_unmanaged_files(tmp_path):
+def test_materializer_can_replace_unmanaged_candidate_claude_assets_without_overwriting_source(tmp_path):
     from k_search.kernel_generators.claude_assets import materialize_claude_project_assets
 
     target = tmp_path / ".claude" / "agents" / "code-reader.md"
     target.parent.mkdir(parents=True)
     target.write_text("user-owned agent file\n", encoding="utf-8")
 
-    with pytest.raises(FileExistsError, match="refusing to overwrite unmanaged Claude asset"):
+    result = materialize_claude_project_assets(tmp_path)
+
+    assert result.claude_dir == tmp_path / ".claude"
+    assert target.read_text(encoding="utf-8").startswith("<!-- K-Search managed Claude asset -->")
+
+
+def test_materializer_fails_fast_when_dev_knowledge_references_missing(tmp_path, monkeypatch):
+    from k_search.kernel_generators.claude_assets import materialize_claude_project_assets
+
+    monkeypatch.delenv("KSEARCH_ALLOW_MISSING_DEV_KNOWLEDGE", raising=False)
+
+    with pytest.raises(RuntimeError, match="ascendc-dev-knowledge/references"):
         materialize_claude_project_assets(tmp_path)
 
 

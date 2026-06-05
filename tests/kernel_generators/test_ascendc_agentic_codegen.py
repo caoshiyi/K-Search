@@ -264,7 +264,10 @@ def test_runner_evaluates_worktree_and_persists_project_snapshot_candidate(tmp_p
 
     assert result.eval_result.status == "passed"
     assert result.eval_result.metrics["score"] == 2.0
-    assert result.eval_result.metrics["workdir"] == result.project_path
+    assert result.eval_project_path is not None
+    assert result.eval_result.metrics["workdir"] == result.eval_project_path
+    assert result.eval_result.metrics["workdir"] != result.project_path
+    assert result.evaluator_mutated_project is False
     assert "build saw edited complete worktree" in result.eval_result.log_excerpt
     assert result.candidate_patch is not None
     assert result.candidate_patch.action_node_id == "A-12"

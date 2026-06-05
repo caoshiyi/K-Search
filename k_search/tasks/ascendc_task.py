@@ -55,6 +55,30 @@ ASCENDC_CODE_FORMAT_TEXT = """Return only this multi-file container, with no mar
 Include every file needed by the candidate. Keep paths relative to the project root."""
 
 VALID_CODEGEN_MODES = ("auto", "full", "patch")
+ALLOWED_AGENTIC_SOURCE_SUFFIXES = {
+    ".c",
+    ".cc",
+    ".cpp",
+    ".h",
+    ".hh",
+    ".hpp",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".txt",
+    ".cmake",
+}
+ALLOWED_AGENTIC_SOURCE_NAMES = {"CMakeLists.txt"}
+FORBIDDEN_AGENTIC_PATH_PARTS = {
+    ".git",
+    ".claude",
+    "__pycache__",
+    "build",
+    "cmake-build-debug",
+    "logs",
+    "llm_logs",
+    *NATIVE_RUNTIME_DIRS,
+}
 
 
 def _normalize_rel_path(path: str) -> str:
@@ -72,16 +96,7 @@ def _is_forbidden_agentic_changed_path(path: str) -> bool:
     if not rel:
         return True
     parts = tuple(p for p in rel.split("/") if p)
-    forbidden_parts = {
-        ".git",
-        *NATIVE_RUNTIME_DIRS,
-        "__pycache__",
-        "build",
-        "cmake-build-debug",
-        "logs",
-        "llm_logs",
-    }
-    return rel in NATIVE_RUNTIME_FILES or any(part in forbidden_parts for part in parts)
+    return rel in NATIVE_RUNTIME_FILES or any(part in FORBIDDEN_AGENTIC_PATH_PARTS for part in parts)
 
 
 def parse_ascendc_project_files(raw: Any) -> dict[str, str]:
@@ -122,32 +137,19 @@ def _read_first_existing_text(root: Path, names: list[str]) -> tuple[str, Path |
 
 
 def _is_source_candidate(path: Path) -> bool:
-    if path.name == "CMakeLists.txt":
+    if path.name in ALLOWED_AGENTIC_SOURCE_NAMES:
         return True
-    return path.suffix.lower() in {
-        ".c",
-        ".cc",
-        ".cpp",
-        ".h",
-        ".hh",
-        ".hpp",
-        ".json",
-        ".yaml",
-        ".yml",
-        ".txt",
-        ".cmake",
-    }
+    return path.suffix.lower() in ALLOWED_AGENTIC_SOURCE_SUFFIXES
 
 
 def _collect_project_sources(root: Path, *, max_files: int = 80, max_bytes_per_file: int = 200_000) -> list[SourceFile]:
     if not root.exists() or not root.is_dir():
         return []
     out: list[SourceFile] = []
-    skip_dirs = {".git", *NATIVE_RUNTIME_DIRS, "build", "cmake-build-debug", "__pycache__", "logs", "llm_logs"}
     for p in sorted(root.rglob("*")):
         rel_path = p.relative_to(root)
         rel = str(rel_path).replace("\\", "/")
-        if rel in NATIVE_RUNTIME_FILES or any(part in skip_dirs for part in rel_path.parts):
+        if rel in NATIVE_RUNTIME_FILES or any(part in FORBIDDEN_AGENTIC_PATH_PARTS for part in rel_path.parts):
             continue
         if not p.is_file() or not _is_source_candidate(p):
             continue
@@ -165,12 +167,11 @@ def _collect_project_sources(root: Path, *, max_files: int = 80, max_bytes_per_f
 def _remove_project_source_candidates(root: Path) -> None:
     if not root.exists() or not root.is_dir():
         return
-    skip_dirs = {".git", *NATIVE_RUNTIME_DIRS, "build", "cmake-build-debug", "__pycache__", "logs", "llm_logs"}
     for p in sorted(root.rglob("*"), reverse=True):
         try:
             rel_path = p.relative_to(root)
             rel = str(rel_path).replace("\\", "/")
-            if rel in NATIVE_RUNTIME_FILES or any(part in skip_dirs for part in rel_path.parts):
+            if rel in NATIVE_RUNTIME_FILES or any(part in FORBIDDEN_AGENTIC_PATH_PARTS for part in rel_path.parts):
                 continue
             if p.is_file() and _is_source_candidate(p):
                 p.unlink()
@@ -548,11 +549,36 @@ Generate the corrected and optimized implementation:"""
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(str(src.content or ""), encoding="utf-8")
 
-    def _validate_agentic_changed_paths(self, changed_paths: list[str] | None) -> None:
+    def _validate_agentic_changed_paths(
+        self,
+        *,
+        project_dir: str | Path,
+        changed_paths: list[str] | None,
+    ) -> None:
+        root = Path(project_dir).expanduser().resolve(strict=True)
         for path in changed_paths or []:
             rel = _normalize_rel_path(path)
-            if _is_forbidden_agentic_changed_path(rel):
+            p = (root / rel).resolve(strict=False)
+            if p != root and root not in p.parents:
+                raise ValueError(f"changed path escapes project root: {rel}")
+            parts = p.relative_to(root).parts
+            if rel in NATIVE_RUNTIME_FILES or any(part in FORBIDDEN_AGENTIC_PATH_PARTS for part in parts):
                 raise ValueError(f"forbidden agentic changed path: {rel}")
+            if p.name not in ALLOWED_AGENTIC_SOURCE_NAMES and p.suffix.lower() not in ALLOWED_AGENTIC_SOURCE_SUFFIXES:
+                raise ValueError(f"agentic changed path is not an allowed source/config file: {rel}")
+
+    def _validate_solution_sources_under_root(self, root: Path, sources: list[SourceFile]) -> None:
+        resolved_root = root.expanduser().resolve(strict=True)
+        for src in sources:
+            rel = _normalize_rel_path(src.path)
+            p = (resolved_root / rel).resolve(strict=False)
+            if p != resolved_root and resolved_root not in p.parents:
+                raise ValueError(f"solution source escapes project root: {rel}")
+            parts = p.relative_to(resolved_root).parts
+            if rel in NATIVE_RUNTIME_FILES or any(part in FORBIDDEN_AGENTIC_PATH_PARTS for part in parts):
+                raise ValueError(f"forbidden solution source path: {rel}")
+            if p.name not in ALLOWED_AGENTIC_SOURCE_NAMES and p.suffix.lower() not in ALLOWED_AGENTIC_SOURCE_SUFFIXES:
+                raise ValueError(f"solution source is not an allowed source/config file: {rel}")
 
     def make_solution_from_project_dir(
         self,
@@ -565,11 +591,15 @@ Generate the corrected and optimized implementation:"""
         target_gpu: str,
         language: str,
     ) -> Solution:
-        self._validate_agentic_changed_paths(changed_paths)
         root = Path(project_dir).expanduser().resolve()
+        self._validate_agentic_changed_paths(
+            project_dir=root,
+            changed_paths=changed_paths,
+        )
         sources = _collect_project_sources(root)
         if not sources:
             raise ValueError(f"agentic project produced no source files: {root}")
+        self._validate_solution_sources_under_root(root, sources)
         return Solution(
             name=f"{model_name}_{self.name}_ascendc_agentic_r{int(round_num)}",
             definition=self.name,

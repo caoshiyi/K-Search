@@ -35,6 +35,15 @@ from k_search.telemetry.recorder import TelemetryRecorder, noop_recorder
 DEFAULT_PROJECT_EDITOR_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write"]
 DEFAULT_CLAUDE_NATIVE_TOOLS = ["Skill", *NATIVE_AGENT_TOOL_NAMES]
 DEFAULT_NATIVE_AGENT_NAMES = [Path(name).stem for name in NATIVE_AGENT_FILES]
+PATH_KEYS_BY_TOOL = {
+    "Read": ("file_path",),
+    "Write": ("file_path",),
+    "Edit": ("file_path",),
+    "MultiEdit": ("file_path",),
+    "NotebookEdit": ("notebook_path",),
+    "Glob": ("path",),
+    "Grep": ("path",),
+}
 
 
 def _dedupe_tools(tools: list[str]) -> list[str]:
@@ -63,43 +72,88 @@ def _tool_input_value(input_data: Any, *keys: str) -> str | None:
     return None
 
 
-def _permission_allow() -> Any:
+def _resolve_tool_path_under_root(project_root: Path, raw_path: str) -> Path:
+    root = project_root.expanduser().resolve(strict=True)
+    p = Path(str(raw_path or "")).expanduser()
+    lexical_path = p if p.is_absolute() else root / p
+    if not p.is_absolute():
+        p = root / p
+    resolved = p.resolve(strict=False)
+    if resolved != root and root not in resolved.parents:
+        raise ValueError(f"path escapes project root: {raw_path!r} -> {resolved}")
+
+    cur = lexical_path
+    while cur != root:
+        if cur.exists() and cur.is_symlink():
+            raise ValueError(f"symlink path is not allowed: {cur}")
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+    return resolved
+
+
+def _permission_allow(updated_input: dict[str, Any] | None = None) -> Any:
     try:
         from claude_agent_sdk import PermissionResultAllow  # type: ignore
 
-        return PermissionResultAllow()
+        return PermissionResultAllow(updated_input=updated_input)
     except Exception:
-        return {"behavior": "allow"}
+        out = {"behavior": "allow"}
+        if updated_input is not None:
+            out["updated_input"] = updated_input
+        return out
 
 
-def _permission_deny(message: str) -> Any:
+def _permission_deny(message: str, *, interrupt: bool = True) -> Any:
     try:
         from claude_agent_sdk import PermissionResultDeny  # type: ignore
 
-        return PermissionResultDeny(message=message)
+        return PermissionResultDeny(message=message, interrupt=interrupt)
     except Exception:
-        return {"behavior": "deny", "message": message}
+        return {"behavior": "deny", "message": message, "interrupt": interrupt}
 
 
 def _make_project_tool_permission_callback(
     *,
+    project_root: Path,
     allowed_tools: set[str],
     allowed_agents: set[str],
     allowed_skills: set[str],
 ) -> Any:
+    root = project_root.expanduser().resolve(strict=True)
+
     async def _can_use_tool(tool: str, input_data: dict[str, Any], context: Any) -> Any:
         tool_name = str(tool or "").strip()
         if tool_name not in allowed_tools:
-            return _permission_deny(f"K-Search denied unavailable Claude SDK tool: {tool_name or '<empty>'}")
+            return _permission_deny(
+                f"K-Search denied unavailable Claude SDK tool: {tool_name or '<empty>'}",
+                interrupt=True,
+            )
+        updated_input = dict(input_data or {})
+        for key in PATH_KEYS_BY_TOOL.get(tool_name, ()):
+            raw = updated_input.get(key)
+            if tool_name in {"Grep", "Glob"} and not raw:
+                raw = "."
+                updated_input[key] = "."
+            if isinstance(raw, str) and raw.strip():
+                try:
+                    safe_path = _resolve_tool_path_under_root(root, raw)
+                except Exception as exc:
+                    return _permission_deny(
+                        f"K-Search denied path outside candidate worktree for {tool_name}.{key}: {exc}",
+                        interrupt=True,
+                    )
+                updated_input[key] = str(safe_path.relative_to(root))
         if tool_name == "Agent":
-            subagent = _tool_input_value(input_data, "subagent_type", "agent", "name")
+            subagent = _tool_input_value(updated_input, "subagent_type", "agent", "name")
             if subagent is not None and subagent not in allowed_agents:
-                return _permission_deny(f"K-Search denied unavailable native subagent: {subagent}")
+                return _permission_deny(f"K-Search denied unavailable native subagent: {subagent}", interrupt=True)
         if tool_name == "Skill":
-            skill = _tool_input_value(input_data, "skill", "skill_name", "name")
+            skill = _tool_input_value(updated_input, "skill", "skill_name", "name")
             if skill is not None and skill not in allowed_skills:
-                return _permission_deny(f"K-Search denied unavailable native skill: {skill}")
-        return _permission_allow()
+                return _permission_deny(f"K-Search denied unavailable native skill: {skill}", interrupt=True)
+        return _permission_allow(updated_input=updated_input)
 
     return _can_use_tool
 
@@ -155,6 +209,7 @@ class ClaudeAgentProjectEditorClient:
             "disallowed_tools": list(self.disallowed_tools),
             "permission_mode": "dontAsk",
             "can_use_tool": _make_project_tool_permission_callback(
+                project_root=project_root,
                 allowed_tools=set(tool_names),
                 allowed_agents=set(self.native_agents),
                 allowed_skills=skill_names,

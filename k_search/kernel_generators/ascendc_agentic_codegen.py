@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from k_search.kernel_generators.project_snapshot import ProjectSnapshot, create_
 from k_search.kernel_generators.runtime_artifacts import (
     NATIVE_DEBUG_EVIDENCE_FILES,
     NATIVE_HANDOFF_FILES,
+    NATIVE_RUNTIME_DIRS,
     NATIVE_RUNTIME_FILES,
     is_native_runtime_path,
 )
@@ -71,6 +73,7 @@ class AscendCAgenticCodegenResult:
     changed_paths: list[str]
     diff_text: str
     project_path: str
+    eval_project_path: str | None = None
     diff_after_eval: str | None = None
     evaluator_mutated_project: bool = False
     candidate_patch: CandidatePatch | None = None
@@ -265,6 +268,58 @@ def _capture_and_remove_non_candidate_files(project_dir: Path) -> dict[str, str]
     captured = _capture_project_files(project_dir, names)
     _remove_project_files(project_dir, names)
     return captured
+
+
+def _copy_project_for_eval(candidate_dir: Path) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    tmp = tempfile.TemporaryDirectory(prefix="ksearch_eval_")
+    eval_dir = Path(tmp.name).resolve() / "project"
+    ignore = shutil.ignore_patterns(
+        ".git",
+        ".claude",
+        "__pycache__",
+        "build",
+        "cmake-build-debug",
+        "logs",
+        "llm_logs",
+        *NATIVE_RUNTIME_DIRS,
+        *NATIVE_RUNTIME_FILES,
+    )
+    shutil.copytree(candidate_dir, eval_dir, symlinks=False, ignore=ignore)
+    return tmp, eval_dir
+
+
+def _capture_eval_debug_evidence(eval_dir: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for name in DEBUG_EVIDENCE_FILES:
+        p = eval_dir / name
+        if p.is_file():
+            out[name] = p.read_text(encoding="utf-8", errors="replace")
+    return out
+
+
+def _run_eval_in_isolated_copy(
+    *,
+    task: Any,
+    candidate_project_dir: Path,
+    round_num: int,
+) -> tuple[EvalResult, str | None]:
+    run_in_project_dir = getattr(task, "run_benchmark_in_project_dir", None)
+    if not callable(run_in_project_dir):
+        raise RuntimeError("AscendC agentic task does not support run_benchmark_in_project_dir")
+    tmp, eval_dir = _copy_project_for_eval(candidate_project_dir)
+    keep_eval_dir = os.getenv("KSEARCH_KEEP_EVAL_WORKDIRS", "").strip().lower() in {"1", "true", "yes", "on"}
+    try:
+        eval_result = run_in_project_dir(project_dir=eval_dir, round_num=round_num)
+        setattr(eval_result, "_ksearch_debug_evidence", _capture_eval_debug_evidence(eval_dir))
+        return eval_result, str(eval_dir)
+    finally:
+        if keep_eval_dir:
+            try:
+                tmp._finalizer.detach()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        else:
+            tmp.cleanup()
 
 
 def _native_metadata() -> dict[str, Any]:
@@ -567,36 +622,19 @@ class AscendCAgenticCodegenRunner:
             project_changed_paths = session.project_changed_paths()
             changed_paths = _candidate_changed_paths(project_changed_paths or session.changed_paths())
             if not changed_paths:
-                # The LLM may have written edits to absolute paths outside the
-                # worktree (e.g. the original task directory).  Sync those
-                # changes into the worktree so change-detection can find them.
-                task_path = getattr(task, "task_path", None)
-                if task_path is not None:
-                    import shutil as _shutil
-                    from pathlib import Path as _P
-                    src_root = _P(task_path).expanduser().resolve()
-                    dst_root = session.project_dir
-                    ignore = _shutil.ignore_patterns(".git", "__pycache__", "build", "cmake-build-debug", "logs")
-                    try:
-                        _shutil.copytree(src_root, dst_root, dirs_exist_ok=True, ignore=ignore)
-                    except Exception as exc:  # noqa: BLE001
-                        import logging
-                        logging.getLogger(__name__).warning("mirror sync failed: %s", exc)
-                    session.commit_all("ksearch sync external edits")
-                    project_changed_paths = session.project_changed_paths()
-                    changed_paths = _candidate_changed_paths(project_changed_paths or session.changed_paths())
-            if not changed_paths:
                 raise RuntimeError(
-                    "Claude agentic AscendC codegen did not change any files "
-                    f"(round={request.round_num}, attempt={request.attempt_idx})"
+                    "Claude agentic codegen did not change any files inside the candidate worktree. "
+                    "Rejecting this attempt instead of importing external task_path changes."
                 )
             diff_text = session.project_diff_text()
-            run_in_project_dir = getattr(task, "run_benchmark_in_project_dir", None)
-            if not callable(run_in_project_dir):
-                raise RuntimeError("AscendC agentic task does not support run_benchmark_in_project_dir")
-            eval_result = run_in_project_dir(project_dir=session.project_dir, round_num=request.round_num)
-            diff_after_eval = session.project_diff_text()
-            evaluator_mutated_project = diff_after_eval != diff_text
+            eval_result, eval_project_path = _run_eval_in_isolated_copy(
+                task=task,
+                candidate_project_dir=session.project_dir,
+                round_num=request.round_num,
+            )
+            curator_context.update(getattr(eval_result, "_ksearch_debug_evidence", {}) or {})
+            diff_after_eval = diff_text
+            evaluator_mutated_project = False
             knowledge_text = _run_curator_after_eval(
                 editor_client=self.editor_client,
                 project_dir=session.project_dir,
@@ -659,6 +697,7 @@ class AscendCAgenticCodegenRunner:
                     "target_gpu": request.target_gpu,
                     "mode": request.mode,
                     "project_path": str(session.project_dir),
+                    "eval_project_path": eval_project_path,
                     "evaluator_mutated_project": evaluator_mutated_project,
                     **_native_metadata(),
                 },
@@ -674,6 +713,7 @@ class AscendCAgenticCodegenRunner:
                 changed_paths=changed_paths,
                 diff_text=diff_text,
                 project_path=str(session.project_dir),
+                eval_project_path=eval_project_path,
                 diff_after_eval=diff_after_eval,
                 evaluator_mutated_project=evaluator_mutated_project,
                 candidate_patch=candidate_patch,
@@ -777,47 +817,25 @@ class AscendCAgenticCodegenRunner:
             project_changed_paths = wt_session.project_changed_paths()
             changed_paths = _candidate_changed_paths(project_changed_paths or wt_session.changed_paths())
             if not changed_paths:
-                # The LLM may have written edits to absolute paths outside the
-                # worktree (e.g. the original task directory).  Sync those
-                # changes into the worktree so change-detection can find them.
-                task_path = getattr(task, "task_path", None)
-                if task_path is not None:
-                    import shutil as _shutil
-                    from pathlib import Path as _P
-                    src_root = _P(task_path).expanduser().resolve()
-                    dst_root = wt_session.project_dir
-                    ignore = _shutil.ignore_patterns(".git", "__pycache__", "build", "cmake-build-debug", "logs")
-                    try:
-                        _shutil.copytree(src_root, dst_root, dirs_exist_ok=True, ignore=ignore)
-                    except Exception as exc:  # noqa: BLE001
-                        import logging
-                        logging.getLogger(__name__).warning("mirror sync failed: %s", exc)
-                    wt_session.commit_all("ksearch sync external edits")
-                    project_changed_paths = wt_session.project_changed_paths()
-                    changed_paths = _candidate_changed_paths(project_changed_paths or wt_session.changed_paths())
-            if not changed_paths:
                 raise RuntimeError(
-                    "Claude agentic AscendC codegen did not change any files "
-                    f"(round={request.round_num}, attempt={request.attempt_idx})"
+                    "Claude agentic codegen did not change any files inside the candidate worktree. "
+                    "Rejecting this attempt instead of importing external task_path changes."
                 )
 
             diff_text = wt_session.project_diff_text()
-            run_in_project_dir = getattr(task, "run_benchmark_in_project_dir", None)
-            if not callable(run_in_project_dir):
-                raise RuntimeError("AscendC agentic task does not support run_benchmark_in_project_dir")
-            eval_result = run_in_project_dir(project_dir=wt_session.project_dir, round_num=request.round_num)
-            diff_after_eval = wt_session.project_diff_text()
-            evaluator_mutated_project = diff_after_eval != diff_text
+            eval_result, eval_project_path = _run_eval_in_isolated_copy(
+                task=task,
+                candidate_project_dir=wt_session.project_dir,
+                round_num=request.round_num,
+            )
+            curator_context.update(getattr(eval_result, "_ksearch_debug_evidence", {}) or {})
+            diff_after_eval = diff_text
+            evaluator_mutated_project = False
 
             # Fix loop: send short fix prompts in the same session
             for fix_round in range(1, max_fix_rounds + 1):
                 if eval_result.is_passed():
                     break
-
-                # Commit evaluator mutations before next fix attempt
-                if evaluator_mutated_project:
-                    wt_session.commit_all(f"ksearch eval mutations (fix round {fix_round})")
-                    diff_text = wt_session.project_diff_text()
 
                 if not _write_runtime_file(wt_session.project_dir, CODE_MAP.filename, code_map_text):
                     _materialize_existing_code_map(store, wt_session.project_dir)
@@ -872,9 +890,14 @@ class AscendCAgenticCodegenRunner:
 
                 # Re-evaluate
                 diff_text = wt_session.project_diff_text()
-                eval_result = run_in_project_dir(project_dir=wt_session.project_dir, round_num=request.round_num)
-                diff_after_eval = wt_session.project_diff_text()
-                evaluator_mutated_project = diff_after_eval != diff_text
+                eval_result, eval_project_path = _run_eval_in_isolated_copy(
+                    task=task,
+                    candidate_project_dir=wt_session.project_dir,
+                    round_num=request.round_num,
+                )
+                curator_context.update(getattr(eval_result, "_ksearch_debug_evidence", {}) or {})
+                diff_after_eval = diff_text
+                evaluator_mutated_project = False
 
             # Build final result (same as run())
             knowledge_text = _run_curator_after_eval(
@@ -939,6 +962,7 @@ class AscendCAgenticCodegenRunner:
                     "target_gpu": request.target_gpu,
                     "mode": request.mode,
                     "project_path": str(wt_session.project_dir),
+                    "eval_project_path": eval_project_path,
                     "evaluator_mutated_project": evaluator_mutated_project,
                     **_native_metadata(),
                 },
@@ -955,6 +979,7 @@ class AscendCAgenticCodegenRunner:
                 changed_paths=changed_paths,
                 diff_text=diff_text,
                 project_path=str(wt_session.project_dir),
+                eval_project_path=eval_project_path,
                 diff_after_eval=diff_after_eval,
                 evaluator_mutated_project=evaluator_mutated_project,
                 candidate_patch=candidate_patch,
@@ -1081,12 +1106,14 @@ class AscendCAgenticCodegenRunner:
             )
 
         diff_text = wt_session.project_diff_text()
-        run_in_project_dir = getattr(task, "run_benchmark_in_project_dir", None)
-        if not callable(run_in_project_dir):
-            raise RuntimeError("AscendC agentic task does not support run_benchmark_in_project_dir")
-        eval_result = run_in_project_dir(project_dir=wt_session.project_dir, round_num=request.round_num)
-        diff_after_eval = wt_session.project_diff_text()
-        evaluator_mutated_project = diff_after_eval != diff_text
+        eval_result, eval_project_path = _run_eval_in_isolated_copy(
+            task=task,
+            candidate_project_dir=wt_session.project_dir,
+            round_num=request.round_num,
+        )
+        curator_context.update(getattr(eval_result, "_ksearch_debug_evidence", {}) or {})
+        diff_after_eval = diff_text
+        evaluator_mutated_project = False
 
         knowledge_text = _run_curator_after_eval(
             editor_client=self.editor_client,
@@ -1150,6 +1177,7 @@ class AscendCAgenticCodegenRunner:
                 "target_gpu": request.target_gpu,
                 "mode": request.mode,
                 "project_path": str(wt_session.project_dir),
+                "eval_project_path": eval_project_path,
                 "evaluator_mutated_project": evaluator_mutated_project,
                 **_native_metadata(),
             },
@@ -1166,6 +1194,7 @@ class AscendCAgenticCodegenRunner:
             changed_paths=changed_paths,
             diff_text=diff_text,
             project_path=str(wt_session.project_dir),
+            eval_project_path=eval_project_path,
             diff_after_eval=diff_after_eval,
             evaluator_mutated_project=evaluator_mutated_project,
             candidate_patch=candidate_patch,

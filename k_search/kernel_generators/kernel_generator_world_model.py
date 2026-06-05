@@ -221,9 +221,8 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         else:
             effective_run_id = get_run_id()
 
-        # Store run_id in task for downstream use
-        if hasattr(task, "_ksearch_run_id"):
-            task._ksearch_run_id = effective_run_id
+        # Store run_id in task for downstream artifact and telemetry lineage.
+        setattr(task, "_ksearch_run_id", effective_run_id)
 
         def _stage(msg: str) -> None:
             m = (msg or "").strip()
@@ -257,7 +256,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         # under the unified run logs dir <base>/logs/<task>/<run_id>/.
         try:
             _task_name = str(getattr(task, "name", "") or "")
-            _run_id = get_run_id()
+            _run_id = effective_run_id
             self._narrative = RunNarrativeLogger(
                 get_run_logs_dir(base_dir=self._artifacts_dir, task_name=_task_name, run_id=_run_id),
                 meta={
@@ -469,6 +468,11 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         - cycle end: attach+refine best PASSED in this cycle; else mark action too hard
         """
         effective_run_id = str(run_id or getattr(task, "_ksearch_run_id", None) or get_run_id())
+        agentic_task_name = str(
+            getattr(task, "name", "")
+            or getattr(task, "definition_name", "")
+            or "ascendc"
+        ).strip() or "ascendc"
         get_def = getattr(task, "get_definition_text", None)
         if callable(get_def):
             definition_text = str(get_def(language=str(self.language)) or "").strip()
@@ -813,6 +817,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             round_num=int(round_num),
                             attempt_idx=int(attempt_idx),
                             mode=agentic_mode,  # type: ignore[arg-type]
+                            run_id=effective_run_id,
+                            task_name=agentic_task_name,
+                            parent_candidate_id=cycle_best_candidate_id,
                             action_node_id=str(chosen_leaf) if chosen_leaf else None,
                         )
                         try:

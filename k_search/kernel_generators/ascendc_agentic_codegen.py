@@ -213,6 +213,53 @@ def _strict_handoff_validation() -> bool:
     }
 
 
+def _env_truthy(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _fallback_agentic_task_name(task: Any) -> str:
+    return str(
+        getattr(task, "name", "")
+        or getattr(task, "definition_name", "")
+        or "ascendc"
+    ).strip() or "ascendc"
+
+
+def _resolve_agentic_run_context(
+    *,
+    request: AscendCAgenticCodegenRequest,
+    task: Any,
+) -> tuple[str, str]:
+    request_run_id = str(request.run_id or "").strip()
+    request_task_name = str(request.task_name or "").strip()
+    missing = []
+    if not request_run_id:
+        missing.append("run_id")
+    if not request_task_name:
+        missing.append("task_name")
+    if missing and not _env_truthy("KSEARCH_ALLOW_MISSING_AGENTIC_RUN_CONTEXT"):
+        raise RuntimeError(
+            "AscendC agentic request missing "
+            + ", ".join(missing)
+            + "; pass explicit run_id and task_name, or set "
+            "KSEARCH_ALLOW_MISSING_AGENTIC_RUN_CONTEXT=1 for temporary compatibility"
+        )
+    if missing:
+        logger.warning(
+            "AscendC agentic request missing %s; falling back because "
+            "KSEARCH_ALLOW_MISSING_AGENTIC_RUN_CONTEXT=1",
+            ", ".join(missing),
+        )
+    task_name = request_task_name or _fallback_agentic_task_name(task)
+    run_id = request_run_id or get_run_id()
+    return task_name, run_id
+
+
 def _validate_code_map(text: str) -> None:
     if len(str(text or "").strip()) < 100:
         raise RuntimeError("CODE_MAP.md is too short to be useful")
@@ -584,6 +631,7 @@ class AscendCAgenticCycle:
         self.runner = runner
         self.task = task
         self.request = request
+        self.task_name, self.run_id = _resolve_agentic_run_context(request=request, task=task)
         self.base_solution = base_solution
         self.wt_session: Any | None = None
         self.editor_session: ClaudeProjectEditorSession | Any | None = None
@@ -678,9 +726,9 @@ class AscendCAgenticCycle:
 
     def _telemetry_context(self, *, stage: str, extra: dict[str, Any] | None = None) -> TelemetryContext:
         return TelemetryContext(
-            run_id=self.request.run_id,
-            task_name=getattr(self.task, "definition_name", None),
-            definition=getattr(self.task, "definition_name", None),
+            run_id=self.run_id,
+            task_name=self.task_name,
+            definition=getattr(self.task, "definition_name", None) or self.task_name,
             flow="agentic_codegen_multi_turn",
             stage=stage,
             round_index=self.request.round_num,
@@ -767,6 +815,7 @@ class AscendCAgenticCycle:
             raise RuntimeError("continue_fix() requires run_initial() first")
         if self.editor_session is None or not supports_configured_subagent_flow(self.runner.editor_client):
             raise RuntimeError("continue_fix() requires an open Claude agentic session")
+        self.task_name, self.run_id = _resolve_agentic_run_context(request=self.request, task=self.task)
         assert self.wt_session is not None
         if not _write_runtime_file(self.wt_session.project_dir, CODE_MAP.filename, self.code_map_text):
             _materialize_existing_code_map(self.store, self.wt_session.project_dir)
@@ -880,12 +929,8 @@ class AscendCAgenticCycle:
         cleaned = {src.path: src.content for src in solution.sources or []}
         candidate_id = f"round_{int(self.request.round_num):04d}_attempt_{int(self.request.attempt_idx):02d}"
         snapshot_id = f"{candidate_id}_snapshot"
-        task_name = (
-            self.request.task_name
-            or getattr(self.task, "definition_name", None)
-            or getattr(self.task, "name", "ascendc")
-        )
-        run_id = self.request.run_id or get_run_id()
+        task_name = self.task_name
+        run_id = self.run_id
         artifacts_dir = getattr(self.task, "artifacts_dir", None)
         snapshot_archive_dir = (
             get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=str(task_name), run_id=run_id)
@@ -921,8 +966,15 @@ class AscendCAgenticCycle:
             model_name=self.runner.model_name,
             handoff_files=handoff_texts,
             metadata={
+                "run_id": run_id,
+                "task_name": task_name,
+                "action_node_id": self.request.action_node_id,
+                "parent_candidate_id": self.request.parent_candidate_id,
+                "round_num": self.request.round_num,
+                "attempt_idx": self.request.attempt_idx,
+                "mode": self.request.mode,
+                "artifact_mode": mode,
                 "target_gpu": self.request.target_gpu,
-                "mode": mode,
                 "project_path": str(self.wt_session.project_dir),
                 "eval_project_path": eval_project_path,
                 "evaluator_mutated_project": False,

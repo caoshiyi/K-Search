@@ -192,9 +192,8 @@ def generate_and_evaluate(
     except Exception as e:
         print(f"[WARN] Failed to write run_meta.json: {e}")
 
-    # Store run_id in task for downstream use
-    if hasattr(task, "_ksearch_run_id"):
-        task._ksearch_run_id = effective_run_id
+    # Store run_id in task for downstream artifact and telemetry lineage.
+    setattr(task, "_ksearch_run_id", effective_run_id)
 
     # Optional Weights & Biases support
     try:
@@ -293,6 +292,8 @@ def generate_and_evaluate(
             wm_stagnation_window=int(wm_stagnation_window),
             continue_from_solution=continue_from_solution,
             continue_from_world_model=continue_from_world_model,
+            continue_from_run=continue_from_run,
+            run_id=effective_run_id,
         )
     else:
         solution = generator.generate(

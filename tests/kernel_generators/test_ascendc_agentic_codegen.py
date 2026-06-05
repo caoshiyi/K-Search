@@ -257,6 +257,9 @@ def test_runner_evaluates_worktree_and_persists_project_snapshot_candidate(tmp_p
             round_num=3,
             attempt_idx=1,
             mode="action",
+            run_id="artifact-run",
+            task_name="x",
+            parent_candidate_id="parent-7",
             action_node_id="A-12",
         ),
         base_solution=None,
@@ -271,14 +274,83 @@ def test_runner_evaluates_worktree_and_persists_project_snapshot_candidate(tmp_p
     assert "build saw edited complete worktree" in result.eval_result.log_excerpt
     assert result.candidate_patch is not None
     assert result.candidate_patch.action_node_id == "A-12"
+    assert result.candidate_patch.parent_candidate_id == "parent-7"
     assert result.project_snapshot is not None
     assert "kernel/large_header.hpp" in result.project_snapshot.manifest
     assert result.artifact_paths is not None
     manifest = json.loads(Path(result.artifact_paths["manifest_path"]).read_text(encoding="utf-8"))
     assert manifest["candidate_id"] == result.candidate_patch.candidate_id
     assert manifest["snapshot_id"] == result.project_snapshot.snapshot_id
+    assert manifest["run_id"] == "artifact-run"
+    assert manifest["task_name"] == "x"
+    assert manifest["action_node_id"] == "A-12"
+    assert manifest["parent_candidate_id"] == "parent-7"
+    assert manifest["round_num"] == 3
+    assert manifest["attempt_idx"] == 1
+    assert manifest["mode"] == "action"
     assert Path(result.artifact_paths["diff_path"]).read_text(encoding="utf-8") == result.diff_text
     assert json.loads(Path(result.artifact_paths["eval_path"]).read_text(encoding="utf-8"))["status"] == "passed"
+
+
+def test_runner_requires_explicit_run_id_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("KSEARCH_ALLOW_MISSING_AGENTIC_RUN_CONTEXT", raising=False)
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "kernel").mkdir()
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x")
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=EditingClient("alpha\nBETA\ngamma\n"))
+
+    with pytest.raises(RuntimeError, match="missing run_id"):
+        runner.run(
+            task=task,
+            request=AscendCAgenticCodegenRequest(
+                definition_text="spec",
+                action_text="change beta",
+                trace_logs="",
+                perf_summary="",
+                target_gpu="ascend_910b",
+                round_num=1,
+                attempt_idx=1,
+                mode="action",
+                task_name="x",
+            ),
+            base_solution=None,
+        )
+
+
+def test_runner_allows_missing_run_context_with_escape_hatch(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ALLOW_MISSING_AGENTIC_RUN_CONTEXT", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "fallback-run")
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "kernel").mkdir()
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=EditingClient("alpha\nBETA\ngamma\n"))
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec",
+            action_text="change beta",
+            trace_logs="",
+            perf_summary="",
+            target_gpu="ascend_910b",
+            round_num=1,
+            attempt_idx=1,
+            mode="action",
+            task_name="x",
+        ),
+        base_solution=None,
+    )
+
+    assert result.artifact_paths is not None
+    assert "/runs/fallback-run/" in result.artifact_paths["manifest_path"]
 
 
 def test_runner_fails_when_agent_makes_no_file_changes(tmp_path):

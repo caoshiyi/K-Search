@@ -69,7 +69,7 @@ def test_claude_project_editor_client_uses_sdk_client_with_cwd_and_file_tools(mo
     call = sdk.client_calls[0]
     assert call.prompt == "Please edit the project."
     assert call.options.kwargs["cwd"] == str(tmp_path)
-    assert call.options.kwargs["allowed_tools"] == ["Read", "Grep", "Glob", "Edit", "Write"]
+    assert call.options.kwargs["allowed_tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill", "Agent"]
     assert call.options.kwargs["disallowed_tools"][0] == "Bash"
     assert call.options.kwargs["permission_mode"] == "acceptEdits"
     assert call.options.kwargs["model"] == "claude-sonnet-4-6"
@@ -190,3 +190,56 @@ def test_claude_project_editor_writes_tool_timeline_and_cost(monkeypatch, tmp_pa
     assert [row["event_type"] for row in rows if row["event_type"] == "tool_use"] == ["tool_use", "tool_use"]
     assert "tool_use: Glob" in Path(result.timeline_path).read_text(encoding="utf-8")
     assert json.loads(Path(result.cost_path).read_text(encoding="utf-8"))["summary"]["session_id"] == "sess-1"
+
+
+def test_claude_project_editor_enables_project_skills_and_agent_tool(monkeypatch, tmp_path):
+    from pathlib import Path
+    from k_search.kernel_generators.claude_agent_project_editor import ClaudeAgentProjectEditorClient
+
+    (tmp_path / "kernel").mkdir()
+    (tmp_path / "kernel" / "foo.h").write_text("alpha\nbeta\n", encoding="utf-8")
+
+    def edit_project(prompt, options, call_index):
+        project_dir = Path(options.kwargs["cwd"])
+        (project_dir / "kernel" / "foo.h").write_text("alpha\nBETA\n", encoding="utf-8")
+        return "edited"
+
+    sdk = install_mock_claude_agent_sdk(monkeypatch, responses=[edit_project])
+    client = ClaudeAgentProjectEditorClient(model_name="claude", timeout_seconds=30)
+
+    client.edit_project(project_dir=tmp_path, prompt="Use native subagents.")
+
+    options = sdk.client_calls[0].options.kwargs
+    assert options["setting_sources"] == ["project"]
+    assert options["skills"] == ["ascendc-codegen", "ascendc-api-reference"]
+    assert "Skill" in options["allowed_tools"]
+    assert "Agent" in options["allowed_tools"]
+    assert "Bash" in options["disallowed_tools"]
+
+
+def test_claude_project_editor_session_uses_same_native_options(monkeypatch, tmp_path):
+    from pathlib import Path
+    from k_search.kernel_generators.claude_agent_project_editor import ClaudeAgentProjectEditorClient
+
+    (tmp_path / "kernel").mkdir()
+    (tmp_path / "kernel" / "foo.h").write_text("alpha\nbeta\n", encoding="utf-8")
+
+    def edit_project(prompt, options, call_index):
+        project_dir = Path(options.kwargs["cwd"])
+        (project_dir / "kernel" / "foo.h").write_text("alpha\nBETA\n", encoding="utf-8")
+        return "edited"
+
+    sdk = install_mock_claude_agent_sdk(monkeypatch, responses=[edit_project])
+    client = ClaudeAgentProjectEditorClient(model_name="claude", timeout_seconds=30)
+
+    session = client.open_session(project_dir=tmp_path)
+    try:
+        client.send_prompt(session, prompt="Use native subagents.")
+    finally:
+        client.close_session(session)
+
+    options = sdk.client_calls[0].options.kwargs
+    assert options["setting_sources"] == ["project"]
+    assert options["skills"] == ["ascendc-codegen", "ascendc-api-reference"]
+    assert "Skill" in options["allowed_tools"]
+    assert "Agent" in options["allowed_tools"]

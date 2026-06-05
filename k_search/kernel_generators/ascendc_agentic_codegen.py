@@ -9,7 +9,7 @@ from k_search.kernel_generators.agentic_candidate_artifacts import write_agentic
 from k_search.kernel_generators.agentic_worktree import create_agentic_worktree
 from k_search.kernel_generators.candidate_patch import CandidatePatch
 from k_search.kernel_generators.claude_assets import NATIVE_HANDOFF_FILES, materialize_claude_project_assets
-from k_search.kernel_generators.memory import CODE_MAP, MemoryStore
+from k_search.kernel_generators.memory import CODE_MAP, KNOWLEDGE, MemoryStore
 from k_search.kernel_generators.claude_agent_project_editor import (
     ClaudeAgentProjectEditorClient,
     ClaudeProjectEditResult,
@@ -75,6 +75,7 @@ class AscendCAgenticCodegenResult:
     num_turns: int | None = None
     duration_ms: int | None = None
     code_map_text: str | None = None
+    knowledge_text: str | None = None
     editor_session: ClaudeProjectEditorSession | None = None
     worktree_session: Any = None
 
@@ -158,6 +159,10 @@ def _is_native_handoff_path(path: str) -> bool:
     if not rel:
         return True
     if rel.startswith(".claude/"):
+        return True
+    # KNOWLEDGE.md is a persisted memory file (like CODE_MAP.md), materialized into
+    # the worktree for plan/codegen to read. It is not a candidate source artifact.
+    if rel == KNOWLEDGE.filename:
         return True
     return rel in NATIVE_HANDOFF_FILES
 
@@ -247,6 +252,90 @@ def _materialize_existing_code_map(store: MemoryStore | None, project_dir: Path)
     if store is None:
         return False
     return store.materialize(CODE_MAP, project_dir)
+
+
+def _materialize_existing_knowledge(store: MemoryStore | None, project_dir: Path) -> bool:
+    """Copy accumulated KNOWLEDGE.md into the worktree so plan/codegen can read it."""
+    if store is None:
+        return False
+    return store.materialize(KNOWLEDGE, project_dir)
+
+
+def _curator_enabled() -> bool:
+    return os.getenv("KSEARCH_ENABLE_CURATOR", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _build_curator_prompt(eval_result: Any, has_knowledge: bool) -> str:
+    """Prompt for the post-eval knowledge-curator subagent (single-turn edit_project)."""
+    status = getattr(eval_result, "status", "unknown")
+    log = ""
+    excerpt = getattr(eval_result, "log_excerpt", "")
+    if excerpt:
+        log = sanitize_worktree_paths(_truncate(excerpt, 4000))
+    knowledge_note = (
+        "KNOWLEDGE.md already exists at the project root: update it, do not duplicate.\n"
+        if has_knowledge
+        else "KNOWLEDGE.md does not exist yet: create it only if there is a durable lesson.\n"
+    )
+    return (
+        "Use the knowledge-curator subagent. Do not invoke any other subagent.\n"
+        "The framework has finished evaluating this candidate. Distill durable, reusable, "
+        "root-cause-level AscendC lessons into KNOWLEDGE.md at the project root.\n"
+        f"Evaluation status: {status}\n"
+        f"{knowledge_note}"
+        "Read REVIEW_NOTES.md and debug_packet.json / debug_log.md at the project root if present. "
+        "If there is no lesson worth keeping, write nothing and report files_written: none.\n"
+        "The final message must be short: status, files_written, next.\n\n"
+        "Evaluation log excerpt:\n"
+        f"{log or '(none)'}\n"
+    )
+
+
+def _run_curator_after_eval(
+    *,
+    editor_client: Any,
+    project_dir: Path,
+    eval_result: Any,
+    store: MemoryStore | None,
+    telemetry_recorder: Any | None = None,
+) -> str | None:
+    """Run the knowledge-curator after evaluation; return updated KNOWLEDGE.md text.
+
+    Best-effort: never let curation failure break the codegen result. The gated
+    write-back to MemoryStore happens in the caller (only when adopted).
+    """
+    if not _curator_enabled():
+        return None
+    has_knowledge = (project_dir / KNOWLEDGE.filename).is_file()
+    prompt = _build_curator_prompt(eval_result, has_knowledge)
+    try:
+        editor_client.edit_project(
+            project_dir=project_dir,
+            prompt=prompt,
+            telemetry_recorder=telemetry_recorder,
+        )
+    except TypeError as exc:
+        if "telemetry_recorder" in str(exc):
+            try:
+                editor_client.edit_project(project_dir=project_dir, prompt=prompt)
+            except Exception:
+                pass
+    except Exception:
+        # Curation is non-critical; swallow and fall back to any file already written.
+        pass
+    text = _read_knowledge(project_dir)
+    # KNOWLEDGE.md is persisted to MemoryStore by the caller (gated). Remove the
+    # worktree copy so it never leaks into candidate diff/snapshot/solution sources.
+    (project_dir / KNOWLEDGE.filename).unlink(missing_ok=True)
+    return text
+
+
+def _read_knowledge(project_dir: Path) -> str | None:
+    p = project_dir / KNOWLEDGE.filename
+    if not p.is_file():
+        return None
+    text = p.read_text(encoding="utf-8", errors="replace")
+    return text if text.strip() else None
 
 
 class AscendCAgenticPromptBuilder:
@@ -356,6 +445,7 @@ class AscendCAgenticCodegenRunner:
             }
             store = MemoryStore.for_task(task) if code_map_enabled else None
             has_code_map = _materialize_existing_code_map(store, session.project_dir)
+            _materialize_existing_knowledge(store, session.project_dir)
 
             prompt = self.prompt_builder.build(
                 request,
@@ -427,6 +517,12 @@ class AscendCAgenticCodegenRunner:
             eval_result = run_in_project_dir(project_dir=session.project_dir, round_num=request.round_num)
             diff_after_eval = session.project_diff_text()
             evaluator_mutated_project = diff_after_eval != diff_text
+            knowledge_text = _run_curator_after_eval(
+                editor_client=self.editor_client,
+                project_dir=session.project_dir,
+                eval_result=eval_result,
+                store=store,
+            )
             solution = task.make_solution_from_project_dir(
                 project_dir=session.project_dir,
                 changed_paths=changed_paths,
@@ -506,12 +602,12 @@ class AscendCAgenticCodegenRunner:
                 num_turns=edit_result.num_turns,
                 duration_ms=edit_result.duration_ms,
                 code_map_text=code_map_text,
+                knowledge_text=knowledge_text,
                 editor_session=None,
                 worktree_session=None,
             )
         finally:
             session.cleanup()
-
     def run_multi_turn(
         self,
         *,
@@ -544,6 +640,7 @@ class AscendCAgenticCodegenRunner:
             }
             store = MemoryStore.for_task(task) if code_map_enabled else None
             has_code_map = _materialize_existing_code_map(store, wt_session.project_dir)
+            _materialize_existing_knowledge(store, wt_session.project_dir)
 
             # Open a multi-turn SDK session
             editor_session = self.editor_client.open_session(
@@ -691,6 +788,12 @@ class AscendCAgenticCodegenRunner:
                 evaluator_mutated_project = diff_after_eval != diff_text
 
             # Build final result (same as run())
+            knowledge_text = _run_curator_after_eval(
+                editor_client=self.editor_client,
+                project_dir=wt_session.project_dir,
+                eval_result=eval_result,
+                store=store,
+            )
             solution = task.make_solution_from_project_dir(
                 project_dir=wt_session.project_dir,
                 changed_paths=changed_paths,
@@ -770,6 +873,7 @@ class AscendCAgenticCodegenRunner:
                 num_turns=edit_result.num_turns,
                 duration_ms=edit_result.duration_ms,
                 code_map_text=code_map_text,
+                knowledge_text=knowledge_text,
                 editor_session=editor_session,
                 worktree_session=wt_session,
             )
@@ -805,6 +909,7 @@ class AscendCAgenticCodegenRunner:
         }
         store = MemoryStore.for_task(task) if code_map_enabled else None
         has_code_map = _materialize_existing_code_map(store, wt_session.project_dir)
+        _materialize_existing_knowledge(store, wt_session.project_dir)
         fix_prompt = sanitize_worktree_paths(fix_prompt)
         action_with_fix_context = (
             f"{request.action_text}\n\nFix context from previous evaluation:\n{fix_prompt}"
@@ -884,6 +989,12 @@ class AscendCAgenticCodegenRunner:
         diff_after_eval = wt_session.project_diff_text()
         evaluator_mutated_project = diff_after_eval != diff_text
 
+        knowledge_text = _run_curator_after_eval(
+            editor_client=self.editor_client,
+            project_dir=wt_session.project_dir,
+            eval_result=eval_result,
+            store=store,
+        )
         solution = task.make_solution_from_project_dir(
             project_dir=wt_session.project_dir,
             changed_paths=changed_paths,
@@ -963,6 +1074,7 @@ class AscendCAgenticCodegenRunner:
             num_turns=edit_result.num_turns,
             duration_ms=edit_result.duration_ms,
             code_map_text=code_map_text,
+            knowledge_text=knowledge_text,
             editor_session=editor_session,
             worktree_session=wt_session,
         )

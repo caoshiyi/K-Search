@@ -571,6 +571,7 @@ def test_prompt_builder_requires_file_handoff_and_short_subagent_summaries():
 
 def test_runner_generates_and_persists_code_map_on_first_round(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
     monkeypatch.setenv("KSEARCH_RUN_ID", "test-native-map")
     task_dir = tmp_path / "task"
     (task_dir / "kernel").mkdir(parents=True)
@@ -615,8 +616,80 @@ def test_runner_generates_and_persists_code_map_on_first_round(tmp_path, monkeyp
     assert "kernel/foo.h" in result.changed_paths
 
 
+def test_runner_runs_curator_after_eval_and_persists_knowledge(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "1")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "test-curator")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+
+    class CuratorAwareClient:
+        def __init__(self):
+            self.prompts = []
+
+        def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
+            self.prompts.append(prompt)
+            root = Path(project_dir)
+            if "knowledge-curator" in prompt:
+                # Post-eval curator turn: distill a lesson.
+                (root / "KNOWLEDGE.md").write_text(
+                    "## 1: missing MTE3/MTE2 sync between GM->UB->GM\n", encoding="utf-8"
+                )
+                text = "curation done"
+            else:
+                _write_native_handoffs(root, code_map="# CODE_MAP\nfoo.h is the kernel\n")
+                (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+                text = "native subagents completed"
+            return ClaudeProjectEditResult(
+                text=text, transcript=text, prompt=prompt,
+                prompt_chars=len(prompt), prompt_lines=prompt.count("\n") + 1,
+            )
+
+    client = CuratorAwareClient()
+    runner = AscendCAgenticCodegenRunner(
+        model_name="claude", editor_client=client, reader_editor_client=client
+    )
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+
+    # Two edit_project calls: codegen flow + post-eval curator.
+    assert len(client.prompts) == 2
+    assert "knowledge-curator" in client.prompts[1]
+    # Curator output captured on the result.
+    assert result.knowledge_text is not None
+    assert "MTE3/MTE2" in result.knowledge_text
+    # KNOWLEDGE.md is a memory file, never a candidate source artifact.
+    assert "KNOWLEDGE.md" not in result.changed_paths
+    assert "KNOWLEDGE.md" not in result.diff_text
+    if result.project_snapshot is not None:
+        assert "KNOWLEDGE.md" not in result.project_snapshot.manifest
+
+    # Gated persistence: hook saves only when adopted.
+    from k_search.kernel_generators.memory import KNOWLEDGE, MemoryStore, save_knowledge_if_adopted
+    store = MemoryStore.for_task(task)
+    assert store.load(KNOWLEDGE) is None
+    save_knowledge_if_adopted(task=task, knowledge_text=result.knowledge_text, adopted=True)
+    assert store.load(KNOWLEDGE) is not None
+    # Next round materializes it back into a fresh worktree.
+    from k_search.kernel_generators.ascendc_agentic_codegen import _materialize_existing_knowledge
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    assert _materialize_existing_knowledge(store, wt) is True
+    assert (wt / "KNOWLEDGE.md").read_text(encoding="utf-8").startswith("## 1:")
+
+
+
 def test_runner_reuses_existing_code_map_without_reader(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
     monkeypatch.setenv("KSEARCH_RUN_ID", "test-preseeded-map")
     task_dir = tmp_path / "task"
     (task_dir / "kernel").mkdir(parents=True)
@@ -715,6 +788,7 @@ def test_runner_code_map_not_in_diff(tmp_path, monkeypatch):
 
 def test_runner_materializes_native_assets_and_uses_single_project_edit(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
     task_dir = tmp_path / "task"
     (task_dir / "kernel").mkdir(parents=True)
     (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
@@ -967,6 +1041,7 @@ def test_runner_filters_handoff_and_claude_asset_paths_from_candidate_outputs(tm
 
 def test_continue_fix_uses_native_prompt_and_run_scoped_artifacts(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
     monkeypatch.setenv("KSEARCH_RUN_ID", "native-continue")
     task_dir = tmp_path / "task"
     (task_dir / "kernel").mkdir(parents=True)

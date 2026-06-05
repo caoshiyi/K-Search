@@ -444,11 +444,17 @@ class KernelGenerator:
             f"changed_files={','.join(result.changed_paths)} project_path={result.project_path}",
             flush=True,
         )
-        from k_search.kernel_generators.memory import save_code_map_if_adopted
+        from k_search.kernel_generators.memory import save_code_map_if_adopted, save_knowledge_if_adopted
+        adopted = bool(getattr(result.eval_result, "is_passed", lambda: False)())
         save_code_map_if_adopted(
             task=task,
             code_map_text=getattr(result, "code_map_text", None),
-            adopted=bool(getattr(result.eval_result, "is_passed", lambda: False)()),
+            adopted=adopted,
+        )
+        save_knowledge_if_adopted(
+            task=task,
+            knowledge_text=getattr(result, "knowledge_text", None),
+            adopted=adopted,
         )
         return result
 

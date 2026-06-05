@@ -79,6 +79,7 @@ def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
     from pathlib import Path
 
     kernel_dir = tmp_path / "kernel"
@@ -231,7 +232,8 @@ def test_claude_project_editor_enables_project_skills_and_agent_tool(monkeypatch
 
     options = sdk.client_calls[0].options.kwargs
     assert options["setting_sources"] == ["project"]
-    assert options["skills"] == ["ascendc-codegen", "ascendc-api-reference"]
+    from k_search.kernel_generators.claude_assets import NATIVE_SKILLS
+    assert options["skills"] == list(NATIVE_SKILLS)
     assert "Skill" in options["allowed_tools"]
     assert "Agent" in options["allowed_tools"]
     assert "Bash" in options["disallowed_tools"]
@@ -260,6 +262,7 @@ def test_claude_project_editor_session_uses_same_native_options(monkeypatch, tmp
 
     options = sdk.client_calls[0].options.kwargs
     assert options["setting_sources"] == ["project"]
-    assert options["skills"] == ["ascendc-codegen", "ascendc-api-reference"]
+    from k_search.kernel_generators.claude_assets import NATIVE_SKILLS
+    assert options["skills"] == list(NATIVE_SKILLS)
     assert "Skill" in options["allowed_tools"]
     assert "Agent" in options["allowed_tools"]

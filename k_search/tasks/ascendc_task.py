@@ -30,6 +30,7 @@ from k_search.tasks.task_base import (
     load_ksearch_solution_json,
     solution_from_json_dict,
 )
+from k_search.kernel_generators.runtime_artifacts import NATIVE_RUNTIME_DIRS, NATIVE_RUNTIME_FILES
 from k_search.utils.path_sanitize import sanitize_worktree_paths
 
 
@@ -73,14 +74,14 @@ def _is_forbidden_agentic_changed_path(path: str) -> bool:
     parts = tuple(p for p in rel.split("/") if p)
     forbidden_parts = {
         ".git",
-        ".ksearch",
+        *NATIVE_RUNTIME_DIRS,
         "__pycache__",
         "build",
         "cmake-build-debug",
         "logs",
         "llm_logs",
     }
-    return any(part in forbidden_parts for part in parts)
+    return rel in NATIVE_RUNTIME_FILES or any(part in forbidden_parts for part in parts)
 
 
 def parse_ascendc_project_files(raw: Any) -> dict[str, str]:
@@ -142,16 +143,17 @@ def _collect_project_sources(root: Path, *, max_files: int = 80, max_bytes_per_f
     if not root.exists() or not root.is_dir():
         return []
     out: list[SourceFile] = []
-    skip_dirs = {".git", ".ksearch", "build", "cmake-build-debug", "__pycache__", "logs", "llm_logs"}
+    skip_dirs = {".git", *NATIVE_RUNTIME_DIRS, "build", "cmake-build-debug", "__pycache__", "logs", "llm_logs"}
     for p in sorted(root.rglob("*")):
-        if any(part in skip_dirs for part in p.relative_to(root).parts):
+        rel_path = p.relative_to(root)
+        rel = str(rel_path).replace("\\", "/")
+        if rel in NATIVE_RUNTIME_FILES or any(part in skip_dirs for part in rel_path.parts):
             continue
         if not p.is_file() or not _is_source_candidate(p):
             continue
         try:
             if p.stat().st_size > max_bytes_per_file:
                 continue
-            rel = str(p.relative_to(root)).replace("\\", "/")
             out.append(SourceFile(path=rel, content=p.read_text(encoding="utf-8", errors="replace")))
         except Exception:
             continue
@@ -163,10 +165,12 @@ def _collect_project_sources(root: Path, *, max_files: int = 80, max_bytes_per_f
 def _remove_project_source_candidates(root: Path) -> None:
     if not root.exists() or not root.is_dir():
         return
-    skip_dirs = {".git", ".ksearch", "build", "cmake-build-debug", "__pycache__", "logs", "llm_logs"}
+    skip_dirs = {".git", *NATIVE_RUNTIME_DIRS, "build", "cmake-build-debug", "__pycache__", "logs", "llm_logs"}
     for p in sorted(root.rglob("*"), reverse=True):
         try:
-            if any(part in skip_dirs for part in p.relative_to(root).parts):
+            rel_path = p.relative_to(root)
+            rel = str(rel_path).replace("\\", "/")
+            if rel in NATIVE_RUNTIME_FILES or any(part in skip_dirs for part in rel_path.parts):
                 continue
             if p.is_file() and _is_source_candidate(p):
                 p.unlink()

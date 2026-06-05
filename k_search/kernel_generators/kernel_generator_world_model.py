@@ -161,6 +161,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             self._strategy_catalog = load_strategy_catalog(strategy_file)
             if not strategy_form:
                 strategy_form = "natural_language"
+            self._strategy_form = strategy_form
             print(f"[STRATEGY] Loaded {len(self._strategy_catalog)} strategies from {strategy_file}, form={strategy_form}")
 
         def _llm_call(prompt: str) -> str:
@@ -929,10 +930,15 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             best_score = float(round_score)
                             best_eval = round_eval
                             best_solution = solution
-                            from k_search.kernel_generators.memory import save_code_map_if_adopted
+                            from k_search.kernel_generators.memory import save_code_map_if_adopted, save_knowledge_if_adopted
                             save_code_map_if_adopted(
                                 task=task,
                                 code_map_text=getattr(result, "code_map_text", None),
+                                adopted=True,
+                            )
+                            save_knowledge_if_adopted(
+                                task=task,
+                                knowledge_text=getattr(result, "knowledge_text", None),
                                 adopted=True,
                             )
                         if all_passed:

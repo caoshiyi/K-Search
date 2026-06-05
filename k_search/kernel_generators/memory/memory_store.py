@@ -17,6 +17,12 @@ class MemoryKind:
 
 CODE_MAP = MemoryKind(name="code_map", filename="CODE_MAP.md", gated_writeback=True)
 
+# Cross-round distilled AscendC/debug knowledge produced by the knowledge-curator
+# agent after evaluation. Same persistence mechanics as CODE_MAP: written back only
+# when the attempt was adopted (gated), materialized into the next round's worktree
+# so plan/codegen can read accumulated lessons.
+KNOWLEDGE = MemoryKind(name="knowledge", filename="KNOWLEDGE.md", gated_writeback=True)
+
 
 class MemoryStore:
     """Persists per-task memory under <artifacts>/<task>/memory/<kind>/<filename>."""
@@ -71,3 +77,14 @@ def save_code_map_if_adopted(*, task: object, code_map_text: str | None, adopted
     if not adopted or not code_map_text or not str(code_map_text).strip():
         return
     MemoryStore.for_task(task).save(CODE_MAP, code_map_text)
+
+
+def save_knowledge_if_adopted(*, task: object, knowledge_text: str | None, adopted: bool) -> None:
+    """Write curator-distilled knowledge back to artifacts only when the attempt was adopted.
+
+    Mirrors save_code_map_if_adopted so distilled lessons accumulate across rounds
+    without being polluted by transient failures.
+    """
+    if not adopted or not knowledge_text or not str(knowledge_text).strip():
+        return
+    MemoryStore.for_task(task).save(KNOWLEDGE, knowledge_text)

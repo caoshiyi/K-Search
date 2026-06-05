@@ -444,12 +444,6 @@ class KernelGenerator:
             f"changed_files={','.join(result.changed_paths)} project_path={result.project_path}",
             flush=True,
         )
-        from k_search.kernel_generators.memory import save_code_map_if_adopted
-        save_code_map_if_adopted(
-            task=task,
-            code_map_text=getattr(result, "code_map_text", None),
-            adopted=bool(getattr(result.eval_result, "is_passed", lambda: False)()),
-        )
         return result
 
     def generate(  # type: ignore[override]
@@ -506,9 +500,11 @@ class KernelGenerator:
         current_raw_code = None
         pending_agentic_eval: EvalResult | None = None
         pending_agentic_solution: Solution | None = None
+        pending_agentic_result: Any | None = None
 
         # Seed initial code: continue from existing solution if provided; else generate fresh.
         seed_solution: Optional[Solution] = None
+        seed_agentic_result: Any | None = None
         if continue_from_solution:
             base_sol = task.get_solution(continue_from_solution)
             if base_sol is None:
@@ -539,6 +535,7 @@ class KernelGenerator:
                     pending_agentic_eval = agentic_result.eval_result
                     current_code, current_raw_code = code_from_solution(self.language, solution)
                     seed_solution = solution
+                    seed_agentic_result = agentic_result
                 except Exception as exc:
                     if not self._allow_ascendc_agentic_legacy_fallback():
                         raise
@@ -583,11 +580,16 @@ class KernelGenerator:
             print(f"\n=== Optimization Round {round_num}/{max_opt_rounds} ===")
 
             # Use the provided seed solution on the first round if available
+            round_agentic_result: Any | None = None
             if pending_agentic_solution is not None:
                 solution = pending_agentic_solution
+                round_agentic_result = pending_agentic_result
                 pending_agentic_solution = None
+                pending_agentic_result = None
             elif round_num == 1 and seed_solution is not None:
                 solution = seed_solution
+                round_agentic_result = seed_agentic_result
+                seed_agentic_result = None
             else:
                 solution = self._create_solution_from_code(
                     cleaned_code=current_code,
@@ -610,6 +612,18 @@ class KernelGenerator:
                 best_eval = eval_result
                 best_score = float(round_score)
                 best_raw_code = str(current_raw_code or "")
+                if round_agentic_result is not None:
+                    from k_search.kernel_generators.memory import save_code_map_if_adopted, save_knowledge_if_adopted
+                    save_code_map_if_adopted(
+                        task=task,
+                        code_map_text=getattr(round_agentic_result, "code_map_text", None),
+                        adopted=True,
+                    )
+                    save_knowledge_if_adopted(
+                        task=task,
+                        knowledge_text=getattr(round_agentic_result, "knowledge_text", None),
+                        adopted=True,
+                    )
 
             # If all workloads passed in this round, log a W&B artifact containing the generated code for traceability.
             if all_passed and wandb is not None and getattr(wandb, "run", None) is not None:
@@ -794,6 +808,7 @@ class KernelGenerator:
                         solution = agentic_result.solution
                         pending_agentic_eval = agentic_result.eval_result
                         pending_agentic_solution = solution
+                        pending_agentic_result = agentic_result
                         current_code, current_raw_code = code_from_solution(self.language, solution)
                         continue
                     except Exception as exc:

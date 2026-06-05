@@ -9,3 +9,5 @@ openevolve_output/
 *.log
 .DS_Store
 .worktrees/
+# dev-knowledge 参考库 (88M, 不入库; 用 scripts/install_dev_knowledge.sh 安装)
+k_search/kernel_generators/claude_assets/skills/ascendc-dev-knowledge/references/

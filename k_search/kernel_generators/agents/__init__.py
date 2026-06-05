@@ -1,5 +1,8 @@
-from k_search.kernel_generators.agents.code_reader_agent import CodeReaderAgent
-from k_search.kernel_generators.agents.codegen_agent import CodegenAgent
-from k_search.kernel_generators.agents.project_agent import AgentRunResult, ProjectAgent
+"""Deprecated Python agent role package.
 
-__all__ = ["AgentRunResult", "ProjectAgent", "CodeReaderAgent", "CodegenAgent"]
+K-Search AscendC agentic codegen now uses Claude-native project assets under
+``k_search.kernel_generators.claude_assets``. Runtime code must not import
+Python project-agent roles from this package.
+"""
+
+__all__: list[str] = []

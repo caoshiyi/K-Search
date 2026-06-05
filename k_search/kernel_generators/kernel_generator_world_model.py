@@ -446,6 +446,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             wm_stagnation_window=wm_stagnation_window,
             max_dai=max_dai,
             initial_raw_code=(current_raw_code if isinstance(current_raw_code, str) else None),
+            run_id=effective_run_id,
         )
         # (legacy loop removed; v2 runs all optimization rounds)
 
@@ -457,6 +458,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         wm_stagnation_window: int = 5,
         max_dai: int,
         initial_raw_code: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> Any:
         """
         Simpler state machine:
@@ -465,6 +467,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         - attempts 2..N: debug_and_improve using logs from the previous attempt
         - cycle end: attach+refine best PASSED in this cycle; else mark action too hard
         """
+        effective_run_id = str(run_id or getattr(task, "_ksearch_run_id", None) or get_run_id())
         get_def = getattr(task, "get_definition_text", None)
         if callable(get_def):
             definition_text = str(get_def(language=str(self.language)) or "").strip()

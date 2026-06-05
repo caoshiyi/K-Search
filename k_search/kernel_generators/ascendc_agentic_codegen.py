@@ -151,30 +151,37 @@ class AscendCAgenticPromptBuilder:
             "perf_summary": _truncate(request.perf_summary, 2500),
             "trace_logs": _truncate(request.trace_logs, 4000),
         }
-        if has_code_map:
-            inspect_line = (
-                "A CODE_MAP.md at the project root describes file roles, kernel structure, "
-                "tiling, buffers, and contracts. Read it first instead of grepping the whole project. "
-                "After editing code, update the affected sections of CODE_MAP.md to keep it accurate.\n"
-            )
-        else:
-            inspect_line = "First inspect the project with Glob, Grep, and Read. Then edit only necessary files.\n"
+        code_map_status = "yes" if has_code_map else "no"
+        code_map_instruction = (
+            "CODE_MAP.md already exists: yes. Read it first and instruct plan/codegen/reviewer to read it before acting. "
+            "After editing code, update the affected sections of CODE_MAP.md to keep it accurate.\n"
+            if has_code_map
+            else "CODE_MAP.md already exists: no. Use the code-reader subagent to create CODE_MAP.md before planning.\n"
+        )
         prompt = (
-            "You are an AscendC performance optimization agent working inside a candidate project directory.\n"
-            "IMPORTANT: You must ONLY edit files inside the current project directory (CWD). Do NOT use absolute paths from any external directories.\n"
+            "You are the main K-Search AscendC orchestration agent working inside a candidate project directory.\n"
+            "IMPORTANT: You must ONLY edit files inside the current project directory (CWD). Do NOT use absolute paths from external directories.\n"
             f"Target GPU: {request.target_gpu}\n"
             f"Mode: {request.mode}\n"
             f"Round: {int(request.round_num)}\n"
-            f"Attempt: {int(request.attempt_idx)}\n\n"
-            "Available tools: Read/Grep/Glob/Edit/Write. Bash is disabled.\n"
-            + inspect_line
+            f"Attempt: {int(request.attempt_idx)}\n"
+            f"CODE_MAP.md already exists: {code_map_status}\n\n"
+            "Available tools: Read/Grep/Glob/Edit/Write, Skill, and Agent. Bash is disabled.\n"
+            "Use the ascendc-codegen and ascendc-api-reference skills when relevant.\n"
+            "Required native subagent flow: code-reader -> plan -> codegen -> reviewer.\n"
+            "The bug-fixer subagent is reserved for future eval-failure repair and must not be invoked in this release.\n"
+            + code_map_instruction
+            + "The plan subagent must write IMPLEMENTATION_PLAN.md.\n"
+            "The reviewer subagent must write REVIEW_NOTES.md.\n"
+            "CODE_MAP.md, IMPLEMENTATION_PLAN.md, and REVIEW_NOTES.md are the only trusted cross-subagent handoff.\n"
+            "Every subagent final message must be short and contain only status, files_written, and next.\n"
+            "Do not paste CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md, or source files into final messages.\n"
             + "Do not read or modify .git, build directories, caches, generated logs, or large artifacts.\n"
             "Preserve operator semantics, public entry points, host tiling contract, correctness harness behavior, and build layout.\n"
-            "Do not return a full source container. Modify files in the project directory.\n"
-            "End with a concise summary and changed-file list.\n\n"
+            "End with a concise summary and changed-file list after reviewer says eval_ready is true.\n\n"
             "Task specification:\n"
             f"{sections['definition']}\n\n"
-            "Chosen action or debug intent:\n"
+            "Chosen strategy/action/debug intent:\n"
             f"{sections['action']}\n\n"
             "Performance summary:\n"
             f"{sections['perf_summary'] or '(none)'}\n\n"

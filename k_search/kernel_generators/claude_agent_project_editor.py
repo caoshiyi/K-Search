@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 import os
 
+from k_search.kernel_generators.claude_assets import NATIVE_AGENT_TOOL_NAMES, NATIVE_SKILLS
 from k_search.kernel_generators.llm_clients import (
     ClaudeAgentLLMClient,
     LLMProviderFatalError,
@@ -33,6 +34,23 @@ from k_search.telemetry.events import TelemetryEvent
 from k_search.telemetry.recorder import TelemetryRecorder, noop_recorder
 
 DEFAULT_PROJECT_EDITOR_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write"]
+DEFAULT_CLAUDE_NATIVE_TOOLS = ["Skill", *NATIVE_AGENT_TOOL_NAMES]
+
+
+def _dedupe_tools(tools: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for tool in tools:
+        name = str(tool or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
+def _with_claude_native_tools(tools: list[str]) -> list[str]:
+    return _dedupe_tools(list(tools or []) + list(DEFAULT_CLAUDE_NATIVE_TOOLS))
 
 
 @dataclass
@@ -67,10 +85,29 @@ class ClaudeProjectEditResult:
 class ClaudeAgentProjectEditorClient:
     model_name: str
     max_turns: Optional[int] = field(default_factory=_default_claude_agent_max_turns)
-    allowed_tools: list[str] = field(default_factory=lambda: list(DEFAULT_PROJECT_EDITOR_TOOLS))
+    allowed_tools: list[str] = field(default_factory=lambda: _with_claude_native_tools(list(DEFAULT_PROJECT_EDITOR_TOOLS)))
     disallowed_tools: list[str] = field(default_factory=lambda: ["Bash", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"])
+    setting_sources: list[str] = field(default_factory=lambda: ["project"])
+    skills: list[str] | str | None = field(default_factory=lambda: list(NATIVE_SKILLS))
     thinking_enabled: bool = field(default_factory=_default_claude_agent_thinking_enabled)
     timeout_seconds: float = field(default_factory=_default_claude_agent_timeout_seconds)
+
+    def _build_options_kwargs(self, project_root: Path) -> dict[str, Any]:
+        options_kwargs: dict[str, Any] = {
+            "cwd": str(project_root),
+            "allowed_tools": _with_claude_native_tools(list(self.allowed_tools)),
+            "disallowed_tools": list(self.disallowed_tools),
+            "permission_mode": os.getenv("CLAUDE_AGENT_PERMISSION_MODE", "acceptEdits"),
+            "model": self.model_name,
+            "setting_sources": list(self.setting_sources),
+        }
+        if self.skills is not None:
+            options_kwargs["skills"] = self.skills if isinstance(self.skills, str) else list(self.skills)
+        if self.max_turns is not None:
+            options_kwargs["max_turns"] = self.max_turns
+        if not self.thinking_enabled:
+            options_kwargs["thinking"] = {"type": "disabled"}
+        return options_kwargs
 
     def edit_project(self, *, project_dir: str | Path, prompt: str, telemetry_recorder: TelemetryRecorder | None = None) -> ClaudeProjectEditResult:
         try:
@@ -90,17 +127,7 @@ class ClaudeAgentProjectEditorClient:
         async def _run_edit() -> ClaudeProjectEditResult:
             project_root = Path(project_dir).expanduser().resolve()
             prompt_text = str(prompt or "")
-            options_kwargs: dict[str, Any] = {
-                "cwd": str(project_root),
-                "allowed_tools": list(self.allowed_tools),
-                "disallowed_tools": list(self.disallowed_tools),
-                "permission_mode": os.getenv("CLAUDE_AGENT_PERMISSION_MODE", "acceptEdits"),
-                "model": self.model_name,
-            }
-            if self.max_turns is not None:
-                options_kwargs["max_turns"] = self.max_turns
-            if not self.thinking_enabled:
-                options_kwargs["thinking"] = {"type": "disabled"}
+            options_kwargs = self._build_options_kwargs(project_root)
             options = claude_agent_sdk.ClaudeAgentOptions(**options_kwargs)
             chunks: list[str] = []
             final_text = ""
@@ -259,18 +286,8 @@ class ClaudeAgentProjectEditorClient:
     def _build_options(self, project_root: Path) -> Any:
         """Build ClaudeAgentOptions for a given project root."""
         import claude_agent_sdk  # type: ignore
-        options_kwargs: dict[str, Any] = {
-            "cwd": str(project_root),
-            "allowed_tools": list(self.allowed_tools),
-            "disallowed_tools": list(self.disallowed_tools),
-            "permission_mode": os.getenv("CLAUDE_AGENT_PERMISSION_MODE", "acceptEdits"),
-            "model": self.model_name,
-        }
-        if self.max_turns is not None:
-            options_kwargs["max_turns"] = self.max_turns
-        if not self.thinking_enabled:
-            options_kwargs["thinking"] = {"type": "disabled"}
-        return claude_agent_sdk.ClaudeAgentOptions(**options_kwargs)
+
+        return claude_agent_sdk.ClaudeAgentOptions(**self._build_options_kwargs(project_root))
 
     def open_session(
         self,

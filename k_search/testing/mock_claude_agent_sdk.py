@@ -52,6 +52,19 @@ class MockClaudeAgentOptions:
 
 
 @dataclass
+class MockAgentDefinition:
+    description: str
+    prompt: str
+    tools: list[str] | None = None
+    disallowedTools: list[str] | None = None
+    model: str | None = None
+    skills: list[str] | None = None
+    maxTurns: int | None = None
+    background: bool | None = None
+    permissionMode: str | None = None
+
+
+@dataclass
 class MockClaudeCall:
     prompt: str
     options: MockClaudeAgentOptions
@@ -136,6 +149,7 @@ class MockClaudeAgentSDK:
                     yield message
 
         return SimpleNamespace(
+            AgentDefinition=MockAgentDefinition,
             ClaudeAgentOptions=ClaudeAgentOptions,
             ClaudeSDKClient=ClaudeSDKClient,
             query=query,

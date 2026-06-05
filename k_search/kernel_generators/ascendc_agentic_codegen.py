@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import shutil
 import tempfile
 from dataclasses import dataclass, replace
@@ -37,6 +38,8 @@ from k_search.telemetry.recorder import build_file_recorder
 from k_search.utils.path_sanitize import sanitize_worktree_paths
 from k_search.utils.paths import get_ksearch_artifacts_dir, get_run_id
 
+
+logger = logging.getLogger(__name__)
 
 AgenticMode = Literal["generate", "action", "debug", "improve"]
 
@@ -201,6 +204,34 @@ def _validate_review_notes(review_text: str) -> None:
         )
 
 
+def _strict_handoff_validation() -> bool:
+    return os.getenv("KSEARCH_STRICT_HANDOFF_VALIDATION", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _validate_code_map(text: str) -> None:
+    if len(str(text or "").strip()) < 100:
+        raise RuntimeError("CODE_MAP.md is too short to be useful")
+
+
+def _validate_implementation_plan(text: str) -> None:
+    if len(str(text or "").strip()) < 50:
+        raise RuntimeError("IMPLEMENTATION_PLAN.md is too short")
+
+
+def _validate_optional_handoff(text: str, validator: Any) -> None:
+    try:
+        validator(text)
+    except Exception as exc:
+        if _strict_handoff_validation():
+            raise
+        logger.warning(str(exc))
+
+
 def _flow_handoff_files(flow: SubagentFlowConfig) -> set[str]:
     required: set[str] = set()
     for stage in flow.stages:
@@ -217,6 +248,13 @@ def _require_native_handoff_files(project_dir: Path, required_files: set[str] | 
         name: (project_dir / name).read_text(encoding="utf-8", errors="replace")
         for name in sorted(required)
     }
+    if "CODE_MAP.md" in required:
+        _validate_optional_handoff(handoffs.get("CODE_MAP.md", ""), _validate_code_map)
+    if "IMPLEMENTATION_PLAN.md" in required:
+        _validate_optional_handoff(
+            handoffs.get("IMPLEMENTATION_PLAN.md", ""),
+            _validate_implementation_plan,
+        )
     if "REVIEW_NOTES.md" in required:
         _validate_review_notes(handoffs.get("REVIEW_NOTES.md", ""))
     return handoffs

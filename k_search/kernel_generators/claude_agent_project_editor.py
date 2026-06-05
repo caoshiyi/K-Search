@@ -11,6 +11,8 @@ keeping a single ClaudeSDKClient connection alive across multiple prompts.
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +21,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 from k_search.kernel_generators.claude_assets import NATIVE_AGENT_FILES, NATIVE_AGENT_TOOL_NAMES, NATIVE_SKILLS
+from k_search.kernel_generators.claude_assets.agent_definitions import (
+    load_native_agent_definitions,
+    require_programmatic_agents,
+    should_use_programmatic_agents,
+)
 from k_search.kernel_generators.llm_clients import (
     ClaudeAgentLLMClient,
     LLMProviderFatalError,
@@ -32,9 +39,12 @@ from k_search.telemetry.claude_sdk_adapter import event_from_claude_message
 from k_search.telemetry.events import TelemetryEvent
 from k_search.telemetry.recorder import TelemetryRecorder, noop_recorder
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_PROJECT_EDITOR_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write"]
 DEFAULT_CLAUDE_NATIVE_TOOLS = ["Skill", *NATIVE_AGENT_TOOL_NAMES]
 DEFAULT_NATIVE_AGENT_NAMES = [Path(name).stem for name in NATIVE_AGENT_FILES]
+AGENT_TOOL_NAMES = {"Agent", "Task"}
 PATH_KEYS_BY_TOOL = {
     "Read": ("file_path",),
     "Write": ("file_path",),
@@ -62,14 +72,72 @@ def _with_claude_native_tools(tools: list[str]) -> list[str]:
     return _dedupe_tools(list(tools or []) + list(DEFAULT_CLAUDE_NATIVE_TOOLS))
 
 
+def _agent_tool_allowlist_expr(agent_names: list[str]) -> str:
+    names = [str(name).strip() for name in agent_names if str(name).strip()]
+    if not names:
+        return "Agent"
+    return "Agent(" + ", ".join(names) + ")"
+
+
+def _use_agent_tool_allowlist() -> bool:
+    return os.getenv("KSEARCH_USE_AGENT_TOOL_ALLOWLIST", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def _canonical_permission_tool_names(tools: list[str]) -> list[str]:
+    out: list[str] = []
+    for tool in tools:
+        name = str(tool or "").strip()
+        if name.startswith("Agent(") or name.startswith("Task("):
+            out.extend(["Agent", "Task"])
+        else:
+            out.append(name)
+    return _dedupe_tools(out)
+
+
+def _normalize_agent_name(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    if s.startswith("@agent-"):
+        s = s[len("@agent-") :]
+    if s.endswith(" (agent)"):
+        s = s[: -len(" (agent)")]
+    return s.strip() or None
+
+
 def _tool_input_value(input_data: Any, *keys: str) -> str | None:
     if not isinstance(input_data, dict):
         return None
     for key in keys:
-        value = input_data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+        value = _normalize_agent_name(input_data.get(key))
+        if value:
+            return value
+    for nested_key in ("input", "arguments", "params"):
+        nested = input_data.get(nested_key)
+        if isinstance(nested, dict):
+            for key in keys:
+                value = _normalize_agent_name(nested.get(key))
+                if value:
+                    return value
     return None
+
+
+def _agent_name_allowed(observed: str, allowed_agents: set[str]) -> bool:
+    name = str(observed or "").strip()
+    if not name:
+        return False
+    for allowed in allowed_agents:
+        expected = str(allowed or "").strip()
+        if name == expected or name.endswith(":" + expected) or name.endswith("/" + expected):
+            return True
+    return False
 
 
 def _resolve_tool_path_under_root(project_root: Path, raw_path: str) -> Path:
@@ -145,12 +213,20 @@ def _make_project_tool_permission_callback(
                         interrupt=True,
                     )
                 updated_input[key] = str(safe_path.relative_to(root))
-        if tool_name == "Agent":
-            subagent = _tool_input_value(updated_input, "subagent_type", "agent", "name")
-            if subagent is not None and subagent not in allowed_agents:
+        if tool_name in AGENT_TOOL_NAMES:
+            subagent = _tool_input_value(
+                updated_input,
+                "subagent_type",
+                "agent",
+                "name",
+                "subagent",
+                "agent_name",
+                "type",
+            )
+            if subagent is not None and not _agent_name_allowed(subagent, allowed_agents):
                 return _permission_deny(f"K-Search denied unavailable native subagent: {subagent}", interrupt=True)
         if tool_name == "Skill":
-            skill = _tool_input_value(updated_input, "skill", "skill_name", "name")
+            skill = _tool_input_value(updated_input, "skill", "skill_name", "name", "skill_id")
             if skill is not None and skill not in allowed_skills:
                 return _permission_deny(f"K-Search denied unavailable native skill: {skill}", interrupt=True)
         return _permission_allow(updated_input=updated_input)
@@ -200,7 +276,10 @@ class ClaudeAgentProjectEditorClient:
     timeout_seconds: float = field(default_factory=_default_claude_agent_timeout_seconds)
 
     def _build_options_kwargs(self, project_root: Path) -> dict[str, Any]:
-        tool_names = _with_claude_native_tools(list(self.allowed_tools))
+        native_agent_names = list(self.native_agents)
+        agent_tool_expr = _agent_tool_allowlist_expr(native_agent_names) if _use_agent_tool_allowlist() else "Agent"
+        base_tools = [tool for tool in _with_claude_native_tools(list(self.allowed_tools)) if str(tool).strip() not in AGENT_TOOL_NAMES]
+        tool_names = _dedupe_tools(base_tools + [agent_tool_expr])
         skill_names = set(NATIVE_SKILLS if self.skills is None or isinstance(self.skills, str) else self.skills)
         options_kwargs: dict[str, Any] = {
             "cwd": str(project_root),
@@ -210,13 +289,25 @@ class ClaudeAgentProjectEditorClient:
             "permission_mode": "dontAsk",
             "can_use_tool": _make_project_tool_permission_callback(
                 project_root=project_root,
-                allowed_tools=set(tool_names),
-                allowed_agents=set(self.native_agents),
+                allowed_tools=set(_canonical_permission_tool_names(tool_names)),
+                allowed_agents=set(native_agent_names),
                 allowed_skills=skill_names,
             ),
             "model": self.model_name,
             "setting_sources": list(self.setting_sources),
         }
+        if should_use_programmatic_agents():
+            try:
+                programmatic_agents = load_native_agent_definitions(enabled_agent_names=native_agent_names)
+                if programmatic_agents:
+                    options_kwargs["agents"] = programmatic_agents
+            except Exception:
+                if require_programmatic_agents():
+                    raise
+                logger.warning(
+                    "failed to build programmatic Claude subagent definitions; falling back to .claude/agents",
+                    exc_info=True,
+                )
         if self.skills is not None:
             options_kwargs["skills"] = self.skills if isinstance(self.skills, str) else list(self.skills)
         if self.max_turns is not None:

@@ -73,8 +73,10 @@ def test_claude_project_editor_client_uses_sdk_client_with_cwd_and_file_tools(mo
     call = sdk.client_calls[0]
     assert call.prompt == "Please edit the project."
     assert call.options.kwargs["cwd"] == str(tmp_path)
-    assert call.options.kwargs["tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill", "Agent"]
-    assert call.options.kwargs["allowed_tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill", "Agent"]
+    assert call.options.kwargs["tools"][:6] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill"]
+    assert "code-reader" in _agent_tool_expr(call.options.kwargs["tools"])
+    assert call.options.kwargs["allowed_tools"][:6] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill"]
+    assert _agent_tool_expr(call.options.kwargs["allowed_tools"]) == _agent_tool_expr(call.options.kwargs["tools"])
     assert call.options.kwargs["disallowed_tools"][0] == "Bash"
     assert call.options.kwargs["permission_mode"] == "dontAsk"
     assert callable(call.options.kwargs["can_use_tool"])
@@ -108,6 +110,14 @@ def _permission_behavior(result):
     if "allow" in name:
         return "allow"
     return getattr(result, "behavior", None)
+
+
+def _agent_tool_expr(tools):
+    for tool in tools:
+        text = str(tool)
+        if text == "Agent" or text.startswith("Agent("):
+            return text
+    return None
 
 
 def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
@@ -218,8 +228,11 @@ def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
     assert sdk.client_calls[0].options.kwargs["cwd"]
     assert sdk.client_calls[0].options.kwargs["setting_sources"] == ["project"]
     assert "Skill" in sdk.client_calls[0].options.kwargs["allowed_tools"]
-    assert "Agent" in sdk.client_calls[0].options.kwargs["allowed_tools"]
-    assert sdk.client_calls[0].options.kwargs["tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill", "Agent"]
+    agent_tool = _agent_tool_expr(sdk.client_calls[0].options.kwargs["allowed_tools"])
+    assert agent_tool is not None
+    assert "code-reader" in agent_tool
+    assert sdk.client_calls[0].options.kwargs["tools"][:6] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill"]
+    assert _agent_tool_expr(sdk.client_calls[0].options.kwargs["tools"]) == agent_tool
     assert sdk.client_calls[0].options.kwargs["permission_mode"] == "dontAsk"
 
 
@@ -300,8 +313,11 @@ def test_claude_project_editor_enables_project_skills_and_agent_tool(monkeypatch
     from k_search.kernel_generators.claude_assets import NATIVE_SKILLS
     assert options["skills"] == list(NATIVE_SKILLS)
     assert "Skill" in options["allowed_tools"]
-    assert "Agent" in options["allowed_tools"]
-    assert options["tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill", "Agent"]
+    agent_tool = _agent_tool_expr(options["allowed_tools"])
+    assert agent_tool is not None
+    assert "code-reader" in agent_tool
+    assert options["tools"][:6] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill"]
+    assert _agent_tool_expr(options["tools"]) == agent_tool
     assert options["permission_mode"] == "dontAsk"
     assert "Bash" in options["disallowed_tools"]
 
@@ -332,8 +348,11 @@ def test_claude_project_editor_session_uses_same_native_options(monkeypatch, tmp
     from k_search.kernel_generators.claude_assets import NATIVE_SKILLS
     assert options["skills"] == list(NATIVE_SKILLS)
     assert "Skill" in options["allowed_tools"]
-    assert "Agent" in options["allowed_tools"]
-    assert options["tools"] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill", "Agent"]
+    agent_tool = _agent_tool_expr(options["allowed_tools"])
+    assert agent_tool is not None
+    assert "code-reader" in agent_tool
+    assert options["tools"][:6] == ["Read", "Grep", "Glob", "Edit", "Write", "Skill"]
+    assert _agent_tool_expr(options["tools"]) == agent_tool
     assert options["permission_mode"] == "dontAsk"
 
 

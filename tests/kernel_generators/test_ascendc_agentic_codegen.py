@@ -62,11 +62,13 @@ class NativeEditingClient:
         write_code_map: bool = True,
         write_plan: bool = True,
         write_review: bool = True,
+        review_text: str = "status: ok\neval_ready: true\n",
     ):
         self.new_text = new_text
         self.write_code_map = write_code_map
         self.write_plan = write_plan
         self.write_review = write_review
+        self.review_text = review_text
         self.calls = []
         self.assets_seen: dict[str, bool] = {}
 
@@ -90,7 +92,7 @@ class NativeEditingClient:
                 encoding="utf-8",
             )
         if self.write_review:
-            (root / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
+            (root / "REVIEW_NOTES.md").write_text(self.review_text, encoding="utf-8")
         (root / "kernel" / "foo.h").write_text(self.new_text, encoding="utf-8")
         return ClaudeProjectEditResult(
             text="status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md\nnext: python_eval",
@@ -99,6 +101,35 @@ class NativeEditingClient:
             prompt_chars=len(prompt),
             prompt_lines=prompt.count("\n") + 1,
         )
+
+
+class NativeSessionClient:
+    def __init__(self):
+        self.prompts = []
+        self.project_dir: Path | None = None
+
+    def open_session(self, *, project_dir, telemetry_recorder=None):
+        from types import SimpleNamespace
+
+        self.project_dir = Path(project_dir)
+        return SimpleNamespace(_closed=False, project_dir=self.project_dir)
+
+    def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+        self.prompts.append(prompt)
+        root = Path(session.project_dir)
+        _write_native_handoffs(root)
+        text = "alpha\nBETA\ngamma\n" if len(self.prompts) == 1 else "alpha\nGAMMA\ngamma\n"
+        (root / "kernel" / "foo.h").write_text(text, encoding="utf-8")
+        return ClaudeProjectEditResult(
+            text="status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md\nnext: python_eval",
+            transcript="native session completed",
+            prompt=prompt,
+            prompt_chars=len(prompt),
+            prompt_lines=prompt.count("\n") + 1,
+        )
+
+    def close_session(self, session):
+        session._closed = True
 
 
 class NoChangeClient:
@@ -776,6 +807,30 @@ def test_runner_fails_when_review_notes_missing(tmp_path, monkeypatch):
         )
 
 
+def test_runner_fails_when_reviewer_marks_candidate_not_eval_ready(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    runner = AscendCAgenticCodegenRunner(
+        model_name="claude",
+        editor_client=NativeEditingClient(
+            review_text="status: needs_fix\neval_ready: false\nrequired_fixes: fix tiling contract\n",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="REVIEW_NOTES.md"):
+        runner.run(
+            task=task,
+            request=AscendCAgenticCodegenRequest(
+                definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+                target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+            ),
+            base_solution=None,
+        )
+
+
 def test_runner_fails_when_code_map_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
     task_dir = tmp_path / "task"
@@ -822,3 +877,58 @@ def test_runner_filters_handoff_and_claude_asset_paths_from_candidate_outputs(tm
     assert "IMPLEMENTATION_PLAN.md" not in result.project_snapshot.manifest
     assert "REVIEW_NOTES.md" not in result.project_snapshot.manifest
     assert not any(path.startswith(".claude/") for path in result.project_snapshot.manifest)
+    assert result.artifact_paths is not None
+    manifest = json.loads(Path(result.artifact_paths["manifest_path"]).read_text(encoding="utf-8"))
+    handoff_paths = manifest["native_handoff_paths"]
+    assert sorted(handoff_paths) == ["CODE_MAP.md", "IMPLEMENTATION_PLAN.md", "REVIEW_NOTES.md"]
+    assert "Change beta to BETA" in Path(handoff_paths["IMPLEMENTATION_PLAN.md"]).read_text(encoding="utf-8")
+
+
+def test_continue_fix_uses_native_prompt_and_run_scoped_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "native-continue")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(
+        task_path=task_dir,
+        definition_name="x",
+        artifacts_dir=str(tmp_path / "artifacts"),
+        build_cmd=_py_cmd("print('build ok')"),
+        test_cmd=_py_cmd("print('correctness ok')"),
+        bench_cmd=_py_cmd("print('latency_ms=1.0')"),
+        reference_latency_ms=2.0,
+        timeout_seconds=30,
+    )
+    client = NativeSessionClient()
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+    first_request = AscendCAgenticCodegenRequest(
+        definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+        target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action", run_id="native-continue",
+    )
+
+    first = runner.run_multi_turn(task=task, request=first_request, base_solution=None, max_fix_rounds=0)
+    try:
+        second_request = AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="continue action", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=2, mode="debug", run_id="native-continue",
+        )
+        second = runner.continue_fix(
+            task=task,
+            editor_session=first.editor_session,
+            wt_session=first.worktree_session,
+            fix_prompt="raw compile fix context",
+            request=second_request,
+        )
+    finally:
+        if first.editor_session is not None:
+            client.close_session(first.editor_session)
+        if first.worktree_session is not None:
+            first.worktree_session.cleanup()
+
+    assert len(client.prompts) == 2
+    assert "code-reader -> plan -> codegen -> reviewer" in client.prompts[1]
+    assert "raw compile fix context" in client.prompts[1]
+    assert "IMPLEMENTATION_PLAN.md" in client.prompts[1]
+    assert second.artifact_paths is not None
+    assert "/runs/native-continue/" in second.artifact_paths["manifest_path"]

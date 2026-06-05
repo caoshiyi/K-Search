@@ -151,18 +151,48 @@ def _candidate_changed_paths(paths: list[str]) -> list[str]:
     return [path for path in paths if not _is_native_handoff_path(path)]
 
 
-def _require_native_handoff_files(project_dir: Path) -> None:
+def _field_value(text: str, field: str) -> str | None:
+    prefix = f"{field.lower()}:"
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith(prefix):
+            return stripped[len(prefix) :].strip()
+    return None
+
+
+def _empty_required_fixes(value: str | None) -> bool:
+    if value is None:
+        return True
+    normalized = value.strip().lower()
+    return normalized in {"", "[]", "none", "no", "n/a", "null", "false"}
+
+
+def _validate_review_notes(review_text: str) -> None:
+    status = (_field_value(review_text, "status") or "").strip().lower()
+    eval_ready = (_field_value(review_text, "eval_ready") or "").strip().lower()
+    required_fixes = _field_value(review_text, "required_fixes")
+    if status != "ok" or eval_ready != "true" or not _empty_required_fixes(required_fixes):
+        raise RuntimeError(
+            "Claude native reviewer did not mark candidate eval-ready in REVIEW_NOTES.md "
+            f"(status={status or 'missing'}, eval_ready={eval_ready or 'missing'})"
+        )
+
+
+def _require_native_handoff_files(project_dir: Path) -> dict[str, str]:
     missing = [name for name in sorted(NATIVE_HANDOFF_FILES) if not (project_dir / name).is_file()]
     if missing:
         raise RuntimeError(f"Claude native subagent flow did not produce required handoff file(s): {', '.join(missing)}")
+    handoffs = {
+        name: (project_dir / name).read_text(encoding="utf-8", errors="replace")
+        for name in sorted(NATIVE_HANDOFF_FILES)
+    }
+    _validate_review_notes(handoffs.get("REVIEW_NOTES.md", ""))
+    return handoffs
 
 
-def _read_native_code_map(project_dir: Path) -> str | None:
-    path = project_dir / CODE_MAP.filename
-    if not path.is_file():
-        return None
-    text = path.read_text(encoding="utf-8", errors="replace")
-    return text if text.strip() else None
+def _code_map_from_handoffs(handoffs: dict[str, str]) -> str | None:
+    text = handoffs.get(CODE_MAP.filename)
+    return text if text and text.strip() else None
 
 
 def _remove_native_handoff_files(project_dir: Path) -> None:
@@ -318,8 +348,8 @@ class AscendCAgenticCodegenRunner:
                 )
             finally:
                 telemetry_recorder.close()
-            _require_native_handoff_files(session.project_dir)
-            code_map_text = _read_native_code_map(session.project_dir)
+            handoff_texts = _require_native_handoff_files(session.project_dir)
+            code_map_text = _code_map_from_handoffs(handoff_texts)
             if store is not None and code_map_text:
                 store.save(CODE_MAP, code_map_text)
             _remove_native_handoff_files(session.project_dir)
@@ -400,6 +430,7 @@ class AscendCAgenticCodegenRunner:
                 project_rel_path=session.project_rel_path(),
                 action_node_id=request.action_node_id,
                 model_name=self.model_name,
+                handoff_files=handoff_texts,
                 metadata={
                     "target_gpu": request.target_gpu,
                     "mode": request.mode,
@@ -454,7 +485,10 @@ class AscendCAgenticCodegenRunner:
         or precision), follow-up fix prompts are sent within the same session
         up to ``max_fix_rounds`` times.
         """
-        max_fix_rounds = int(os.getenv("KSEARCH_AGENTIC_MAX_FIX_ROUNDS", str(max_fix_rounds)))
+        # The native bug-fixer subagent is reserved but not active in this release.
+        # Keep retry ownership in the caller/world-model cycle instead of running
+        # hidden generic fix turns inside this method.
+        max_fix_rounds = 0
         wt_session = create_agentic_worktree(task_path=getattr(task, "task_path", None))
         editor_session: ClaudeProjectEditorSession | None = None
         try:
@@ -507,8 +541,8 @@ class AscendCAgenticCodegenRunner:
             finally:
                 telemetry_recorder.close()
 
-            _require_native_handoff_files(wt_session.project_dir)
-            code_map_text = _read_native_code_map(wt_session.project_dir)
+            handoff_texts = _require_native_handoff_files(wt_session.project_dir)
+            code_map_text = _code_map_from_handoffs(handoff_texts)
             if store is not None and code_map_text:
                 store.save(CODE_MAP, code_map_text)
             _remove_native_handoff_files(wt_session.project_dir)
@@ -583,10 +617,12 @@ class AscendCAgenticCodegenRunner:
                     )
                 finally:
                     fix_telemetry_recorder.close()
-                produced_code_map = _read_native_code_map(wt_session.project_dir)
+                fix_handoff_texts = _require_native_handoff_files(wt_session.project_dir)
+                produced_code_map = _code_map_from_handoffs(fix_handoff_texts)
                 if store is not None and produced_code_map:
                     code_map_text = produced_code_map
                     store.save(CODE_MAP, produced_code_map)
+                handoff_texts = fix_handoff_texts
                 _remove_native_handoff_files(wt_session.project_dir)
 
                 # Check for changes after fix
@@ -645,6 +681,7 @@ class AscendCAgenticCodegenRunner:
                 project_rel_path=wt_session.project_rel_path(),
                 action_node_id=request.action_node_id,
                 model_name=self.model_name,
+                handoff_files=handoff_texts,
                 metadata={
                     "target_gpu": request.target_gpu,
                     "mode": request.mode,
@@ -713,8 +750,34 @@ class AscendCAgenticCodegenRunner:
             "0", "false", "no", "off",
         }
         store = MemoryStore.for_task(task) if code_map_enabled else None
-        _materialize_existing_code_map(store, wt_session.project_dir)
+        has_code_map = _materialize_existing_code_map(store, wt_session.project_dir)
         fix_prompt = sanitize_worktree_paths(fix_prompt)
+        action_with_fix_context = (
+            f"{request.action_text}\n\nFix context from previous evaluation:\n{fix_prompt}"
+        ).strip()
+        native_request = AscendCAgenticCodegenRequest(
+            definition_text=request.definition_text,
+            action_text=action_with_fix_context,
+            trace_logs=request.trace_logs,
+            perf_summary=request.perf_summary,
+            target_gpu=request.target_gpu,
+            round_num=request.round_num,
+            attempt_idx=request.attempt_idx,
+            mode=request.mode,
+            run_id=request.run_id,
+            task_name=request.task_name,
+            parent_candidate_id=request.parent_candidate_id,
+            action_node_id=request.action_node_id,
+        )
+        prompt = self.prompt_builder.build(
+            native_request,
+            has_code_map=has_code_map,
+            task_path=str(getattr(task, "task_path", "") or ""),
+        )
+        prompt = sanitize_worktree_paths(prompt)
+        task_path = getattr(task, "task_path", None)
+        if task_path is not None:
+            prompt = prompt.replace(str(Path(task_path).expanduser().resolve()), "<PROJECT_ROOT>")
 
         telemetry_context = TelemetryContext(
             task_name=getattr(task, "definition_name", None),
@@ -728,16 +791,17 @@ class AscendCAgenticCodegenRunner:
             target_gpu=request.target_gpu,
             language="ascendc",
         )
-        telemetry_recorder = build_file_recorder(context=telemetry_context, prompt=fix_prompt)
+        telemetry_recorder = build_file_recorder(context=telemetry_context, prompt=prompt)
         try:
             edit_result = self.editor_client.send_prompt(
-                editor_session, prompt=fix_prompt,
+                editor_session, prompt=prompt,
                 telemetry_recorder=telemetry_recorder,
             )
         finally:
             telemetry_recorder.close()
 
-        code_map_text = _read_native_code_map(wt_session.project_dir)
+        handoff_texts = _require_native_handoff_files(wt_session.project_dir)
+        code_map_text = _code_map_from_handoffs(handoff_texts)
         if store is not None and code_map_text:
             store.save(CODE_MAP, code_map_text)
         _remove_native_handoff_files(wt_session.project_dir)
@@ -770,9 +834,10 @@ class AscendCAgenticCodegenRunner:
         cleaned = {src.path: src.content for src in solution.sources or []}
         candidate_id = f"round_{int(request.round_num):04d}_attempt_{int(request.attempt_idx):02d}"
         snapshot_id = f"{candidate_id}_snapshot"
-        task_name = getattr(task, "definition_name", None) or getattr(task, "name", "ascendc")
+        task_name = request.task_name or getattr(task, "definition_name", None) or getattr(task, "name", "ascendc")
+        run_id = request.run_id or get_run_id()
         artifacts_dir = getattr(task, "artifacts_dir", None)
-        snapshot_archive_dir = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=str(task_name)) / "snapshots"
+        snapshot_archive_dir = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=str(task_name), run_id=run_id) / "snapshots"
         project_snapshot = create_project_snapshot(
             project_dir=wt_session.project_dir,
             snapshot_id=snapshot_id,
@@ -782,13 +847,15 @@ class AscendCAgenticCodegenRunner:
             eval_result=eval_result.to_dict(include_log_excerpt=True, max_log_chars=8000),
             diff_from_parent=diff_text,
             archive_dir=snapshot_archive_dir,
+            run_id=run_id,
         )
         candidate_patch, artifact_paths = write_agentic_candidate_artifacts(
             artifacts_dir=artifacts_dir,
             task_name=str(task_name),
+            run_id=run_id,
             round_num=request.round_num,
             attempt_idx=request.attempt_idx,
-            prompt=fix_prompt,
+            prompt=prompt,
             transcript=edit_result.transcript,
             changed_paths=changed_paths,
             diff_text=diff_text,
@@ -799,6 +866,7 @@ class AscendCAgenticCodegenRunner:
             project_rel_path=wt_session.project_rel_path(),
             action_node_id=request.action_node_id,
             model_name=self.model_name,
+            handoff_files=handoff_texts,
             metadata={
                 "target_gpu": request.target_gpu,
                 "mode": request.mode,
@@ -813,8 +881,8 @@ class AscendCAgenticCodegenRunner:
             raw=task.code_for_world_model_from_raw(raw=cleaned, language="ascendc"),
             cleaned=cleaned,
             transcript=edit_result.transcript,
-            prompt=fix_prompt,
-            prompt_chars=len(fix_prompt),
+            prompt=prompt,
+            prompt_chars=len(prompt),
             changed_paths=changed_paths,
             diff_text=diff_text,
             project_path=str(wt_session.project_dir),

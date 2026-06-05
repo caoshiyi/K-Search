@@ -46,6 +46,52 @@ class EditingClient:
         )
 
 
+class NativeEditingClient:
+    def __init__(
+        self,
+        new_text: str = "alpha\nBETA\ngamma\n",
+        *,
+        write_code_map: bool = True,
+        write_plan: bool = True,
+        write_review: bool = True,
+    ):
+        self.new_text = new_text
+        self.write_code_map = write_code_map
+        self.write_plan = write_plan
+        self.write_review = write_review
+        self.calls = []
+        self.assets_seen: dict[str, bool] = {}
+
+    def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
+        root = Path(project_dir)
+        self.calls.append((root, prompt))
+        self.assets_seen = {
+            "code_reader": (root / ".claude" / "agents" / "code-reader.md").exists(),
+            "plan": (root / ".claude" / "agents" / "plan.md").exists(),
+            "codegen": (root / ".claude" / "agents" / "codegen.md").exists(),
+            "reviewer": (root / ".claude" / "agents" / "reviewer.md").exists(),
+            "bug_fixer": (root / ".claude" / "agents" / "bug-fixer.md").exists(),
+            "ascendc_codegen_skill": (root / ".claude" / "skills" / "ascendc-codegen" / "SKILL.md").exists(),
+        }
+        if self.write_code_map:
+            (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h is the kernel file\n", encoding="utf-8")
+        if self.write_plan:
+            (root / "IMPLEMENTATION_PLAN.md").write_text(
+                "# IMPLEMENTATION_PLAN\nChange beta to BETA in kernel/foo.h.\n",
+                encoding="utf-8",
+            )
+        if self.write_review:
+            (root / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
+        (root / "kernel" / "foo.h").write_text(self.new_text, encoding="utf-8")
+        return ClaudeProjectEditResult(
+            text="status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md\nnext: python_eval",
+            transcript="native subagents completed",
+            prompt=prompt,
+            prompt_chars=len(prompt),
+            prompt_lines=prompt.count("\n") + 1,
+        )
+
+
 class NoChangeClient:
     def edit_project(self, *, project_dir, prompt):
         return ClaudeProjectEditResult(
@@ -623,3 +669,145 @@ def test_runner_code_map_not_in_diff(tmp_path, monkeypatch):
     assert "kernel/foo.h" in result.diff_text
     if result.project_snapshot is not None:
         assert "CODE_MAP.md" not in result.project_snapshot.manifest
+
+
+def test_runner_materializes_native_assets_and_uses_single_project_edit(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    client = NativeEditingClient()
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+
+    assert len(client.calls) == 1
+    project_dir, prompt = client.calls[0]
+    assert project_dir
+    assert all(client.assets_seen.values())
+    assert "code-reader -> plan -> codegen -> reviewer" in prompt
+    assert "BETA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
+
+
+def test_runner_does_not_import_old_python_project_agents(tmp_path, monkeypatch):
+    from types import ModuleType
+
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    forbidden = ModuleType("k_search.kernel_generators.agents")
+
+    def _blocked_getattr(name):
+        raise AssertionError(f"old Python agent import used: {name}")
+
+    forbidden.__getattr__ = _blocked_getattr
+    monkeypatch.setitem(sys.modules, "k_search.kernel_generators.agents", forbidden)
+
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=NativeEditingClient())
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+
+    assert result.changed_paths == ["kernel/foo.h"]
+
+
+def test_runner_fails_when_implementation_plan_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=NativeEditingClient(write_plan=False))
+
+    with pytest.raises(RuntimeError, match="IMPLEMENTATION_PLAN.md"):
+        runner.run(
+            task=task,
+            request=AscendCAgenticCodegenRequest(
+                definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+                target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+            ),
+            base_solution=None,
+        )
+
+
+def test_runner_fails_when_review_notes_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=NativeEditingClient(write_review=False))
+
+    with pytest.raises(RuntimeError, match="REVIEW_NOTES.md"):
+        runner.run(
+            task=task,
+            request=AscendCAgenticCodegenRequest(
+                definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+                target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+            ),
+            base_solution=None,
+        )
+
+
+def test_runner_fails_when_code_map_missing(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=NativeEditingClient(write_code_map=False))
+
+    with pytest.raises(RuntimeError, match="CODE_MAP.md"):
+        runner.run(
+            task=task,
+            request=AscendCAgenticCodegenRequest(
+                definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+                target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+            ),
+            base_solution=None,
+        )
+
+
+def test_runner_filters_handoff_and_claude_asset_paths_from_candidate_outputs(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=NativeEditingClient())
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+
+    assert result.changed_paths == ["kernel/foo.h"]
+    assert "CODE_MAP.md" not in result.diff_text
+    assert "IMPLEMENTATION_PLAN.md" not in result.diff_text
+    assert "REVIEW_NOTES.md" not in result.diff_text
+    assert ".claude/agents" not in result.diff_text
+    assert result.project_snapshot is not None
+    assert "CODE_MAP.md" not in result.project_snapshot.manifest
+    assert "IMPLEMENTATION_PLAN.md" not in result.project_snapshot.manifest
+    assert "REVIEW_NOTES.md" not in result.project_snapshot.manifest
+    assert not any(path.startswith(".claude/") for path in result.project_snapshot.manifest)

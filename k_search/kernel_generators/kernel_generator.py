@@ -425,19 +425,12 @@ class KernelGenerator:
             attempt_idx=int(attempt_idx),
             mode=str(mode),  # type: ignore[arg-type]
         )
-        if max_fix_rounds is not None:
-            result = self._agentic_runner().run_multi_turn(
-                task=task,
-                request=request,
-                base_solution=base_solution,
-                max_fix_rounds=max_fix_rounds,
-            )
-        else:
-            result = self._agentic_runner().run(
-                task=task,
-                request=request,
-                base_solution=base_solution,
-            )
+        result = self._agentic_runner().run_one_shot_closed(
+            task=task,
+            request=request,
+            base_solution=base_solution,
+            max_fix_rounds=int(max_fix_rounds or 0),
+        )
         print(
             f"[LLM] agentic ascendc result provider={self.llm_provider} model={self.model_name} "
             f"round={round_num} prompt_chars={result.prompt_chars} "

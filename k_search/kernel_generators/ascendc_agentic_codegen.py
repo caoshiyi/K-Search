@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -90,8 +90,6 @@ class AscendCAgenticCodegenResult:
     duration_ms: int | None = None
     code_map_text: str | None = None
     knowledge_text: str | None = None
-    editor_session: ClaudeProjectEditorSession | None = None
-    worktree_session: Any = None
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -534,6 +532,396 @@ class AscendCAgenticPromptBuilder:
         return prompt
 
 
+class AscendCAgenticCycle:
+    """Own one candidate worktree and, when available, one Claude SDK session."""
+
+    def __init__(
+        self,
+        *,
+        runner: "AscendCAgenticCodegenRunner",
+        task: Any,
+        request: AscendCAgenticCodegenRequest,
+        base_solution: Solution | None,
+    ) -> None:
+        self.runner = runner
+        self.task = task
+        self.request = request
+        self.base_solution = base_solution
+        self.wt_session: Any | None = None
+        self.editor_session: ClaudeProjectEditorSession | Any | None = None
+        self.store: MemoryStore | None = None
+        self.has_code_map: bool = False
+        self.code_map_text: str | None = None
+        self.curator_context: dict[str, str] = {}
+        self.last_handoff_texts: dict[str, str] = {}
+        self.last_edit_result: ClaudeProjectEditResult | None = None
+        self._closed = False
+        self._initial_has_run = False
+
+    def __enter__(self) -> "AscendCAgenticCycle":
+        self._open()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        self.close()
+        return False
+
+    def _open(self) -> None:
+        if self.wt_session is not None:
+            return
+        try:
+            self.wt_session = create_agentic_worktree(
+                task_path=getattr(self.task, "task_path", None),
+            )
+            overlay = getattr(self.task, "overlay_solution_sources", None)
+            if callable(overlay):
+                overlay(project_dir=self.wt_session.project_dir, solution=self.base_solution)
+                self.wt_session.commit_all("ksearch agentic overlay baseline")
+            _materialize_native_assets_baseline(self.wt_session)
+
+            code_map_enabled = os.getenv("KSEARCH_ENABLE_CODE_MAP", "1").strip().lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }
+            self.store = MemoryStore.for_task(self.task) if code_map_enabled else None
+            self.has_code_map = _materialize_existing_code_map(self.store, self.wt_session.project_dir)
+            _materialize_existing_knowledge(self.store, self.wt_session.project_dir)
+
+            if supports_configured_subagent_flow(self.runner.editor_client):
+                self.editor_session = self.runner.editor_client.open_session(
+                    project_dir=self.wt_session.project_dir,
+                )
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        errors: list[BaseException] = []
+        if self.editor_session is not None:
+            try:
+                if not bool(getattr(self.editor_session, "_closed", False)):
+                    self.runner.editor_client.close_session(self.editor_session)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                self.editor_session = None
+        if self.wt_session is not None:
+            try:
+                self.wt_session.cleanup()
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                self.wt_session = None
+        if errors:
+            import logging
+
+            log = logging.getLogger(__name__)
+            for exc in errors:
+                log.warning("failed to cleanup Claude agentic cycle resource: %s", exc)
+
+    def _require_open(self) -> None:
+        if self._closed or self.wt_session is None:
+            raise RuntimeError("AscendCAgenticCycle is not open")
+
+    def _task_path_text(self) -> str:
+        return str(getattr(self.task, "task_path", "") or "")
+
+    def _sanitize_prompt(self, prompt: str) -> str:
+        prompt = sanitize_worktree_paths(prompt)
+        task_path = getattr(self.task, "task_path", None)
+        if task_path is not None:
+            prompt = prompt.replace(str(Path(task_path).expanduser().resolve()), "<PROJECT_ROOT>")
+        return prompt
+
+    def _telemetry_context(self, *, stage: str, extra: dict[str, Any] | None = None) -> TelemetryContext:
+        return TelemetryContext(
+            run_id=self.request.run_id,
+            task_name=getattr(self.task, "definition_name", None),
+            definition=getattr(self.task, "definition_name", None),
+            flow="agentic_codegen_multi_turn",
+            stage=stage,
+            round_index=self.request.round_num,
+            attempt_index=self.request.attempt_idx,
+            action_node_id=self.request.action_node_id,
+            model_name=self.runner.model_name,
+            provider="claude-agent",
+            target_gpu=self.request.target_gpu,
+            language="ascendc",
+            extra=extra,
+        )
+
+    def _curator_telemetry_context(self) -> TelemetryContext:
+        return _build_curator_telemetry_context(
+            task=self.task,
+            request=self.request,
+            model_name=self.runner.model_name,
+            flow="agentic_codegen_multi_turn",
+        )
+
+    def _build_prompt(self, request: AscendCAgenticCodegenRequest, *, has_code_map: bool) -> str:
+        prompt = self.runner.prompt_builder.build(
+            request,
+            has_code_map=has_code_map,
+            task_path=self._task_path_text(),
+        )
+        return self._sanitize_prompt(prompt)
+
+    def _run_flow(
+        self,
+        *,
+        prompt: str,
+        flow: SubagentFlowConfig,
+        telemetry_recorder: Any,
+    ) -> ClaudeProjectEditResult:
+        assert self.wt_session is not None
+        if supports_configured_subagent_flow(self.runner.editor_client):
+            return run_configured_subagent_flow(
+                editor_client=self.runner.editor_client,
+                project_dir=self.wt_session.project_dir,
+                base_prompt=prompt,
+                flow=flow,
+                telemetry_recorder=telemetry_recorder,
+                session=self.editor_session,
+                close_session_on_exit=False,
+            )
+        return _edit_project_with_optional_telemetry(
+            self.runner.editor_client,
+            project_dir=self.wt_session.project_dir,
+            prompt=prompt,
+            telemetry_recorder=telemetry_recorder,
+            subagent_flow=None,
+        )
+
+    def run_initial(self) -> AscendCAgenticCodegenResult:
+        self._require_open()
+        if self._initial_has_run:
+            raise RuntimeError("run_initial() may only be called once per AscendCAgenticCycle")
+        self._initial_has_run = True
+        prompt = self._build_prompt(self.request, has_code_map=bool(self.has_code_map))
+        telemetry_recorder = build_file_recorder(
+            context=self._telemetry_context(stage=self.request.mode),
+            prompt=prompt,
+        )
+        try:
+            edit_result = self._run_flow(
+                prompt=prompt,
+                flow=self.runner.subagent_flow,
+                telemetry_recorder=telemetry_recorder,
+            )
+        finally:
+            telemetry_recorder.close()
+        return self._finalize_attempt_result(
+            edit_result=edit_result,
+            prompt=prompt,
+            telemetry_recorder=telemetry_recorder,
+            flow=self.runner.subagent_flow,
+            mode=self.request.mode,
+        )
+
+    def continue_fix(self, fix_prompt: str) -> AscendCAgenticCodegenResult:
+        self._require_open()
+        if not self._initial_has_run:
+            raise RuntimeError("continue_fix() requires run_initial() first")
+        if self.editor_session is None or not supports_configured_subagent_flow(self.runner.editor_client):
+            raise RuntimeError("continue_fix() requires an open Claude agentic session")
+        assert self.wt_session is not None
+        if not _write_runtime_file(self.wt_session.project_dir, CODE_MAP.filename, self.code_map_text):
+            _materialize_existing_code_map(self.store, self.wt_session.project_dir)
+        if not _write_runtime_file(
+            self.wt_session.project_dir,
+            KNOWLEDGE.filename,
+            self.curator_context.get(KNOWLEDGE.filename),
+        ):
+            _materialize_existing_knowledge(self.store, self.wt_session.project_dir)
+
+        fix_prompt = sanitize_worktree_paths(fix_prompt)
+        action_with_fix_context = (
+            f"{self.request.action_text}\n\nFix context from previous evaluation:\n{fix_prompt}"
+        ).strip()
+        native_request = replace(self.request, action_text=action_with_fix_context)
+        prompt = self._build_prompt(
+            native_request,
+            has_code_map=(self.wt_session.project_dir / CODE_MAP.filename).is_file(),
+        )
+        telemetry_recorder = build_file_recorder(
+            context=self._telemetry_context(stage="fix"),
+            prompt=prompt,
+        )
+        try:
+            edit_result = self._run_flow(
+                prompt=prompt,
+                flow=self.runner.repair_subagent_flow,
+                telemetry_recorder=telemetry_recorder,
+            )
+        finally:
+            telemetry_recorder.close()
+        return self._finalize_attempt_result(
+            edit_result=edit_result,
+            prompt=prompt,
+            telemetry_recorder=telemetry_recorder,
+            flow=self.runner.repair_subagent_flow,
+            mode="fix",
+        )
+
+    def run_repair_loop(
+        self,
+        first_result: AscendCAgenticCodegenResult,
+        max_fix_rounds: int,
+    ) -> AscendCAgenticCodegenResult:
+        result = first_result
+        for fix_round in range(1, max(0, int(max_fix_rounds or 0)) + 1):
+            if result.eval_result.is_passed():
+                break
+            result = self.continue_fix(_build_fix_prompt(result.eval_result, fix_round))
+        return result
+
+    def _run_eval(self) -> tuple[EvalResult, str | None]:
+        assert self.wt_session is not None
+        return _run_eval_in_isolated_copy(
+            task=self.task,
+            candidate_project_dir=self.wt_session.project_dir,
+            round_num=self.request.round_num,
+        )
+
+    def _finalize_attempt_result(
+        self,
+        *,
+        edit_result: ClaudeProjectEditResult,
+        prompt: str,
+        telemetry_recorder: Any,
+        flow: SubagentFlowConfig,
+        mode: str,
+    ) -> AscendCAgenticCodegenResult:
+        assert self.wt_session is not None
+        handoff_texts = _require_native_handoff_files(
+            self.wt_session.project_dir,
+            _flow_handoff_files(flow),
+        )
+        produced_code_map = _code_map_from_handoffs(handoff_texts)
+        if produced_code_map:
+            self.code_map_text = produced_code_map
+        _remove_native_handoff_files(self.wt_session.project_dir)
+        self.curator_context = dict(handoff_texts)
+        self.curator_context.update(_capture_and_remove_non_candidate_files(self.wt_session.project_dir))
+        self.last_handoff_texts = handoff_texts
+        self.last_edit_result = edit_result
+
+        project_changed_paths = self.wt_session.project_changed_paths()
+        changed_paths = _candidate_changed_paths(project_changed_paths or self.wt_session.changed_paths())
+        if not changed_paths:
+            raise RuntimeError(
+                "Claude agentic codegen did not change any files inside the candidate worktree. "
+                "Rejecting this attempt instead of importing external task_path changes."
+            )
+
+        diff_text = self.wt_session.project_diff_text()
+        eval_result, eval_project_path = self._run_eval()
+        self.curator_context.update(getattr(eval_result, "_ksearch_debug_evidence", {}) or {})
+        knowledge_text = _run_curator_after_eval(
+            editor_client=self.runner.editor_client,
+            project_dir=self.wt_session.project_dir,
+            eval_result=eval_result,
+            store=self.store,
+            context_files=self.curator_context,
+            telemetry_context=self._curator_telemetry_context(),
+        )
+        solution = self.task.make_solution_from_project_dir(
+            project_dir=self.wt_session.project_dir,
+            changed_paths=changed_paths,
+            raw_agent_output=edit_result.text,
+            round_num=self.request.round_num,
+            model_name=self.runner.model_name,
+            target_gpu=self.request.target_gpu,
+            language="ascendc",
+        )
+        cleaned = {src.path: src.content for src in solution.sources or []}
+        candidate_id = f"round_{int(self.request.round_num):04d}_attempt_{int(self.request.attempt_idx):02d}"
+        snapshot_id = f"{candidate_id}_snapshot"
+        task_name = (
+            self.request.task_name
+            or getattr(self.task, "definition_name", None)
+            or getattr(self.task, "name", "ascendc")
+        )
+        run_id = self.request.run_id or get_run_id()
+        artifacts_dir = getattr(self.task, "artifacts_dir", None)
+        snapshot_archive_dir = (
+            get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=str(task_name), run_id=run_id)
+            / "snapshots"
+        )
+        project_snapshot = create_project_snapshot(
+            project_dir=self.wt_session.project_dir,
+            snapshot_id=snapshot_id,
+            parent_snapshot_id=None,
+            base_commit=self.wt_session.baseline_commit,
+            created_by_round=self.request.round_num,
+            eval_result=eval_result.to_dict(include_log_excerpt=True, max_log_chars=8000),
+            diff_from_parent=diff_text,
+            archive_dir=snapshot_archive_dir,
+            run_id=run_id,
+        )
+        candidate_patch, artifact_paths = write_agentic_candidate_artifacts(
+            artifacts_dir=artifacts_dir,
+            task_name=str(task_name),
+            run_id=run_id,
+            round_num=self.request.round_num,
+            attempt_idx=self.request.attempt_idx,
+            prompt=prompt,
+            transcript=edit_result.transcript,
+            changed_paths=changed_paths,
+            diff_text=diff_text,
+            eval_result=eval_result,
+            project_snapshot=project_snapshot,
+            parent_candidate_id=self.request.parent_candidate_id,
+            base_ref=self.wt_session.baseline_commit,
+            project_rel_path=self.wt_session.project_rel_path(),
+            action_node_id=self.request.action_node_id,
+            model_name=self.runner.model_name,
+            handoff_files=handoff_texts,
+            metadata={
+                "target_gpu": self.request.target_gpu,
+                "mode": mode,
+                "project_path": str(self.wt_session.project_dir),
+                "eval_project_path": eval_project_path,
+                "evaluator_mutated_project": False,
+                **_native_metadata(),
+            },
+        )
+        return AscendCAgenticCodegenResult(
+            solution=solution,
+            eval_result=eval_result,
+            raw=self.task.code_for_world_model_from_raw(raw=cleaned, language="ascendc"),
+            cleaned=cleaned,
+            transcript=edit_result.transcript,
+            prompt=prompt,
+            prompt_chars=len(prompt),
+            changed_paths=changed_paths,
+            diff_text=diff_text,
+            project_path=str(self.wt_session.project_dir),
+            eval_project_path=eval_project_path,
+            diff_after_eval=diff_text,
+            evaluator_mutated_project=False,
+            candidate_patch=candidate_patch,
+            project_snapshot=project_snapshot,
+            artifact_paths=artifact_paths,
+            trace_path=edit_result.trace_path or telemetry_recorder.artifacts.trace_path,
+            timeline_path=edit_result.timeline_path or telemetry_recorder.artifacts.timeline_path,
+            cost_path=edit_result.cost_path or telemetry_recorder.artifacts.cost_path,
+            session_id=edit_result.session_id,
+            total_cost_usd=edit_result.total_cost_usd,
+            usage=edit_result.usage,
+            model_usage=edit_result.model_usage,
+            num_turns=edit_result.num_turns,
+            duration_ms=edit_result.duration_ms,
+            code_map_text=self.code_map_text,
+            knowledge_text=knowledge_text,
+        )
+
+
 class AscendCAgenticCodegenRunner:
     def __init__(
         self,
@@ -557,6 +945,32 @@ class AscendCAgenticCodegenRunner:
             default_repair_flow = self.subagent_flow
         self.repair_subagent_flow = repair_subagent_flow or default_repair_flow
 
+    def open_cycle(
+        self,
+        *,
+        task: Any,
+        request: AscendCAgenticCodegenRequest,
+        base_solution: Solution | None,
+    ) -> AscendCAgenticCycle:
+        return AscendCAgenticCycle(
+            runner=self,
+            task=task,
+            request=request,
+            base_solution=base_solution,
+        )
+
+    def run_one_shot_closed(
+        self,
+        *,
+        task: Any,
+        request: AscendCAgenticCodegenRequest,
+        base_solution: Solution | None,
+        max_fix_rounds: int = 3,
+    ) -> AscendCAgenticCodegenResult:
+        with self.open_cycle(task=task, request=request, base_solution=base_solution) as cycle:
+            result = cycle.run_initial()
+            return cycle.run_repair_loop(result, max_fix_rounds=max_fix_rounds)
+
     def run(
         self,
         *,
@@ -564,177 +978,13 @@ class AscendCAgenticCodegenRunner:
         request: AscendCAgenticCodegenRequest,
         base_solution: Solution | None,
     ) -> AscendCAgenticCodegenResult:
-        session = create_agentic_worktree(task_path=getattr(task, "task_path", None))
-        try:
-            overlay = getattr(task, "overlay_solution_sources", None)
-            if callable(overlay):
-                overlay(project_dir=session.project_dir, solution=base_solution)
-                session.commit_all("ksearch agentic overlay baseline")
-            _materialize_native_assets_baseline(session)
+        return self.run_one_shot_closed(
+            task=task,
+            request=request,
+            base_solution=base_solution,
+            max_fix_rounds=0,
+        )
 
-            code_map_enabled = os.getenv("KSEARCH_ENABLE_CODE_MAP", "1").strip().lower() not in {
-                "0",
-                "false",
-                "no",
-                "off",
-            }
-            store = MemoryStore.for_task(task) if code_map_enabled else None
-            has_code_map = _materialize_existing_code_map(store, session.project_dir)
-            _materialize_existing_knowledge(store, session.project_dir)
-
-            prompt = self.prompt_builder.build(
-                request,
-                has_code_map=has_code_map,
-                task_path=str(getattr(task, "task_path", "") or ""),
-            )
-            # Replace absolute task-path references so the LLM only sees <PROJECT_ROOT>.
-            task_path = getattr(task, "task_path", None)
-            if task_path is not None:
-                prompt = prompt.replace(str(Path(task_path).expanduser().resolve()), "<PROJECT_ROOT>")
-            telemetry_context = TelemetryContext(
-                task_name=getattr(task, "definition_name", None),
-                definition=getattr(task, "definition_name", None),
-                flow="agentic_codegen",
-                stage=request.mode,
-                round_index=request.round_num,
-                attempt_index=request.attempt_idx,
-                model_name=self.model_name,
-                provider="claude-agent",
-                target_gpu=request.target_gpu,
-                language="ascendc",
-            )
-            telemetry_recorder = build_file_recorder(context=telemetry_context, prompt=prompt)
-            try:
-                edit_result = _edit_project_with_optional_telemetry(
-                    self.editor_client,
-                    project_dir=session.project_dir,
-                    prompt=prompt,
-                    telemetry_recorder=telemetry_recorder,
-                    subagent_flow=self.subagent_flow,
-                )
-            finally:
-                telemetry_recorder.close()
-            handoff_texts = _require_native_handoff_files(session.project_dir, _flow_handoff_files(self.subagent_flow))
-            code_map_text = _code_map_from_handoffs(handoff_texts)
-            _remove_native_handoff_files(session.project_dir)
-            curator_context = dict(handoff_texts)
-            curator_context.update(_capture_and_remove_non_candidate_files(session.project_dir))
-            project_changed_paths = session.project_changed_paths()
-            changed_paths = _candidate_changed_paths(project_changed_paths or session.changed_paths())
-            if not changed_paths:
-                raise RuntimeError(
-                    "Claude agentic codegen did not change any files inside the candidate worktree. "
-                    "Rejecting this attempt instead of importing external task_path changes."
-                )
-            diff_text = session.project_diff_text()
-            eval_result, eval_project_path = _run_eval_in_isolated_copy(
-                task=task,
-                candidate_project_dir=session.project_dir,
-                round_num=request.round_num,
-            )
-            curator_context.update(getattr(eval_result, "_ksearch_debug_evidence", {}) or {})
-            diff_after_eval = diff_text
-            evaluator_mutated_project = False
-            knowledge_text = _run_curator_after_eval(
-                editor_client=self.editor_client,
-                project_dir=session.project_dir,
-                eval_result=eval_result,
-                store=store,
-                context_files=curator_context,
-                telemetry_context=_build_curator_telemetry_context(
-                    task=task,
-                    request=request,
-                    model_name=self.model_name,
-                    flow="agentic_codegen",
-                ),
-            )
-            solution = task.make_solution_from_project_dir(
-                project_dir=session.project_dir,
-                changed_paths=changed_paths,
-                raw_agent_output=edit_result.text,
-                round_num=request.round_num,
-                model_name=self.model_name,
-                target_gpu=request.target_gpu,
-                language="ascendc",
-            )
-            cleaned = {src.path: src.content for src in solution.sources or []}
-            candidate_id = f"round_{int(request.round_num):04d}_attempt_{int(request.attempt_idx):02d}"
-            snapshot_id = f"{candidate_id}_snapshot"
-            task_name = request.task_name or getattr(task, "definition_name", None) or getattr(task, "name", "ascendc")
-            run_id = request.run_id or get_run_id()
-            artifacts_dir = getattr(task, "artifacts_dir", None)
-            snapshot_archive_dir = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=str(task_name), run_id=run_id) / "snapshots"
-            project_snapshot = create_project_snapshot(
-                project_dir=session.project_dir,
-                snapshot_id=snapshot_id,
-                parent_snapshot_id=None,
-                base_commit=session.baseline_commit,
-                created_by_round=request.round_num,
-                eval_result=eval_result.to_dict(include_log_excerpt=True, max_log_chars=8000),
-                diff_from_parent=diff_text,
-                archive_dir=snapshot_archive_dir,
-                run_id=run_id,
-            )
-            candidate_patch, artifact_paths = write_agentic_candidate_artifacts(
-                artifacts_dir=artifacts_dir,
-                task_name=str(task_name),
-                run_id=run_id,
-                round_num=request.round_num,
-                attempt_idx=request.attempt_idx,
-                prompt=prompt,
-                transcript=edit_result.transcript,
-                changed_paths=changed_paths,
-                diff_text=diff_text,
-                eval_result=eval_result,
-                project_snapshot=project_snapshot,
-                parent_candidate_id=request.parent_candidate_id,
-                base_ref=session.baseline_commit,
-                project_rel_path=session.project_rel_path(),
-                action_node_id=request.action_node_id,
-                model_name=self.model_name,
-                handoff_files=handoff_texts,
-                metadata={
-                    "target_gpu": request.target_gpu,
-                    "mode": request.mode,
-                    "project_path": str(session.project_dir),
-                    "eval_project_path": eval_project_path,
-                    "evaluator_mutated_project": evaluator_mutated_project,
-                    **_native_metadata(),
-                },
-            )
-            return AscendCAgenticCodegenResult(
-                solution=solution,
-                eval_result=eval_result,
-                raw=task.code_for_world_model_from_raw(raw=cleaned, language="ascendc"),
-                cleaned=cleaned,
-                transcript=edit_result.transcript,
-                prompt=prompt,
-                prompt_chars=len(prompt),
-                changed_paths=changed_paths,
-                diff_text=diff_text,
-                project_path=str(session.project_dir),
-                eval_project_path=eval_project_path,
-                diff_after_eval=diff_after_eval,
-                evaluator_mutated_project=evaluator_mutated_project,
-                candidate_patch=candidate_patch,
-                project_snapshot=project_snapshot,
-                artifact_paths=artifact_paths,
-                trace_path=edit_result.trace_path or telemetry_recorder.artifacts.trace_path,
-                timeline_path=edit_result.timeline_path or telemetry_recorder.artifacts.timeline_path,
-                cost_path=edit_result.cost_path or telemetry_recorder.artifacts.cost_path,
-                session_id=edit_result.session_id,
-                total_cost_usd=edit_result.total_cost_usd,
-                usage=edit_result.usage,
-                model_usage=edit_result.model_usage,
-                num_turns=edit_result.num_turns,
-                duration_ms=edit_result.duration_ms,
-                code_map_text=code_map_text,
-                knowledge_text=knowledge_text,
-                editor_session=None,
-                worktree_session=None,
-            )
-        finally:
-            session.cleanup()
     def run_multi_turn(
         self,
         *,
@@ -743,474 +993,15 @@ class AscendCAgenticCodegenRunner:
         base_solution: Solution | None,
         max_fix_rounds: int = 3,
     ) -> AscendCAgenticCodegenResult:
-        """Run agentic codegen with multi-turn fix loop in a single SDK session.
-
-        After the initial code generation attempt, if evaluation fails (compile
-        or precision), follow-up fix prompts are sent within the same session
-        up to ``max_fix_rounds`` times.
-        """
-        max_fix_rounds = max(0, int(max_fix_rounds or 0))
-        wt_session = create_agentic_worktree(task_path=getattr(task, "task_path", None))
-        editor_session: ClaudeProjectEditorSession | None = None
-        try:
-            overlay = getattr(task, "overlay_solution_sources", None)
-            if callable(overlay):
-                overlay(project_dir=wt_session.project_dir, solution=base_solution)
-                wt_session.commit_all("ksearch agentic overlay baseline")
-            _materialize_native_assets_baseline(wt_session)
-
-            code_map_enabled = os.getenv("KSEARCH_ENABLE_CODE_MAP", "1").strip().lower() not in {
-                "0", "false", "no", "off",
-            }
-            store = MemoryStore.for_task(task) if code_map_enabled else None
-            has_code_map = _materialize_existing_code_map(store, wt_session.project_dir)
-            _materialize_existing_knowledge(store, wt_session.project_dir)
-
-            # Open a multi-turn SDK session
-            editor_session = self.editor_client.open_session(
-                project_dir=wt_session.project_dir,
-            )
-
-            # Attempt 1: send full prompt
-            prompt = self.prompt_builder.build(
-                request,
-                has_code_map=has_code_map,
-                task_path=str(getattr(task, "task_path", "") or ""),
-            )
-            prompt = sanitize_worktree_paths(prompt)
-            # Replace absolute task-path references so the LLM only sees <PROJECT_ROOT>.
-            task_path = getattr(task, "task_path", None)
-            if task_path is not None:
-                prompt = prompt.replace(str(Path(task_path).expanduser().resolve()), "<PROJECT_ROOT>")
-            telemetry_context = TelemetryContext(
-                task_name=getattr(task, "definition_name", None),
-                definition=getattr(task, "definition_name", None),
-                flow="agentic_codegen_multi_turn",
-                stage=request.mode,
-                round_index=request.round_num,
-                attempt_index=request.attempt_idx,
-                model_name=self.model_name,
-                provider="claude-agent",
-                target_gpu=request.target_gpu,
-                language="ascendc",
-            )
-            telemetry_recorder = build_file_recorder(context=telemetry_context, prompt=prompt)
-            try:
-                edit_result = run_configured_subagent_flow(
-                    editor_client=self.editor_client,
-                    project_dir=wt_session.project_dir,
-                    base_prompt=prompt,
-                    flow=self.subagent_flow,
-                    telemetry_recorder=telemetry_recorder,
-                    session=editor_session,
-                    close_session_on_exit=False,
-                )
-            finally:
-                telemetry_recorder.close()
-
-            handoff_texts = _require_native_handoff_files(wt_session.project_dir, _flow_handoff_files(self.subagent_flow))
-            code_map_text = _code_map_from_handoffs(handoff_texts)
-            _remove_native_handoff_files(wt_session.project_dir)
-            curator_context = dict(handoff_texts)
-            curator_context.update(_capture_and_remove_non_candidate_files(wt_session.project_dir))
-
-            project_changed_paths = wt_session.project_changed_paths()
-            changed_paths = _candidate_changed_paths(project_changed_paths or wt_session.changed_paths())
-            if not changed_paths:
-                raise RuntimeError(
-                    "Claude agentic codegen did not change any files inside the candidate worktree. "
-                    "Rejecting this attempt instead of importing external task_path changes."
-                )
-
-            diff_text = wt_session.project_diff_text()
-            eval_result, eval_project_path = _run_eval_in_isolated_copy(
-                task=task,
-                candidate_project_dir=wt_session.project_dir,
-                round_num=request.round_num,
-            )
-            curator_context.update(getattr(eval_result, "_ksearch_debug_evidence", {}) or {})
-            diff_after_eval = diff_text
-            evaluator_mutated_project = False
-
-            # Fix loop: send short fix prompts in the same session
-            for fix_round in range(1, max_fix_rounds + 1):
-                if eval_result.is_passed():
-                    break
-
-                if not _write_runtime_file(wt_session.project_dir, CODE_MAP.filename, code_map_text):
-                    _materialize_existing_code_map(store, wt_session.project_dir)
-                if not _write_runtime_file(wt_session.project_dir, KNOWLEDGE.filename, curator_context.get(KNOWLEDGE.filename)):
-                    _materialize_existing_knowledge(store, wt_session.project_dir)
-                fix_prompt = _build_fix_prompt(eval_result, fix_round)
-                fix_prompt = sanitize_worktree_paths(fix_prompt)
-
-                fix_telemetry_context = TelemetryContext(
-                    task_name=getattr(task, "definition_name", None),
-                    definition=getattr(task, "definition_name", None),
-                    flow="agentic_codegen_multi_turn",
-                    stage="fix",
-                    round_index=request.round_num,
-                    attempt_index=request.attempt_idx,
-                    model_name=self.model_name,
-                    provider="claude-agent",
-                    target_gpu=request.target_gpu,
-                    language="ascendc",
-                    extra={"fix_round_index": fix_round},
-                )
-                fix_telemetry_recorder = build_file_recorder(context=fix_telemetry_context, prompt=fix_prompt)
-                try:
-                    edit_result = run_configured_subagent_flow(
-                        editor_client=self.editor_client,
-                        project_dir=wt_session.project_dir,
-                        base_prompt=fix_prompt,
-                        flow=self.repair_subagent_flow,
-                        telemetry_recorder=fix_telemetry_recorder,
-                        session=editor_session,
-                        close_session_on_exit=False,
-                    )
-                finally:
-                    fix_telemetry_recorder.close()
-                fix_handoff_texts = _require_native_handoff_files(
-                    wt_session.project_dir,
-                    _flow_handoff_files(self.repair_subagent_flow),
-                )
-                produced_code_map = _code_map_from_handoffs(fix_handoff_texts)
-                if produced_code_map:
-                    code_map_text = produced_code_map
-                handoff_texts = fix_handoff_texts
-                _remove_native_handoff_files(wt_session.project_dir)
-                curator_context = dict(fix_handoff_texts)
-                curator_context.update(_capture_and_remove_non_candidate_files(wt_session.project_dir))
-
-                # Check for changes after fix
-                project_changed_paths = wt_session.project_changed_paths()
-                changed_paths = _candidate_changed_paths(project_changed_paths or wt_session.changed_paths())
-                if not changed_paths:
-                    break  # LLM didn't change anything, stop trying
-
-                # Re-evaluate
-                diff_text = wt_session.project_diff_text()
-                eval_result, eval_project_path = _run_eval_in_isolated_copy(
-                    task=task,
-                    candidate_project_dir=wt_session.project_dir,
-                    round_num=request.round_num,
-                )
-                curator_context.update(getattr(eval_result, "_ksearch_debug_evidence", {}) or {})
-                diff_after_eval = diff_text
-                evaluator_mutated_project = False
-
-            # Build final result (same as run())
-            knowledge_text = _run_curator_after_eval(
-                editor_client=self.editor_client,
-                project_dir=wt_session.project_dir,
-                eval_result=eval_result,
-                store=store,
-                context_files=curator_context,
-                telemetry_context=_build_curator_telemetry_context(
-                    task=task,
-                    request=request,
-                    model_name=self.model_name,
-                    flow="agentic_codegen_multi_turn",
-                ),
-            )
-            solution = task.make_solution_from_project_dir(
-                project_dir=wt_session.project_dir,
-                changed_paths=changed_paths,
-                raw_agent_output=edit_result.text,
-                round_num=request.round_num,
-                model_name=self.model_name,
-                target_gpu=request.target_gpu,
-                language="ascendc",
-            )
-            cleaned = {src.path: src.content for src in solution.sources or []}
-            candidate_id = f"round_{int(request.round_num):04d}_attempt_{int(request.attempt_idx):02d}"
-            snapshot_id = f"{candidate_id}_snapshot"
-            task_name = request.task_name or getattr(task, "definition_name", None) or getattr(task, "name", "ascendc")
-            run_id = request.run_id or get_run_id()
-            artifacts_dir = getattr(task, "artifacts_dir", None)
-            snapshot_archive_dir = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=str(task_name), run_id=run_id) / "snapshots"
-            project_snapshot = create_project_snapshot(
-                project_dir=wt_session.project_dir,
-                snapshot_id=snapshot_id,
-                parent_snapshot_id=None,
-                base_commit=wt_session.baseline_commit,
-                created_by_round=request.round_num,
-                eval_result=eval_result.to_dict(include_log_excerpt=True, max_log_chars=8000),
-                diff_from_parent=diff_text,
-                archive_dir=snapshot_archive_dir,
-                run_id=run_id,
-            )
-            candidate_patch, artifact_paths = write_agentic_candidate_artifacts(
-                artifacts_dir=artifacts_dir,
-                task_name=str(task_name),
-                run_id=run_id,
-                round_num=request.round_num,
-                attempt_idx=request.attempt_idx,
-                prompt=prompt,
-                transcript=edit_result.transcript,
-                changed_paths=changed_paths,
-                diff_text=diff_text,
-                eval_result=eval_result,
-                project_snapshot=project_snapshot,
-                parent_candidate_id=request.parent_candidate_id,
-                base_ref=wt_session.baseline_commit,
-                project_rel_path=wt_session.project_rel_path(),
-                action_node_id=request.action_node_id,
-                model_name=self.model_name,
-                handoff_files=handoff_texts,
-                metadata={
-                    "target_gpu": request.target_gpu,
-                    "mode": request.mode,
-                    "project_path": str(wt_session.project_dir),
-                    "eval_project_path": eval_project_path,
-                    "evaluator_mutated_project": evaluator_mutated_project,
-                    **_native_metadata(),
-                },
-            )
-            _write_runtime_file(wt_session.project_dir, CODE_MAP.filename, code_map_text)
-            return AscendCAgenticCodegenResult(
-                solution=solution,
-                eval_result=eval_result,
-                raw=task.code_for_world_model_from_raw(raw=cleaned, language="ascendc"),
-                cleaned=cleaned,
-                transcript=edit_result.transcript,
-                prompt=prompt,
-                prompt_chars=len(prompt),
-                changed_paths=changed_paths,
-                diff_text=diff_text,
-                project_path=str(wt_session.project_dir),
-                eval_project_path=eval_project_path,
-                diff_after_eval=diff_after_eval,
-                evaluator_mutated_project=evaluator_mutated_project,
-                candidate_patch=candidate_patch,
-                project_snapshot=project_snapshot,
-                artifact_paths=artifact_paths,
-                trace_path=edit_result.trace_path or telemetry_recorder.artifacts.trace_path,
-                timeline_path=edit_result.timeline_path or telemetry_recorder.artifacts.timeline_path,
-                cost_path=edit_result.cost_path or telemetry_recorder.artifacts.cost_path,
-                session_id=edit_result.session_id,
-                total_cost_usd=edit_result.total_cost_usd,
-                usage=edit_result.usage,
-                model_usage=edit_result.model_usage,
-                num_turns=edit_result.num_turns,
-                duration_ms=edit_result.duration_ms,
-                code_map_text=code_map_text,
-                knowledge_text=knowledge_text,
-                editor_session=editor_session,
-                worktree_session=wt_session,
-            )
-        except Exception:
-            # On error, close the editor session so it doesn't leak
-            if editor_session is not None and not editor_session._closed:
-                self.editor_client.close_session(editor_session)
-                editor_session = None
-            raise
-        finally:
-            # Only cleanup worktree if we're NOT returning it for further use
-            # (caller will cleanup when done with the session)
-            if editor_session is None:
-                wt_session.cleanup()
-
-    def continue_fix(
-        self,
-        *,
-        task: Any,
-        editor_session: ClaudeProjectEditorSession,
-        wt_session: Any,
-        fix_prompt: str,
-        request: AscendCAgenticCodegenRequest,
-    ) -> AscendCAgenticCodegenResult:
-        """Send a fix prompt in an existing session and evaluate the result.
-
-        Used by the world model path for attempt 2+ within the same cycle.
-        The editor_session and wt_session must come from a previous run_multi_turn()
-        or continue_fix() call.
-        """
-        code_map_enabled = os.getenv("KSEARCH_ENABLE_CODE_MAP", "1").strip().lower() not in {
-            "0", "false", "no", "off",
-        }
-        store = MemoryStore.for_task(task) if code_map_enabled else None
-        has_code_map = (wt_session.project_dir / CODE_MAP.filename).is_file()
-        if not has_code_map:
-            has_code_map = _materialize_existing_code_map(store, wt_session.project_dir)
-        _materialize_existing_knowledge(store, wt_session.project_dir)
-        fix_prompt = sanitize_worktree_paths(fix_prompt)
-        action_with_fix_context = (
-            f"{request.action_text}\n\nFix context from previous evaluation:\n{fix_prompt}"
-        ).strip()
-        native_request = AscendCAgenticCodegenRequest(
-            definition_text=request.definition_text,
-            action_text=action_with_fix_context,
-            trace_logs=request.trace_logs,
-            perf_summary=request.perf_summary,
-            target_gpu=request.target_gpu,
-            round_num=request.round_num,
-            attempt_idx=request.attempt_idx,
-            mode=request.mode,
-            run_id=request.run_id,
-            task_name=request.task_name,
-            parent_candidate_id=request.parent_candidate_id,
-            action_node_id=request.action_node_id,
-        )
-        prompt = self.prompt_builder.build(
-            native_request,
-            has_code_map=has_code_map,
-            task_path=str(getattr(task, "task_path", "") or ""),
-        )
-        prompt = sanitize_worktree_paths(prompt)
-        task_path = getattr(task, "task_path", None)
-        if task_path is not None:
-            prompt = prompt.replace(str(Path(task_path).expanduser().resolve()), "<PROJECT_ROOT>")
-
-        telemetry_context = TelemetryContext(
-            task_name=getattr(task, "definition_name", None),
-            definition=getattr(task, "definition_name", None),
-            flow="agentic_codegen_multi_turn",
-            stage="fix",
-            round_index=request.round_num,
-            attempt_index=request.attempt_idx,
-            model_name=self.model_name,
-            provider="claude-agent",
-            target_gpu=request.target_gpu,
-            language="ascendc",
-        )
-        telemetry_recorder = build_file_recorder(context=telemetry_context, prompt=prompt)
-        try:
-            edit_result = run_configured_subagent_flow(
-                editor_client=self.editor_client,
-                project_dir=wt_session.project_dir,
-                base_prompt=prompt,
-                flow=self.repair_subagent_flow,
-                telemetry_recorder=telemetry_recorder,
-                session=editor_session,
-                close_session_on_exit=False,
-            )
-        finally:
-            telemetry_recorder.close()
-
-        handoff_texts = _require_native_handoff_files(
-            wt_session.project_dir,
-            _flow_handoff_files(self.repair_subagent_flow),
-        )
-        code_map_text = _code_map_from_handoffs(handoff_texts)
-        _remove_native_handoff_files(wt_session.project_dir)
-        curator_context = dict(handoff_texts)
-        curator_context.update(_capture_and_remove_non_candidate_files(wt_session.project_dir))
-
-        project_changed_paths = wt_session.project_changed_paths()
-        changed_paths = _candidate_changed_paths(project_changed_paths or wt_session.changed_paths())
-        if not changed_paths:
-            raise RuntimeError(
-                "Claude agentic fix did not change any files "
-                f"(round={request.round_num}, attempt={request.attempt_idx})"
-            )
-
-        diff_text = wt_session.project_diff_text()
-        eval_result, eval_project_path = _run_eval_in_isolated_copy(
+        return self.run_one_shot_closed(
             task=task,
-            candidate_project_dir=wt_session.project_dir,
-            round_num=request.round_num,
+            request=request,
+            base_solution=base_solution,
+            max_fix_rounds=max_fix_rounds,
         )
-        curator_context.update(getattr(eval_result, "_ksearch_debug_evidence", {}) or {})
-        diff_after_eval = diff_text
-        evaluator_mutated_project = False
 
-        knowledge_text = _run_curator_after_eval(
-            editor_client=self.editor_client,
-            project_dir=wt_session.project_dir,
-            eval_result=eval_result,
-            store=store,
-            context_files=curator_context,
-            telemetry_context=_build_curator_telemetry_context(
-                task=task,
-                request=request,
-                model_name=self.model_name,
-                flow="agentic_codegen_multi_turn",
-            ),
-        )
-        solution = task.make_solution_from_project_dir(
-            project_dir=wt_session.project_dir,
-            changed_paths=changed_paths,
-            raw_agent_output=edit_result.text,
-            round_num=request.round_num,
-            model_name=self.model_name,
-            target_gpu=request.target_gpu,
-            language="ascendc",
-        )
-        cleaned = {src.path: src.content for src in solution.sources or []}
-        candidate_id = f"round_{int(request.round_num):04d}_attempt_{int(request.attempt_idx):02d}"
-        snapshot_id = f"{candidate_id}_snapshot"
-        task_name = request.task_name or getattr(task, "definition_name", None) or getattr(task, "name", "ascendc")
-        run_id = request.run_id or get_run_id()
-        artifacts_dir = getattr(task, "artifacts_dir", None)
-        snapshot_archive_dir = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=str(task_name), run_id=run_id) / "snapshots"
-        project_snapshot = create_project_snapshot(
-            project_dir=wt_session.project_dir,
-            snapshot_id=snapshot_id,
-            parent_snapshot_id=None,
-            base_commit=wt_session.baseline_commit,
-            created_by_round=request.round_num,
-            eval_result=eval_result.to_dict(include_log_excerpt=True, max_log_chars=8000),
-            diff_from_parent=diff_text,
-            archive_dir=snapshot_archive_dir,
-            run_id=run_id,
-        )
-        candidate_patch, artifact_paths = write_agentic_candidate_artifacts(
-            artifacts_dir=artifacts_dir,
-            task_name=str(task_name),
-            run_id=run_id,
-            round_num=request.round_num,
-            attempt_idx=request.attempt_idx,
-            prompt=prompt,
-            transcript=edit_result.transcript,
-            changed_paths=changed_paths,
-            diff_text=diff_text,
-            eval_result=eval_result,
-            project_snapshot=project_snapshot,
-            parent_candidate_id=request.parent_candidate_id,
-            base_ref=wt_session.baseline_commit,
-            project_rel_path=wt_session.project_rel_path(),
-            action_node_id=request.action_node_id,
-            model_name=self.model_name,
-            handoff_files=handoff_texts,
-            metadata={
-                "target_gpu": request.target_gpu,
-                "mode": request.mode,
-                "project_path": str(wt_session.project_dir),
-                "eval_project_path": eval_project_path,
-                "evaluator_mutated_project": evaluator_mutated_project,
-                **_native_metadata(),
-            },
-        )
-        _write_runtime_file(wt_session.project_dir, CODE_MAP.filename, code_map_text)
-        return AscendCAgenticCodegenResult(
-            solution=solution,
-            eval_result=eval_result,
-            raw=task.code_for_world_model_from_raw(raw=cleaned, language="ascendc"),
-            cleaned=cleaned,
-            transcript=edit_result.transcript,
-            prompt=prompt,
-            prompt_chars=len(prompt),
-            changed_paths=changed_paths,
-            diff_text=diff_text,
-            project_path=str(wt_session.project_dir),
-            eval_project_path=eval_project_path,
-            diff_after_eval=diff_after_eval,
-            evaluator_mutated_project=evaluator_mutated_project,
-            candidate_patch=candidate_patch,
-            project_snapshot=project_snapshot,
-            artifact_paths=artifact_paths,
-            trace_path=edit_result.trace_path or telemetry_recorder.artifacts.trace_path,
-            timeline_path=edit_result.timeline_path or telemetry_recorder.artifacts.timeline_path,
-            cost_path=edit_result.cost_path or telemetry_recorder.artifacts.cost_path,
-            session_id=edit_result.session_id,
-            total_cost_usd=edit_result.total_cost_usd,
-            usage=edit_result.usage,
-            model_usage=edit_result.model_usage,
-            num_turns=edit_result.num_turns,
-            duration_ms=edit_result.duration_ms,
-            code_map_text=code_map_text,
-            knowledge_text=knowledge_text,
-            editor_session=editor_session,
-            worktree_session=wt_session,
+    def continue_fix(self, **kwargs: Any) -> AscendCAgenticCodegenResult:
+        raise RuntimeError(
+            "continue_fix() now belongs to AscendCAgenticCycle. "
+            "Use `with runner.open_cycle(...) as cycle: cycle.continue_fix(...)`."
         )

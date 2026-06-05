@@ -95,6 +95,15 @@ def test_can_use_tool_denies_symlink_escape(tmp_path):
     assert _permission_interrupt(result) is True
 
 
+def test_can_use_tool_rewrites_omitted_grep_path_to_project_root(tmp_path):
+    callback = _callback(tmp_path)
+
+    result = asyncio.run(callback("Grep", {"pattern": "kernel"}, None))
+
+    assert _permission_behavior(result) == "allow"
+    assert _permission_updated_input(result)["path"] == "."
+
+
 def test_runner_fails_without_syncing_external_task_path_when_no_files_changed(tmp_path, monkeypatch):
     import k_search.kernel_generators.ascendc_agentic_codegen as codegen
 

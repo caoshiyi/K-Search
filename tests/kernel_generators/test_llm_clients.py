@@ -902,8 +902,12 @@ def test_baseline_ascendc_agentic_failure_can_fallback_to_legacy(monkeypatch, tm
     from k_search.tasks.ascendc_task import AscendCTask, format_ascendc_project_files
 
     class FailingRunner:
-        def run(self, *, task, request, base_solution):
+        def run_one_shot_closed(self, *, task, request, base_solution, max_fix_rounds=0):
+            del max_fix_rounds
             raise RuntimeError("agentic unavailable")
+
+        def run(self, *, task, request, base_solution):
+            return self.run_one_shot_closed(task=task, request=request, base_solution=base_solution)
 
     class LegacyClient:
         def __init__(self):
@@ -981,15 +985,29 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
                 changed_paths=["kernel/foo.h"],
                 diff_text="diff",
                 project_path=str(tmp_path),
-                editor_session=None,
-                worktree_session=None,
             )
 
         def run_multi_turn(self, *, task, request, base_solution, max_fix_rounds=0):
             return self.run(task=task, request=request, base_solution=base_solution)
 
-        def continue_fix(self, *, task, editor_session, wt_session, fix_prompt, request):
-            return self.run(task=task, request=request, base_solution=None)
+        def open_cycle(self, *, task, request, base_solution):
+            runner = self
+
+            class FakeCycle:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def run_initial(self):
+                    return runner.run(task=task, request=request, base_solution=base_solution)
+
+                def continue_fix(self, fix_prompt):
+                    del fix_prompt
+                    return runner.run(task=task, request=request, base_solution=None)
+
+            return FakeCycle()
 
         class editor_client:
             @staticmethod
@@ -1147,6 +1165,9 @@ def test_baseline_agentic_memory_writeback_only_for_new_best(tmp_path, monkeypat
             )
 
         def run_multi_turn(self, *, task, request, base_solution, max_fix_rounds=0):
+            return self.run(task=task, request=request, base_solution=base_solution)
+
+        def run_one_shot_closed(self, *, task, request, base_solution, max_fix_rounds=0):
             return self.run(task=task, request=request, base_solution=base_solution)
 
     task = FakeTask()

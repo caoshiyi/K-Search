@@ -1266,24 +1266,14 @@ def test_continue_fix_uses_native_prompt_and_run_scoped_artifacts(tmp_path, monk
         target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action", run_id="native-continue",
     )
 
-    first = runner.run_multi_turn(task=task, request=first_request, base_solution=None, max_fix_rounds=0)
-    try:
+    with runner.open_cycle(task=task, request=first_request, base_solution=None) as cycle:
+        first = cycle.run_initial()
         second_request = AscendCAgenticCodegenRequest(
             definition_text="spec", action_text="continue action", trace_logs="", perf_summary="",
             target_gpu="ascend_910b", round_num=1, attempt_idx=2, mode="debug", run_id="native-continue",
         )
-        second = runner.continue_fix(
-            task=task,
-            editor_session=first.editor_session,
-            wt_session=first.worktree_session,
-            fix_prompt="raw compile fix context",
-            request=second_request,
-        )
-    finally:
-        if first.editor_session is not None:
-            client.close_session(first.editor_session)
-        if first.worktree_session is not None:
-            first.worktree_session.cleanup()
+        cycle.request = second_request
+        second = cycle.continue_fix("raw compile fix context")
 
     assert len(client.prompts) == 6
     assert [prompt.splitlines()[0] for prompt in client.prompts[:4]] == [
@@ -1383,23 +1373,19 @@ def test_run_multi_turn_uses_repair_flow_when_eval_fails(tmp_path, monkeypatch):
         base_solution=None,
         max_fix_rounds=1,
     )
-    try:
-        assert result.eval_result.status == "passed"
-        assert [prompt.splitlines()[0] for prompt in client.prompts] == [
-            "Stage 1/4: code-reader",
-            "Stage 2/4: plan",
-            "Stage 3/4: codegen",
-            "Stage 4/4: reviewer",
-            "Stage 1/2: bug-fixer",
-            "Stage 2/2: reviewer",
-        ]
-        assert "GAMMA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
-        assert "+GAMMA" in result.diff_text
-    finally:
-        if result.editor_session is not None:
-            client.close_session(result.editor_session)
-        if result.worktree_session is not None:
-            result.worktree_session.cleanup()
+    assert result.eval_result.status == "passed"
+    assert not hasattr(result, "editor_session")
+    assert not hasattr(result, "worktree_session")
+    assert [prompt.splitlines()[0] for prompt in client.prompts] == [
+        "Stage 1/4: code-reader",
+        "Stage 2/4: plan",
+        "Stage 3/4: codegen",
+        "Stage 4/4: reviewer",
+        "Stage 1/2: bug-fixer",
+        "Stage 2/2: reviewer",
+    ]
+    assert "GAMMA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
+    assert "+GAMMA" in result.diff_text
 
 
 def test_continue_fix_filters_debug_evidence_files_from_candidate_outputs(tmp_path, monkeypatch):
@@ -1436,24 +1422,14 @@ def test_continue_fix_filters_debug_evidence_files_from_candidate_outputs(tmp_pa
         target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action", run_id="native-debug-filter",
     )
 
-    first = runner.run_multi_turn(task=task, request=first_request, base_solution=None, max_fix_rounds=0)
-    try:
+    with runner.open_cycle(task=task, request=first_request, base_solution=None) as cycle:
+        first = cycle.run_initial()
         second_request = AscendCAgenticCodegenRequest(
             definition_text="spec", action_text="continue action", trace_logs="", perf_summary="",
             target_gpu="ascend_910b", round_num=1, attempt_idx=2, mode="debug", run_id="native-debug-filter",
         )
-        second = runner.continue_fix(
-            task=task,
-            editor_session=first.editor_session,
-            wt_session=first.worktree_session,
-            fix_prompt="raw compile fix context",
-            request=second_request,
-        )
-    finally:
-        if first.editor_session is not None:
-            client.close_session(first.editor_session)
-        if first.worktree_session is not None:
-            first.worktree_session.cleanup()
+        cycle.request = second_request
+        second = cycle.continue_fix("raw compile fix context")
 
     assert second.changed_paths == ["kernel/foo.h"]
     assert "debug_packet.json" not in second.diff_text

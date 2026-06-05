@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
@@ -42,9 +43,8 @@ NATIVE_SKILLS = [
     "ascendc-dev-knowledge",
 ]
 
-# Skills that ship a sibling ``references/`` directory. To avoid copying large
-# payloads (ascendc-dev-knowledge is ~88M) into every candidate worktree, the
-# directory is shared via a symlink pointing back at the repo-side asset.
+# Skills that ship a sibling ``references/`` directory. These are copied into
+# each candidate worktree so agent writes cannot mutate repo-side assets.
 NATIVE_SKILL_REFERENCE_DIRS = [
     "ascendc-dumptensor",
     "ascendc-fa-detailed-design",
@@ -52,7 +52,7 @@ NATIVE_SKILL_REFERENCE_DIRS = [
 ]
 
 # Shared reference packs (design principles, attention patterns, curation format)
-# materialized under .claude/references/<name> as symlinks to the repo-side copy.
+# materialized under .claude/references/<name>.
 NATIVE_REFERENCE_DIRS = [
     "ascendc-design",
     "attention-patterns",
@@ -93,32 +93,35 @@ def _write_managed_text(target: Path, text: str) -> None:
     target.write_text(body, encoding="utf-8")
 
 
-def _link_dir(source: Path, target: Path, linked: list[Path]) -> None:
-    """Symlink ``target`` -> ``source`` for read-only sharing of large reference dirs.
+def _remove_existing_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _copy_dir(source: Path, target: Path, copied: list[Path]) -> None:
+    """Copy ``source`` into ``target`` for isolated candidate-local references.
 
     Missing source is a soft failure: the agent still works, it just can't read
     local docs. This keeps ungated (e.g. dev-knowledge not yet installed) setups
     from breaking codegen.
     """
     if not source.is_dir():
-        logger.warning("claude asset reference dir missing, skipping symlink: %s", source)
+        logger.warning("claude asset reference dir missing, skipping copy: %s", source)
         return
     target.parent.mkdir(parents=True, exist_ok=True)
-    if target.is_symlink() or target.exists():
-        # Idempotent: refresh stale symlink, leave a real dir alone.
-        if target.is_symlink():
-            target.unlink()
-        else:
-            return
-    target.symlink_to(source, target_is_directory=True)
-    linked.append(target)
+    if target.exists() or target.is_symlink():
+        _remove_existing_path(target)
+    shutil.copytree(source, target, symlinks=False)
+    copied.append(target)
 
 
 def materialize_claude_project_assets(project_dir: str | Path) -> ClaudeAssetMaterializationResult:
     root = Path(project_dir).expanduser().resolve()
     claude_dir = root / ".claude"
     written: list[Path] = []
-    linked: list[Path] = []
+    copied: list[Path] = []
     asset_root = _asset_root()
 
     for name in NATIVE_AGENT_FILES:
@@ -133,16 +136,16 @@ def materialize_claude_project_assets(project_dir: str | Path) -> ClaudeAssetMat
         _write_managed_text(target, text)
         written.append(target)
 
-    # Large skill reference dirs: share via symlink instead of copying.
+    # Large skill reference dirs: copy so the candidate worktree is isolated.
     for skill in NATIVE_SKILL_REFERENCE_DIRS:
         source = asset_root / "skills" / skill / "references"
         target = claude_dir / "skills" / skill / "references"
-        _link_dir(source, target, linked)
+        _copy_dir(source, target, copied)
 
     # Shared reference packs under .claude/references/.
     for name in NATIVE_REFERENCE_DIRS:
         source = asset_root / "references" / name
         target = claude_dir / "references" / name
-        _link_dir(source, target, linked)
+        _copy_dir(source, target, copied)
 
-    return ClaudeAssetMaterializationResult(claude_dir=claude_dir, written_paths=written, linked_paths=linked)
+    return ClaudeAssetMaterializationResult(claude_dir=claude_dir, written_paths=written, linked_paths=[])

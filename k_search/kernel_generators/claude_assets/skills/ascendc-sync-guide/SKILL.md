@@ -46,7 +46,7 @@ WaitFlag<HardEvent::V_MTE3>(ev);
 DataCopy(dstGm, fp32Local, tileSize);
 inQueue_.FreeTensor(fp32Local);
 
-// ③ CrossCore：通知 AIC 数据处理完毕 
+// ③ CrossCore：通知 AIC 数据处理完毕
 CrossCoreSetFlag<0x2, PIPE_MTE2>(VECTOR_NOTIFY_CUBE_ID);
 ```
 
@@ -223,7 +223,7 @@ if (ASCEND_IS_AIV) {
 CrossCoreWaitFlag<0x2, PIPE_MTE2>(flag1);
 if (someCondition) {
     // do something
-    return;  // ❌ 提前返回，跳过了后续的 Set 
+    return;  // ❌ 提前返回，跳过了后续的 Set
 }
 CrossCoreSetFlag<0x2, PIPE_MTE3>(flag2);    // 在某些条件下可能永远无法执行，导致对方死等
 }

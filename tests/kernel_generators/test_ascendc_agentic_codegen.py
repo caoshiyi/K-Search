@@ -686,6 +686,158 @@ def test_runner_runs_curator_after_eval_and_persists_knowledge(tmp_path, monkeyp
     assert (wt / "KNOWLEDGE.md").read_text(encoding="utf-8").startswith("## 1:")
 
 
+def test_runner_records_curator_telemetry_separately(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "1")
+    monkeypatch.setenv("KSEARCH_TELEMETRY_DIR", str(tmp_path / "telemetry"))
+    monkeypatch.setenv("KSEARCH_RUN_ID", "test-curator-telemetry")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+
+    class TelemetryCuratorClient:
+        def __init__(self):
+            self.telemetry_contexts = []
+            self.cost_paths = []
+
+        def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
+            root = Path(project_dir)
+            if telemetry_recorder is not None:
+                from k_search.telemetry.events import TelemetryEvent
+
+                self.telemetry_contexts.append(telemetry_recorder.context)
+                self.cost_paths.append(telemetry_recorder.artifacts.cost_path)
+                cost = 0.05 if "knowledge-curator" in prompt else 0.5
+                telemetry_recorder.emit(
+                    TelemetryEvent(event_type="llm_start", provider="claude-agent", model_name="claude")
+                )
+                telemetry_recorder.emit(
+                    TelemetryEvent(
+                        event_type="llm_result",
+                        provider="claude-agent",
+                        model_name="claude",
+                        total_cost_usd=cost,
+                    )
+                )
+            if "knowledge-curator" in prompt:
+                (root / "KNOWLEDGE.md").write_text("## telemetry lesson\n", encoding="utf-8")
+                text = "curation done"
+            else:
+                _write_native_handoffs(root, code_map="# CODE_MAP\nfoo.h is the kernel\n")
+                (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+                text = "native subagents completed"
+            return ClaudeProjectEditResult(
+                text=text, transcript=text, prompt=prompt,
+                prompt_chars=len(prompt), prompt_lines=prompt.count("\n") + 1,
+            )
+
+    client = TelemetryCuratorClient()
+    result = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client).run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+
+    assert result.trace_path is not None
+    assert len(client.telemetry_contexts) == 2
+    assert client.telemetry_contexts[0].stage == "action"
+    assert client.telemetry_contexts[1].stage == "curator"
+    assert client.cost_paths[0] != client.cost_paths[1]
+    assert Path(client.cost_paths[0]).parent.parent.name == "action_unknown"
+    assert Path(client.cost_paths[1]).parent.parent.name == "action_curator"
+    curator_cost = json.loads(Path(client.cost_paths[1]).read_text(encoding="utf-8"))
+    assert curator_cost["summary"]["total_cost_usd"] == 0.05
+    curator_prompt = (Path(client.cost_paths[1]).parent / "prompt.md").read_text(encoding="utf-8")
+    assert "knowledge-curator" in curator_prompt
+
+
+def test_runner_runs_curator_in_isolated_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "1")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "test-curator-isolated")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+
+    class MutatingCuratorClient:
+        def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
+            root = Path(project_dir)
+            if "knowledge-curator" in prompt:
+                (root / "kernel").mkdir(exist_ok=True)
+                (root / "kernel" / "foo.h").write_text("alpha\nCURATOR_MUTATION\ngamma\n", encoding="utf-8")
+                (root / "KNOWLEDGE.md").write_text("## isolated lesson\n", encoding="utf-8")
+                text = "curation done"
+            else:
+                _write_native_handoffs(root, code_map="# CODE_MAP\nfoo.h is the kernel\n")
+                (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+                text = "native subagents completed"
+            return ClaudeProjectEditResult(
+                text=text, transcript=text, prompt=prompt,
+                prompt_chars=len(prompt), prompt_lines=prompt.count("\n") + 1,
+            )
+
+    result = AscendCAgenticCodegenRunner(
+        model_name="claude",
+        editor_client=MutatingCuratorClient(),
+    ).run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+
+    foo = next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
+    assert foo == "alpha\nBETA\ngamma\n"
+    assert "CURATOR_MUTATION" not in result.diff_text
+    assert "isolated lesson" in str(result.knowledge_text)
+
+
+def test_runner_removes_materialized_knowledge_when_curator_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "test-knowledge-not-candidate")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+
+    from k_search.kernel_generators.memory import KNOWLEDGE, MemoryStore
+    MemoryStore.for_task(task).save(KNOWLEDGE, "SECRET_LESSON_SHOULD_NOT_BE_CANDIDATE_DIFF\n")
+
+    class CodegenOnlyClient:
+        def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
+            root = Path(project_dir)
+            assert (root / "KNOWLEDGE.md").is_file()
+            _write_native_handoffs(root, code_map="# CODE_MAP\nfoo.h is the kernel\n")
+            (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+            return ClaudeProjectEditResult(
+                text="edited", transcript="edited", prompt=prompt,
+                prompt_chars=len(prompt), prompt_lines=prompt.count("\n") + 1,
+            )
+
+    result = AscendCAgenticCodegenRunner(model_name="claude", editor_client=CodegenOnlyClient()).run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+
+    assert "KNOWLEDGE.md" not in result.changed_paths
+    assert "SECRET_LESSON" not in result.diff_text
+    if result.project_snapshot is not None:
+        assert "KNOWLEDGE.md" not in result.project_snapshot.manifest
+    assert "KNOWLEDGE.md" not in {src.path for src in result.solution.sources}
+
+
 
 def test_runner_reuses_existing_code_map_without_reader(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
@@ -1097,3 +1249,65 @@ def test_continue_fix_uses_native_prompt_and_run_scoped_artifacts(tmp_path, monk
     assert "Use the bug-fixer subagent" in client.prompts[4]
     assert second.artifact_paths is not None
     assert "/runs/native-continue/" in second.artifact_paths["manifest_path"]
+
+
+def test_continue_fix_filters_debug_evidence_files_from_candidate_outputs(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "native-debug-filter")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(
+        task_path=task_dir,
+        definition_name="x",
+        artifacts_dir=str(tmp_path / "artifacts"),
+        build_cmd=_py_cmd("print('build ok')"),
+        test_cmd=_py_cmd("print('correctness ok')"),
+        bench_cmd=_py_cmd("print('latency_ms=1.0')"),
+        reference_latency_ms=2.0,
+        timeout_seconds=30,
+    )
+
+    class DebugEvidenceSessionClient(NativeSessionClient):
+        def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+            result = super().send_prompt(session, prompt=prompt, telemetry_recorder=telemetry_recorder)
+            root = Path(session.project_dir)
+            if "Stage 1/2: bug-fixer" in prompt:
+                (root / "debug_packet.json").write_text('{"secret":"debug"}\n', encoding="utf-8")
+                (root / "debug_log.md").write_text("debug notes\n", encoding="utf-8")
+            return result
+
+    client = DebugEvidenceSessionClient()
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+    first_request = AscendCAgenticCodegenRequest(
+        definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+        target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action", run_id="native-debug-filter",
+    )
+
+    first = runner.run_multi_turn(task=task, request=first_request, base_solution=None, max_fix_rounds=0)
+    try:
+        second_request = AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="continue action", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=2, mode="debug", run_id="native-debug-filter",
+        )
+        second = runner.continue_fix(
+            task=task,
+            editor_session=first.editor_session,
+            wt_session=first.worktree_session,
+            fix_prompt="raw compile fix context",
+            request=second_request,
+        )
+    finally:
+        if first.editor_session is not None:
+            client.close_session(first.editor_session)
+        if first.worktree_session is not None:
+            first.worktree_session.cleanup()
+
+    assert second.changed_paths == ["kernel/foo.h"]
+    assert "debug_packet.json" not in second.diff_text
+    assert "debug_log.md" not in second.diff_text
+    assert "debug_packet.json" not in {src.path for src in second.solution.sources}
+    if second.project_snapshot is not None:
+        assert "debug_packet.json" not in second.project_snapshot.manifest
+        assert "debug_log.md" not in second.project_snapshot.manifest

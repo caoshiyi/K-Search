@@ -13,8 +13,9 @@ candidate for scope, contract preservation, and precision risks, then write
 REVIEW_NOTES.md. You do not run Bash and do not edit source files yourself.
 
 ## Inputs
-Read CODE_MAP.md, IMPLEMENTATION_PLAN.md, and the changed source files. Read KNOWLEDGE.md
-if present (apply known pitfall patterns). Use skills to verify API semantics when unsure.
+Read CODE_MAP.md, IMPLEMENTATION_PLAN.md if present, and the changed source files. Read
+KNOWLEDGE.md if present (apply known pitfall patterns). Use skills to verify API semantics
+when unsure.
 
 ## Scope and contract checks
 - changed files match the implementation plan

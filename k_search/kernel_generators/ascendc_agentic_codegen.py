@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -30,6 +31,13 @@ from k_search.utils.paths import get_ksearch_artifacts_dir, get_run_id
 
 
 AgenticMode = Literal["generate", "action", "debug", "improve"]
+
+DEBUG_EVIDENCE_FILES = {
+    "debug_packet.json",
+    "debug_log.md",
+}
+
+CURATOR_CONTEXT_FILES = set(NATIVE_HANDOFF_FILES) | {KNOWLEDGE.filename} | set(DEBUG_EVIDENCE_FILES)
 
 
 @dataclass
@@ -164,6 +172,8 @@ def _is_native_handoff_path(path: str) -> bool:
     # the worktree for plan/codegen to read. It is not a candidate source artifact.
     if rel == KNOWLEDGE.filename:
         return True
+    if rel in DEBUG_EVIDENCE_FILES:
+        return True
     return rel in NATIVE_HANDOFF_FILES
 
 
@@ -229,6 +239,32 @@ def _remove_native_handoff_files(project_dir: Path) -> None:
         (project_dir / name).unlink(missing_ok=True)
 
 
+def _capture_project_files(project_dir: Path, names: set[str]) -> dict[str, str]:
+    captured: dict[str, str] = {}
+    for name in sorted(names):
+        if name not in CURATOR_CONTEXT_FILES:
+            continue
+        p = project_dir / name
+        if p.is_file():
+            captured[name] = p.read_text(encoding="utf-8", errors="replace")
+    return captured
+
+
+def _remove_project_files(project_dir: Path, names: set[str]) -> None:
+    for name in sorted(names):
+        if name not in CURATOR_CONTEXT_FILES:
+            continue
+        (project_dir / name).unlink(missing_ok=True)
+
+
+def _capture_and_remove_non_candidate_files(project_dir: Path) -> dict[str, str]:
+    """Remove memory/debug files from candidate worktree while preserving curator context."""
+    names = {KNOWLEDGE.filename, *DEBUG_EVIDENCE_FILES}
+    captured = _capture_project_files(project_dir, names)
+    _remove_project_files(project_dir, names)
+    return captured
+
+
 def _native_metadata() -> dict[str, Any]:
     return {
         "native_claude_agents": True,
@@ -291,13 +327,43 @@ def _build_curator_prompt(eval_result: Any, has_knowledge: bool) -> str:
     )
 
 
+def _curator_action_node_id(action_node_id: str | None) -> str:
+    base = str(action_node_id or "").strip()
+    return f"{base}__curator" if base else "curator"
+
+
+def _build_curator_telemetry_context(
+    *,
+    task: Any,
+    request: AscendCAgenticCodegenRequest,
+    model_name: str,
+    flow: str,
+) -> TelemetryContext:
+    return TelemetryContext(
+        run_id=request.run_id,
+        task_name=getattr(task, "definition_name", None),
+        definition=getattr(task, "definition_name", None),
+        flow=flow,
+        stage="curator",
+        round_index=request.round_num,
+        attempt_index=request.attempt_idx,
+        action_node_id=_curator_action_node_id(request.action_node_id),
+        model_name=model_name,
+        provider="claude-agent",
+        target_gpu=request.target_gpu,
+        language="ascendc",
+    )
+
+
 def _run_curator_after_eval(
     *,
     editor_client: Any,
     project_dir: Path,
     eval_result: Any,
     store: MemoryStore | None,
+    context_files: dict[str, str] | None = None,
     telemetry_recorder: Any | None = None,
+    telemetry_context: TelemetryContext | None = None,
 ) -> str | None:
     """Run the knowledge-curator after evaluation; return updated KNOWLEDGE.md text.
 
@@ -306,28 +372,39 @@ def _run_curator_after_eval(
     """
     if not _curator_enabled():
         return None
-    has_knowledge = (project_dir / KNOWLEDGE.filename).is_file()
-    prompt = _build_curator_prompt(eval_result, has_knowledge)
-    try:
-        editor_client.edit_project(
-            project_dir=project_dir,
-            prompt=prompt,
-            telemetry_recorder=telemetry_recorder,
-        )
-    except TypeError as exc:
-        if "telemetry_recorder" in str(exc):
-            try:
-                editor_client.edit_project(project_dir=project_dir, prompt=prompt)
-            except Exception:
-                pass
-    except Exception:
-        # Curation is non-critical; swallow and fall back to any file already written.
-        pass
-    text = _read_knowledge(project_dir)
-    # KNOWLEDGE.md is persisted to MemoryStore by the caller (gated). Remove the
-    # worktree copy so it never leaks into candidate diff/snapshot/solution sources.
-    (project_dir / KNOWLEDGE.filename).unlink(missing_ok=True)
-    return text
+    with tempfile.TemporaryDirectory(prefix="ksearch_curator_") as tmp:
+        curator_dir = Path(tmp).resolve()
+        materialize_claude_project_assets(curator_dir)
+        for name, text in sorted((context_files or {}).items()):
+            if name not in CURATOR_CONTEXT_FILES:
+                continue
+            target = curator_dir / name
+            target.write_text(str(text or ""), encoding="utf-8")
+        has_knowledge = (curator_dir / KNOWLEDGE.filename).is_file()
+        prompt = _build_curator_prompt(eval_result, has_knowledge)
+        owned_telemetry_recorder = None
+        if telemetry_recorder is None and telemetry_context is not None:
+            owned_telemetry_recorder = build_file_recorder(context=telemetry_context, prompt=prompt)
+            telemetry_recorder = owned_telemetry_recorder
+        try:
+            editor_client.edit_project(
+                project_dir=curator_dir,
+                prompt=prompt,
+                telemetry_recorder=telemetry_recorder,
+            )
+        except TypeError as exc:
+            if "telemetry_recorder" in str(exc):
+                try:
+                    editor_client.edit_project(project_dir=curator_dir, prompt=prompt)
+                except Exception:
+                    pass
+        except Exception:
+            # Curation is non-critical; swallow and fall back to any file already written.
+            pass
+        finally:
+            if owned_telemetry_recorder is not None:
+                owned_telemetry_recorder.close()
+        return _read_knowledge(curator_dir)
 
 
 def _read_knowledge(project_dir: Path) -> str | None:
@@ -484,6 +561,8 @@ class AscendCAgenticCodegenRunner:
             if store is not None and code_map_text:
                 store.save(CODE_MAP, code_map_text)
             _remove_native_handoff_files(session.project_dir)
+            curator_context = dict(handoff_texts)
+            curator_context.update(_capture_and_remove_non_candidate_files(session.project_dir))
             project_changed_paths = session.project_changed_paths()
             changed_paths = _candidate_changed_paths(project_changed_paths or session.changed_paths())
             if not changed_paths:
@@ -522,6 +601,13 @@ class AscendCAgenticCodegenRunner:
                 project_dir=session.project_dir,
                 eval_result=eval_result,
                 store=store,
+                context_files=curator_context,
+                telemetry_context=_build_curator_telemetry_context(
+                    task=task,
+                    request=request,
+                    model_name=self.model_name,
+                    flow="agentic_codegen",
+                ),
             )
             solution = task.make_solution_from_project_dir(
                 project_dir=session.project_dir,
@@ -689,6 +775,8 @@ class AscendCAgenticCodegenRunner:
             if store is not None and code_map_text:
                 store.save(CODE_MAP, code_map_text)
             _remove_native_handoff_files(wt_session.project_dir)
+            curator_context = dict(handoff_texts)
+            curator_context.update(_capture_and_remove_non_candidate_files(wt_session.project_dir))
 
             project_changed_paths = wt_session.project_changed_paths()
             changed_paths = _candidate_changed_paths(project_changed_paths or wt_session.changed_paths())
@@ -775,6 +863,8 @@ class AscendCAgenticCodegenRunner:
                     store.save(CODE_MAP, produced_code_map)
                 handoff_texts = fix_handoff_texts
                 _remove_native_handoff_files(wt_session.project_dir)
+                curator_context = dict(fix_handoff_texts)
+                curator_context.update(_capture_and_remove_non_candidate_files(wt_session.project_dir))
 
                 # Check for changes after fix
                 project_changed_paths = wt_session.project_changed_paths()
@@ -793,6 +883,13 @@ class AscendCAgenticCodegenRunner:
                 project_dir=wt_session.project_dir,
                 eval_result=eval_result,
                 store=store,
+                context_files=curator_context,
+                telemetry_context=_build_curator_telemetry_context(
+                    task=task,
+                    request=request,
+                    model_name=self.model_name,
+                    flow="agentic_codegen_multi_turn",
+                ),
             )
             solution = task.make_solution_from_project_dir(
                 project_dir=wt_session.project_dir,
@@ -972,6 +1069,8 @@ class AscendCAgenticCodegenRunner:
         if store is not None and code_map_text:
             store.save(CODE_MAP, code_map_text)
         _remove_native_handoff_files(wt_session.project_dir)
+        curator_context = dict(handoff_texts)
+        curator_context.update(_capture_and_remove_non_candidate_files(wt_session.project_dir))
 
         project_changed_paths = wt_session.project_changed_paths()
         changed_paths = _candidate_changed_paths(project_changed_paths or wt_session.changed_paths())
@@ -994,6 +1093,13 @@ class AscendCAgenticCodegenRunner:
             project_dir=wt_session.project_dir,
             eval_result=eval_result,
             store=store,
+            context_files=curator_context,
+            telemetry_context=_build_curator_telemetry_context(
+                task=task,
+                request=request,
+                model_name=self.model_name,
+                flow="agentic_codegen_multi_turn",
+            ),
         )
         solution = task.make_solution_from_project_dir(
             project_dir=wt_session.project_dir,

@@ -26,6 +26,24 @@ def test_materialize_claude_project_assets_writes_agents_and_skills(tmp_path):
     assert (tmp_path / ".claude" / "skills" / "ascendc-api-reference" / "SKILL.md").exists()
 
 
+def test_materialize_claude_project_assets_copies_reference_dirs_not_symlinks(tmp_path):
+    from k_search.kernel_generators.claude_assets import materialize_claude_project_assets
+
+    result = materialize_claude_project_assets(tmp_path)
+
+    assert result.linked_paths == []
+    reference_dirs = [
+        tmp_path / ".claude" / "references" / "ascendc-design",
+        tmp_path / ".claude" / "references" / "attention-patterns",
+        tmp_path / ".claude" / "references" / "curation-format",
+        tmp_path / ".claude" / "skills" / "ascendc-dumptensor" / "references",
+        tmp_path / ".claude" / "skills" / "ascendc-fa-detailed-design" / "references",
+    ]
+    for reference_dir in reference_dirs:
+        assert reference_dir.is_dir()
+        assert not reference_dir.is_symlink()
+
+
 def test_materializer_refuses_to_overwrite_unmanaged_files(tmp_path):
     from k_search.kernel_generators.claude_assets import materialize_claude_project_assets
 
@@ -66,6 +84,7 @@ def test_asset_files_contain_required_handoff_contracts(tmp_path):
     assert "CODE_MAP.md" in code_reader
     assert "IMPLEMENTATION_PLAN.md" in planner
     assert "IMPLEMENTATION_PLAN.md" in codegen
+    assert "IMPLEMENTATION_PLAN.md if present" in reviewer
     assert "REVIEW_NOTES.md" in reviewer
     assert "python evaluation" in bug_fixer.lower()
     assert "tools: Read, Grep, Glob, Edit, Write" in bug_fixer

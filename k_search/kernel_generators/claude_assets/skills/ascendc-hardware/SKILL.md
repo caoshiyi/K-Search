@@ -79,7 +79,7 @@ MIX kernel 中用宏区分代码路径：`ASCEND_IS_AIC` 走矩阵逻辑，`ASCE
 | **L0C Buffer** | **128 KB** | AIC 独享 | 64B | FRACTAL_NZ |
 | **Unified Buffer** | **192 KB** | 每个 AIV 独享 | 32B | 无特殊要求 |
 
---- 
+---
 
 ## 4. 搬运通路
 

@@ -12,6 +12,10 @@ from typing import Any, Literal
 SNAPSHOT_SKIP_DIRS = {
     ".git",
     ".ksearch",
+    ".claude",
+    "CODE_MAP.md",
+    "IMPLEMENTATION_PLAN.md",
+    "REVIEW_NOTES.md",
     "__pycache__",
     "build",
     "cmake-build-debug",

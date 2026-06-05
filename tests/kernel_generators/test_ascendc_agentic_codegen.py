@@ -19,11 +19,18 @@ def _py_cmd(code: str) -> str:
     return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
 
 
+def _write_native_handoffs(root: Path, code_map: str = "# CODE_MAP\nkernel/foo.h\n") -> None:
+    (root / "CODE_MAP.md").write_text(code_map, encoding="utf-8")
+    (root / "IMPLEMENTATION_PLAN.md").write_text(
+        "# IMPLEMENTATION_PLAN\nApply the requested focused source edit.\n",
+        encoding="utf-8",
+    )
+    (root / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
+
+
 @pytest.fixture(autouse=True)
 def _code_map_disabled_by_default(monkeypatch):
-    # Keep agentic runner tests hermetic and fast: with code_map enabled the runner
-    # would fire a real CodeReaderAgent SDK call on the first round. Tests that
-    # exercise code_map opt back in with monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1").
+    # Keep memory-store tests hermetic unless they explicitly opt into persisted code_map behavior.
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
 
 
@@ -35,6 +42,7 @@ class EditingClient:
     def edit_project(self, *, project_dir, prompt):
         root = Path(project_dir)
         self.calls.append((root, prompt))
+        _write_native_handoffs(root)
         target = root / "kernel" / "foo.h"
         target.write_text(self.new_text, encoding="utf-8")
         return ClaudeProjectEditResult(
@@ -72,6 +80,7 @@ class NativeEditingClient:
             "reviewer": (root / ".claude" / "agents" / "reviewer.md").exists(),
             "bug_fixer": (root / ".claude" / "agents" / "bug-fixer.md").exists(),
             "ascendc_codegen_skill": (root / ".claude" / "skills" / "ascendc-codegen" / "SKILL.md").exists(),
+            "ascendc_api_reference_skill": (root / ".claude" / "skills" / "ascendc-api-reference" / "SKILL.md").exists(),
         }
         if self.write_code_map:
             (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h is the kernel file\n", encoding="utf-8")
@@ -94,6 +103,7 @@ class NativeEditingClient:
 
 class NoChangeClient:
     def edit_project(self, *, project_dir, prompt):
+        _write_native_handoffs(Path(project_dir), code_map="# CODE_MAP\nkernel.cpp\n")
         return ClaudeProjectEditResult(
             text="no changes",
             transcript="no changes",
@@ -290,6 +300,7 @@ def test_runner_overlays_base_solution_before_editing(tmp_path, monkeypatch):
             self.project_dirs.append(root)
             pre_overlay = (root / "kernel" / "foo.h").read_text(encoding="utf-8")
             assert pre_overlay == "overlaid_base\n"
+            _write_native_handoffs(root)
             (root / "kernel" / "foo.h").write_text("overlaid_base\nBETA\n", encoding="utf-8")
             return ClaudeProjectEditResult(
                 text="edited",
@@ -332,6 +343,7 @@ def test_runner_creates_attempt_telemetry_files(tmp_path, monkeypatch):
     class TelemetryAwareClient:
         def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
             root = Path(project_dir)
+            _write_native_handoffs(root)
             (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
             if telemetry_recorder is not None:
                 from k_search.telemetry.events import TelemetryEvent
@@ -402,7 +414,9 @@ def test_runner_disables_telemetry_with_env(tmp_path, monkeypatch):
 
     class Client:
         def edit_project(self, *, project_dir, prompt):
-            Path(project_dir, "kernel", "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+            root = Path(project_dir)
+            _write_native_handoffs(root)
+            (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
             return ClaudeProjectEditResult(
                 text="edited",
                 transcript="edited",
@@ -526,6 +540,7 @@ def test_prompt_builder_requires_file_handoff_and_short_subagent_summaries():
 
 def test_runner_generates_and_persists_code_map_on_first_round(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "test-native-map")
     task_dir = tmp_path / "task"
     (task_dir / "kernel").mkdir(parents=True)
     (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
@@ -538,12 +553,9 @@ def test_runner_generates_and_persists_code_map_on_first_round(tmp_path, monkeyp
         def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
             self.prompts.append(prompt)
             root = Path(project_dir)
-            if "CODE_MAP.md using EXACTLY" in prompt:
-                (root / "CODE_MAP.md").write_text("# CODE_MAP\nfoo.h is the kernel\n", encoding="utf-8")
-                text = "wrote CODE_MAP.md"
-            else:
-                (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
-                text = "edited"
+            _write_native_handoffs(root, code_map="# CODE_MAP\nfoo.h is the kernel\n")
+            (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+            text = "native subagents completed"
             return ClaudeProjectEditResult(
                 text=text, transcript=text, prompt=prompt,
                 prompt_chars=len(prompt), prompt_lines=prompt.count("\n") + 1,
@@ -562,8 +574,8 @@ def test_runner_generates_and_persists_code_map_on_first_round(tmp_path, monkeyp
         base_solution=None,
     )
 
-    assert any("CODE_MAP.md using EXACTLY" in p for p in client.prompts)
-    assert any("Read it first instead of grepping" in p for p in client.prompts)
+    assert len(client.prompts) == 1
+    assert "Use the code-reader subagent to create CODE_MAP.md" in client.prompts[0]
     from k_search.kernel_generators.memory import CODE_MAP, MemoryStore
     store = MemoryStore.for_task(task)
     assert store.load(CODE_MAP) is not None
@@ -574,6 +586,7 @@ def test_runner_generates_and_persists_code_map_on_first_round(tmp_path, monkeyp
 
 def test_runner_reuses_existing_code_map_without_reader(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "test-preseeded-map")
     task_dir = tmp_path / "task"
     (task_dir / "kernel").mkdir(parents=True)
     (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
@@ -587,9 +600,9 @@ def test_runner_reuses_existing_code_map_without_reader(tmp_path, monkeypatch):
 
         def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
             self.prompts.append(prompt)
-            assert "CODE_MAP.md using EXACTLY" not in prompt
             root = Path(project_dir)
             assert (root / "CODE_MAP.md").read_text(encoding="utf-8") == "# CODE_MAP\npreseeded\n"
+            _write_native_handoffs(root, code_map="# CODE_MAP\npreseeded\n")
             (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
             return ClaudeProjectEditResult(
                 text="edited", transcript="edited", prompt=prompt,
@@ -609,11 +622,12 @@ def test_runner_reuses_existing_code_map_without_reader(tmp_path, monkeypatch):
         base_solution=None,
     )
     assert len(client.prompts) == 1
-    assert "Read it first instead of grepping" in client.prompts[0]
+    assert "CODE_MAP.md already exists: yes" in client.prompts[0]
+    assert "Read it first" in client.prompts[0]
     assert "CODE_MAP.md" not in result.changed_paths
 
 
-def test_runner_code_map_disabled_keeps_legacy_behavior(tmp_path, monkeypatch):
+def test_runner_code_map_disabled_skips_memory_persistence_only(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
     task_dir = tmp_path / "task"
     (task_dir / "kernel").mkdir(parents=True)
@@ -629,9 +643,9 @@ def test_runner_code_map_disabled_keeps_legacy_behavior(tmp_path, monkeypatch):
         ),
         base_solution=None,
     )
-    assert "First inspect the project" in client.calls[0][1]
-    assert "CODE_MAP.md" not in client.calls[0][1]
-    assert result.code_map_text is None
+    assert "CODE_MAP.md already exists: no" in client.calls[0][1]
+    assert "Use the code-reader subagent to create CODE_MAP.md" in client.calls[0][1]
+    assert result.code_map_text is not None
 
 
 def test_runner_code_map_not_in_diff(tmp_path, monkeypatch):
@@ -644,12 +658,9 @@ def test_runner_code_map_not_in_diff(tmp_path, monkeypatch):
     class C:
         def edit_project(self, *, project_dir, prompt, telemetry_recorder=None):
             root = Path(project_dir)
-            if "CODE_MAP.md using EXACTLY" in prompt:
-                (root / "CODE_MAP.md").write_text("# CODE_MAP\nmapped\n", encoding="utf-8")
-                t = "wrote map"
-            else:
-                (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
-                t = "edited"
+            _write_native_handoffs(root, code_map="# CODE_MAP\nmapped\n")
+            (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+            t = "edited"
             return ClaudeProjectEditResult(
                 text=t, transcript=t, prompt=prompt,
                 prompt_chars=len(prompt), prompt_lines=prompt.count("\n") + 1,

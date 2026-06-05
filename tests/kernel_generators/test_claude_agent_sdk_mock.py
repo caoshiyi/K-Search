@@ -88,13 +88,19 @@ def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
 
     def first_edit(prompt, options, call_index):
         project_dir = Path(options.kwargs["cwd"])
+        (project_dir / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
+        (project_dir / "IMPLEMENTATION_PLAN.md").write_text("# IMPLEMENTATION_PLAN\nInitial safe edit.\n", encoding="utf-8")
+        (project_dir / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
         (project_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n// initial agent edit\n", encoding="utf-8")
-        return "kept initial project"
+        return "status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md\nnext: python_eval"
 
     def second_edit(prompt, options, call_index):
         project_dir = Path(options.kwargs["cwd"])
+        (project_dir / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
+        (project_dir / "IMPLEMENTATION_PLAN.md").write_text("# IMPLEMENTATION_PLAN\nChange beta to BETA.\n", encoding="utf-8")
+        (project_dir / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
         (project_dir / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
-        return "edited kernel/foo.h"
+        return "status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md\nnext: python_eval"
 
     sdk = install_mock_claude_agent_sdk(
         monkeypatch,
@@ -135,6 +141,9 @@ def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
     assert "<ascendc_project>" not in sdk.client_calls[0].prompt
     assert "<ascendc_project>" not in sdk.client_calls[1].prompt
     assert sdk.client_calls[0].options.kwargs["cwd"]
+    assert sdk.client_calls[0].options.kwargs["setting_sources"] == ["project"]
+    assert "Skill" in sdk.client_calls[0].options.kwargs["allowed_tools"]
+    assert "Agent" in sdk.client_calls[0].options.kwargs["allowed_tools"]
 
 
 def test_claude_project_editor_writes_tool_timeline_and_cost(monkeypatch, tmp_path):

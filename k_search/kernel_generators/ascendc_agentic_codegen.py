@@ -8,6 +8,7 @@ from typing import Any, Literal
 from k_search.kernel_generators.agentic_candidate_artifacts import write_agentic_candidate_artifacts
 from k_search.kernel_generators.agentic_worktree import create_agentic_worktree
 from k_search.kernel_generators.candidate_patch import CandidatePatch
+from k_search.kernel_generators.claude_assets import NATIVE_HANDOFF_FILES, materialize_claude_project_assets
 from k_search.kernel_generators.memory import CODE_MAP, MemoryStore
 from k_search.kernel_generators.claude_agent_project_editor import (
     ClaudeAgentProjectEditorClient,
@@ -137,6 +138,56 @@ def _edit_project_with_optional_telemetry(
         return editor_client.edit_project(project_dir=project_dir, prompt=prompt)
 
 
+def _is_native_handoff_path(path: str) -> bool:
+    rel = str(path or "").replace("\\", "/").strip()
+    if not rel:
+        return True
+    if rel.startswith(".claude/"):
+        return True
+    return rel in NATIVE_HANDOFF_FILES
+
+
+def _candidate_changed_paths(paths: list[str]) -> list[str]:
+    return [path for path in paths if not _is_native_handoff_path(path)]
+
+
+def _require_native_handoff_files(project_dir: Path) -> None:
+    missing = [name for name in sorted(NATIVE_HANDOFF_FILES) if not (project_dir / name).is_file()]
+    if missing:
+        raise RuntimeError(f"Claude native subagent flow did not produce required handoff file(s): {', '.join(missing)}")
+
+
+def _read_native_code_map(project_dir: Path) -> str | None:
+    path = project_dir / CODE_MAP.filename
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return text if text.strip() else None
+
+
+def _remove_native_handoff_files(project_dir: Path) -> None:
+    for name in NATIVE_HANDOFF_FILES:
+        (project_dir / name).unlink(missing_ok=True)
+
+
+def _native_metadata() -> dict[str, Any]:
+    return {
+        "native_claude_agents": True,
+        "native_handoff_files": sorted(NATIVE_HANDOFF_FILES),
+    }
+
+
+def _materialize_native_assets_baseline(wt_session: Any) -> None:
+    materialize_claude_project_assets(wt_session.project_dir)
+    wt_session.commit_all("ksearch native claude assets baseline")
+
+
+def _materialize_existing_code_map(store: MemoryStore | None, project_dir: Path) -> bool:
+    if store is None:
+        return False
+    return store.materialize(CODE_MAP, project_dir)
+
+
 class AscendCAgenticPromptBuilder:
     def __init__(self, *, max_chars: int | None = None) -> None:
         if max_chars is None:
@@ -225,6 +276,7 @@ class AscendCAgenticCodegenRunner:
             if callable(overlay):
                 overlay(project_dir=session.project_dir, solution=base_solution)
                 session.commit_all("ksearch agentic overlay baseline")
+            _materialize_native_assets_baseline(session)
 
             code_map_enabled = os.getenv("KSEARCH_ENABLE_CODE_MAP", "1").strip().lower() not in {
                 "0",
@@ -233,37 +285,13 @@ class AscendCAgenticCodegenRunner:
                 "off",
             }
             store = MemoryStore.for_task(task) if code_map_enabled else None
-            has_code_map = False
-            if store is not None:
-                from k_search.kernel_generators.agents import CodeReaderAgent
+            has_code_map = _materialize_existing_code_map(store, session.project_dir)
 
-                if store.load(CODE_MAP) is None:
-                    try:
-                        reader = CodeReaderAgent(
-                            model_name=self.model_name, editor_client=self.reader_editor_client
-                        )
-                        reader.run(
-                            project_dir=session.project_dir,
-                            context={"definition_text": request.definition_text, "task_path": str(getattr(task, "task_path", "") or "")},
-                        )
-                        produced = store.read_from_worktree(CODE_MAP, session.project_dir)
-                        if produced:
-                            store.save(CODE_MAP, produced)
-                    except Exception as exc:  # noqa: BLE001 - code map is best-effort
-                        import warnings
-
-                        warnings.warn(f"code_map reader failed, continuing without it: {exc}")
-                has_code_map = store.materialize(CODE_MAP, session.project_dir)
-
-            from k_search.kernel_generators.agents import CodegenAgent  # lazy import: avoid module-top cycle
-
-            codegen = CodegenAgent(
-                model_name=self.model_name,
-                editor_client=self.editor_client,
-                prompt_builder=self.prompt_builder,
+            prompt = self.prompt_builder.build(
+                request,
+                has_code_map=has_code_map,
+                task_path=str(getattr(task, "task_path", "") or ""),
             )
-            codegen_context = {"request": request, "has_code_map": has_code_map, "task_path": str(getattr(task, "task_path", "") or "")}
-            prompt = codegen.build_prompt(codegen_context)
             # Replace absolute task-path references so the LLM only sees <PROJECT_ROOT>.
             task_path = getattr(task, "task_path", None)
             if task_path is not None:
@@ -282,20 +310,21 @@ class AscendCAgenticCodegenRunner:
             )
             telemetry_recorder = build_file_recorder(context=telemetry_context, prompt=prompt)
             try:
-                agent_result = codegen.run(
+                edit_result = _edit_project_with_optional_telemetry(
+                    self.editor_client,
                     project_dir=session.project_dir,
-                    context=codegen_context,
+                    prompt=prompt,
                     telemetry_recorder=telemetry_recorder,
                 )
-                edit_result = agent_result.edit_result
             finally:
                 telemetry_recorder.close()
-            code_map_text = store.read_from_worktree(CODE_MAP, session.project_dir) if store is not None else None
-            if store is not None:
-                (session.project_dir / CODE_MAP.filename).unlink(missing_ok=True)
+            _require_native_handoff_files(session.project_dir)
+            code_map_text = _read_native_code_map(session.project_dir)
+            if store is not None and code_map_text:
+                store.save(CODE_MAP, code_map_text)
+            _remove_native_handoff_files(session.project_dir)
             project_changed_paths = session.project_changed_paths()
-            changed_paths = project_changed_paths or session.changed_paths()
-            changed_paths = [p for p in changed_paths if p != CODE_MAP.filename]
+            changed_paths = _candidate_changed_paths(project_changed_paths or session.changed_paths())
             if not changed_paths:
                 # The LLM may have written edits to absolute paths outside the
                 # worktree (e.g. the original task directory).  Sync those
@@ -314,8 +343,7 @@ class AscendCAgenticCodegenRunner:
                         logging.getLogger(__name__).warning("mirror sync failed: %s", exc)
                     session.commit_all("ksearch sync external edits")
                     project_changed_paths = session.project_changed_paths()
-                    changed_paths = project_changed_paths or session.changed_paths()
-                    changed_paths = [p for p in changed_paths if p != CODE_MAP.filename]
+                    changed_paths = _candidate_changed_paths(project_changed_paths or session.changed_paths())
             if not changed_paths:
                 raise RuntimeError(
                     "Claude agentic AscendC codegen did not change any files "
@@ -377,6 +405,7 @@ class AscendCAgenticCodegenRunner:
                     "mode": request.mode,
                     "project_path": str(session.project_dir),
                     "evaluator_mutated_project": evaluator_mutated_project,
+                    **_native_metadata(),
                 },
             )
             return AscendCAgenticCodegenResult(
@@ -433,31 +462,13 @@ class AscendCAgenticCodegenRunner:
             if callable(overlay):
                 overlay(project_dir=wt_session.project_dir, solution=base_solution)
                 wt_session.commit_all("ksearch agentic overlay baseline")
+            _materialize_native_assets_baseline(wt_session)
 
             code_map_enabled = os.getenv("KSEARCH_ENABLE_CODE_MAP", "1").strip().lower() not in {
                 "0", "false", "no", "off",
             }
             store = MemoryStore.for_task(task) if code_map_enabled else None
-            has_code_map = False
-            if store is not None:
-                from k_search.kernel_generators.agents import CodeReaderAgent
-
-                if store.load(CODE_MAP) is None:
-                    try:
-                        reader = CodeReaderAgent(
-                            model_name=self.model_name, editor_client=self.reader_editor_client
-                        )
-                        reader.run(
-                            project_dir=wt_session.project_dir,
-                            context={"definition_text": request.definition_text},
-                        )
-                        produced = store.read_from_worktree(CODE_MAP, wt_session.project_dir)
-                        if produced:
-                            store.save(CODE_MAP, produced)
-                    except Exception as exc:  # noqa: BLE001
-                        import warnings
-                        warnings.warn(f"code_map reader failed, continuing without it: {exc}")
-                has_code_map = store.materialize(CODE_MAP, wt_session.project_dir)
+            has_code_map = _materialize_existing_code_map(store, wt_session.project_dir)
 
             # Open a multi-turn SDK session
             editor_session = self.editor_client.open_session(
@@ -465,7 +476,11 @@ class AscendCAgenticCodegenRunner:
             )
 
             # Attempt 1: send full prompt
-            prompt = self.prompt_builder.build(request, has_code_map=has_code_map)
+            prompt = self.prompt_builder.build(
+                request,
+                has_code_map=has_code_map,
+                task_path=str(getattr(task, "task_path", "") or ""),
+            )
             prompt = sanitize_worktree_paths(prompt)
             # Replace absolute task-path references so the LLM only sees <PROJECT_ROOT>.
             task_path = getattr(task, "task_path", None)
@@ -492,13 +507,14 @@ class AscendCAgenticCodegenRunner:
             finally:
                 telemetry_recorder.close()
 
-            code_map_text = store.read_from_worktree(CODE_MAP, wt_session.project_dir) if store is not None else None
-            if store is not None:
-                (wt_session.project_dir / CODE_MAP.filename).unlink(missing_ok=True)
+            _require_native_handoff_files(wt_session.project_dir)
+            code_map_text = _read_native_code_map(wt_session.project_dir)
+            if store is not None and code_map_text:
+                store.save(CODE_MAP, code_map_text)
+            _remove_native_handoff_files(wt_session.project_dir)
 
             project_changed_paths = wt_session.project_changed_paths()
-            changed_paths = project_changed_paths or wt_session.changed_paths()
-            changed_paths = [p for p in changed_paths if p != CODE_MAP.filename]
+            changed_paths = _candidate_changed_paths(project_changed_paths or wt_session.changed_paths())
             if not changed_paths:
                 # The LLM may have written edits to absolute paths outside the
                 # worktree (e.g. the original task directory).  Sync those
@@ -517,8 +533,7 @@ class AscendCAgenticCodegenRunner:
                         logging.getLogger(__name__).warning("mirror sync failed: %s", exc)
                     wt_session.commit_all("ksearch sync external edits")
                     project_changed_paths = wt_session.project_changed_paths()
-                    changed_paths = project_changed_paths or wt_session.changed_paths()
-                    changed_paths = [p for p in changed_paths if p != CODE_MAP.filename]
+                    changed_paths = _candidate_changed_paths(project_changed_paths or wt_session.changed_paths())
             if not changed_paths:
                 raise RuntimeError(
                     "Claude agentic AscendC codegen did not change any files "
@@ -543,6 +558,7 @@ class AscendCAgenticCodegenRunner:
                     wt_session.commit_all(f"ksearch eval mutations (fix round {fix_round})")
                     diff_text = wt_session.project_diff_text()
 
+                _materialize_existing_code_map(store, wt_session.project_dir)
                 fix_prompt = _build_fix_prompt(eval_result, fix_round)
                 fix_prompt = sanitize_worktree_paths(fix_prompt)
 
@@ -567,11 +583,15 @@ class AscendCAgenticCodegenRunner:
                     )
                 finally:
                     fix_telemetry_recorder.close()
+                produced_code_map = _read_native_code_map(wt_session.project_dir)
+                if store is not None and produced_code_map:
+                    code_map_text = produced_code_map
+                    store.save(CODE_MAP, produced_code_map)
+                _remove_native_handoff_files(wt_session.project_dir)
 
                 # Check for changes after fix
                 project_changed_paths = wt_session.project_changed_paths()
-                changed_paths = project_changed_paths or wt_session.changed_paths()
-                changed_paths = [p for p in changed_paths if p != CODE_MAP.filename]
+                changed_paths = _candidate_changed_paths(project_changed_paths or wt_session.changed_paths())
                 if not changed_paths:
                     break  # LLM didn't change anything, stop trying
 
@@ -630,6 +650,7 @@ class AscendCAgenticCodegenRunner:
                     "mode": request.mode,
                     "project_path": str(wt_session.project_dir),
                     "evaluator_mutated_project": evaluator_mutated_project,
+                    **_native_metadata(),
                 },
             )
             return AscendCAgenticCodegenResult(
@@ -688,6 +709,11 @@ class AscendCAgenticCodegenRunner:
         The editor_session and wt_session must come from a previous run_multi_turn()
         or continue_fix() call.
         """
+        code_map_enabled = os.getenv("KSEARCH_ENABLE_CODE_MAP", "1").strip().lower() not in {
+            "0", "false", "no", "off",
+        }
+        store = MemoryStore.for_task(task) if code_map_enabled else None
+        _materialize_existing_code_map(store, wt_session.project_dir)
         fix_prompt = sanitize_worktree_paths(fix_prompt)
 
         telemetry_context = TelemetryContext(
@@ -711,8 +737,13 @@ class AscendCAgenticCodegenRunner:
         finally:
             telemetry_recorder.close()
 
+        code_map_text = _read_native_code_map(wt_session.project_dir)
+        if store is not None and code_map_text:
+            store.save(CODE_MAP, code_map_text)
+        _remove_native_handoff_files(wt_session.project_dir)
+
         project_changed_paths = wt_session.project_changed_paths()
-        changed_paths = project_changed_paths or wt_session.changed_paths()
+        changed_paths = _candidate_changed_paths(project_changed_paths or wt_session.changed_paths())
         if not changed_paths:
             raise RuntimeError(
                 "Claude agentic fix did not change any files "
@@ -773,6 +804,7 @@ class AscendCAgenticCodegenRunner:
                 "mode": request.mode,
                 "project_path": str(wt_session.project_dir),
                 "evaluator_mutated_project": evaluator_mutated_project,
+                **_native_metadata(),
             },
         )
         return AscendCAgenticCodegenResult(
@@ -800,7 +832,7 @@ class AscendCAgenticCodegenRunner:
             model_usage=edit_result.model_usage,
             num_turns=edit_result.num_turns,
             duration_ms=edit_result.duration_ms,
-            code_map_text=None,
+            code_map_text=code_map_text,
             editor_session=editor_session,
             worktree_session=wt_session,
         )

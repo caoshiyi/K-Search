@@ -141,6 +141,47 @@ def _build_fix_prompt(eval_result: EvalResult, fix_round: int, max_chars: int = 
         )
 
 
+def _wrap_repair_prompt(fix_prompt: str) -> str:
+    fix_text = sanitize_worktree_paths(str(fix_prompt or "").strip())
+    header = (
+        "This is an eval_failure_repair attempt. Follow the configured repair flow exactly.\n"
+        "If the active stage is bug-fixer, invoke the bug-fixer subagent exactly once.\n"
+        "Do not perform bug fixing in the parent agent context."
+    )
+    if fix_text.startswith("This is an eval_failure_repair attempt."):
+        return fix_text
+    return f"{header}\n\n{fix_text}".strip()
+
+
+def _build_repair_prompt(eval_result: EvalResult, fix_round: int, max_chars: int = 6000) -> str:
+    return _wrap_repair_prompt(_build_fix_prompt(eval_result, fix_round=fix_round, max_chars=max_chars))
+
+
+def _render_flow_policy(*, initial_flow: SubagentFlowConfig, repair_flow: SubagentFlowConfig) -> str:
+    def names(flow: SubagentFlowConfig) -> str:
+        return ", ".join(stage.agent for stage in flow.stages)
+
+    initial_agents = {stage.agent for stage in initial_flow.stages}
+    repair_agents = {stage.agent for stage in repair_flow.stages}
+    lines = [
+        "Subagent usage policy:",
+        f"- Flow names: initial_codegen={initial_flow.name}; eval_failure_repair={repair_flow.name}.",
+        f"- Initial codegen flow agents: {names(initial_flow)}.",
+        f"- Eval-failure repair flow agents: {names(repair_flow)}.",
+    ]
+    if "bug-fixer" not in initial_agents:
+        lines.append("- Do not invoke bug-fixer during initial_codegen.")
+    if "bug-fixer" in repair_agents:
+        lines.append("- Invoke bug-fixer during eval_failure_repair when the active repair stage requests it.")
+    lines.extend(
+        [
+            "- Invoke exactly the subagent requested by the active stage.",
+            "- Do not invoke subagents outside the active stage's configured flow.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
 def _edit_project_with_optional_telemetry(
     editor_client: Any,
     *,
@@ -563,7 +604,14 @@ class AscendCAgenticPromptBuilder:
             max_chars = int(raw) if raw.isdigit() and int(raw) > 0 else 20_000
         self.max_chars = int(max_chars)
 
-    def build(self, request: AscendCAgenticCodegenRequest, *, has_code_map: bool = False, task_path: str | None = None) -> str:
+    def build(
+        self,
+        request: AscendCAgenticCodegenRequest,
+        *,
+        has_code_map: bool = False,
+        task_path: str | None = None,
+        flow_policy_text: str | None = None,
+    ) -> str:
         sections = {
             "definition": _truncate(request.definition_text, 5000),
             "action": _truncate(request.action_text, 3000),
@@ -577,6 +625,18 @@ class AscendCAgenticPromptBuilder:
             if has_code_map
             else "CODE_MAP.md already exists: no. Use the code-reader subagent to create CODE_MAP.md before planning.\n"
         )
+        flow_policy = str(flow_policy_text or "").strip()
+        if not flow_policy:
+            flow_policy = (
+                "Subagent usage policy:\n"
+                "- Flow names: initial_codegen=initial_codegen; eval_failure_repair=eval_failure_repair.\n"
+                "- Initial codegen flow agents: code-reader, plan, codegen, reviewer.\n"
+                "- Eval-failure repair flow agents: bug-fixer, reviewer.\n"
+                "- Do not invoke bug-fixer during initial_codegen.\n"
+                "- Invoke bug-fixer during eval_failure_repair when the active repair stage requests it.\n"
+                "- Invoke exactly the subagent requested by the active stage.\n"
+                "- Do not invoke subagents outside the active stage's configured flow."
+            )
         prompt = (
             "You are the main K-Search AscendC orchestration agent working inside a candidate project directory.\n"
             "IMPORTANT: You must ONLY edit files inside the current project directory (CWD). Do NOT use absolute paths from external directories.\n"
@@ -588,7 +648,7 @@ class AscendCAgenticPromptBuilder:
             "Available tools: Read/Grep/Glob/Edit/Write, Skill, and Agent. Bash is disabled.\n"
             "Use the ascendc-codegen and ascendc-api-reference skills when relevant.\n"
             "Required native subagent flow: code-reader -> plan -> codegen -> reviewer.\n"
-            "The bug-fixer subagent is reserved for future eval-failure repair and must not be invoked in this release.\n"
+            f"{flow_policy}\n"
             + code_map_instruction
             + "The plan subagent must write IMPLEMENTATION_PLAN.md.\n"
             "The reviewer subagent must write REVIEW_NOTES.md.\n"
@@ -750,10 +810,15 @@ class AscendCAgenticCycle:
         )
 
     def _build_prompt(self, request: AscendCAgenticCodegenRequest, *, has_code_map: bool) -> str:
+        flow_policy_text = _render_flow_policy(
+            initial_flow=self.runner.subagent_flow,
+            repair_flow=self.runner.repair_subagent_flow,
+        )
         prompt = self.runner.prompt_builder.build(
             request,
             has_code_map=has_code_map,
             task_path=self._task_path_text(),
+            flow_policy_text=flow_policy_text,
         )
         return self._sanitize_prompt(prompt)
 
@@ -826,7 +891,7 @@ class AscendCAgenticCycle:
         ):
             _materialize_existing_knowledge(self.store, self.wt_session.project_dir)
 
-        fix_prompt = sanitize_worktree_paths(fix_prompt)
+        fix_prompt = _wrap_repair_prompt(fix_prompt)
         action_with_fix_context = (
             f"{self.request.action_text}\n\nFix context from previous evaluation:\n{fix_prompt}"
         ).strip()
@@ -864,7 +929,7 @@ class AscendCAgenticCycle:
         for fix_round in range(1, max(0, int(max_fix_rounds or 0)) + 1):
             if result.eval_result.is_passed():
                 break
-            result = self.continue_fix(_build_fix_prompt(result.eval_result, fix_round))
+            result = self.continue_fix(_build_repair_prompt(result.eval_result, fix_round))
         return result
 
     def _run_eval(self) -> tuple[EvalResult, str | None]:

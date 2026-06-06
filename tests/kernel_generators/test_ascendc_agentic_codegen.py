@@ -168,7 +168,9 @@ def test_prompt_builder_omits_full_project_container_and_includes_action():
     assert "IMPLEMENTATION_PLAN.md" in prompt
     assert "REVIEW_NOTES.md" in prompt
     assert "bug-fixer" in prompt
-    assert "must not be invoked" in prompt
+    assert "must not be invoked" not in prompt
+    assert "Do not invoke bug-fixer during initial_codegen." in prompt
+    assert "Invoke bug-fixer during eval_failure_repair" in prompt
 
 
 def test_prompt_builder_raises_section_aware_error_when_budget_exceeded():

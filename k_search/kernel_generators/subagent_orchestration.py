@@ -194,6 +194,15 @@ def render_subagent_stage_prompt(
     return "\n".join(part for part in parts if part is not None).strip()
 
 
+def _validate_stage_agent_is_in_flow(flow: SubagentFlowConfig, stage: SubagentStageConfig) -> None:
+    allowed = {item.agent for item in flow.stages}
+    if stage.agent not in allowed:
+        raise RuntimeError(
+            f"stage agent {stage.agent!r} is not declared in flow {flow.name!r}; "
+            f"allowed={sorted(allowed)}"
+        )
+
+
 def run_configured_subagent_flow(
     *,
     editor_client: Any,
@@ -216,6 +225,7 @@ def run_configured_subagent_flow(
     transcript = ""
     try:
         for index, stage in enumerate(active_stages, start=1):
+            _validate_stage_agent_is_in_flow(flow, stage)
             prompt = render_subagent_stage_prompt(
                 flow=flow,
                 stage=stage,

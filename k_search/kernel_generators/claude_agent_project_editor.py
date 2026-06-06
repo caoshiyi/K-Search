@@ -45,6 +45,20 @@ DEFAULT_PROJECT_EDITOR_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write"]
 DEFAULT_CLAUDE_NATIVE_TOOLS = ["Skill", *NATIVE_AGENT_TOOL_NAMES]
 DEFAULT_NATIVE_AGENT_NAMES = [Path(name).stem for name in NATIVE_AGENT_FILES]
 AGENT_TOOL_NAMES = {"Agent", "Task"}
+AGENT_NAME_KEYS = (
+    "subagent_type",
+    "agent",
+    "name",
+    "subagent",
+    "agent_name",
+    "type",
+)
+SKILL_NAME_KEYS = (
+    "skill",
+    "skill_name",
+    "name",
+    "skill_id",
+)
 PATH_KEYS_BY_TOOL = {
     "Read": ("file_path",),
     "Write": ("file_path",),
@@ -99,7 +113,7 @@ def _canonical_permission_tool_names(tools: list[str]) -> list[str]:
     return _dedupe_tools(out)
 
 
-def _normalize_agent_name(value: object) -> str | None:
+def _normalize_tool_value(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     s = value.strip()
@@ -107,8 +121,12 @@ def _normalize_agent_name(value: object) -> str | None:
         return None
     if s.startswith("@agent-"):
         s = s[len("@agent-") :]
+    if s.startswith("@skill-"):
+        s = s[len("@skill-") :]
     if s.endswith(" (agent)"):
         s = s[: -len(" (agent)")]
+    if s.endswith(" (skill)"):
+        s = s[: -len(" (skill)")]
     return s.strip() or None
 
 
@@ -116,14 +134,14 @@ def _tool_input_value(input_data: Any, *keys: str) -> str | None:
     if not isinstance(input_data, dict):
         return None
     for key in keys:
-        value = _normalize_agent_name(input_data.get(key))
+        value = _normalize_tool_value(input_data.get(key))
         if value:
             return value
     for nested_key in ("input", "arguments", "params"):
         nested = input_data.get(nested_key)
         if isinstance(nested, dict):
             for key in keys:
-                value = _normalize_agent_name(nested.get(key))
+                value = _normalize_tool_value(nested.get(key))
                 if value:
                     return value
     return None
@@ -182,6 +200,15 @@ def _permission_deny(message: str, *, interrupt: bool = True) -> Any:
         return {"behavior": "deny", "message": message, "interrupt": interrupt}
 
 
+def _allow_unknown_agent_tool_input() -> bool:
+    return os.getenv("KSEARCH_ALLOW_UNKNOWN_AGENT_TOOL_INPUT", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _make_project_tool_permission_callback(
     *,
     project_root: Path,
@@ -198,7 +225,7 @@ def _make_project_tool_permission_callback(
                 f"K-Search denied unavailable Claude SDK tool: {tool_name or '<empty>'}",
                 interrupt=True,
             )
-        updated_input = dict(input_data or {})
+        updated_input = dict(input_data) if isinstance(input_data, dict) else {}
         for key in PATH_KEYS_BY_TOOL.get(tool_name, ()):
             raw = updated_input.get(key)
             if tool_name in {"Grep", "Glob"} and not raw:
@@ -214,21 +241,46 @@ def _make_project_tool_permission_callback(
                     )
                 updated_input[key] = str(safe_path.relative_to(root))
         if tool_name in AGENT_TOOL_NAMES:
-            subagent = _tool_input_value(
-                updated_input,
-                "subagent_type",
-                "agent",
-                "name",
-                "subagent",
-                "agent_name",
-                "type",
-            )
-            if subagent is not None and not _agent_name_allowed(subagent, allowed_agents):
-                return _permission_deny(f"K-Search denied unavailable native subagent: {subagent}", interrupt=True)
+            subagent = _tool_input_value(updated_input, *AGENT_NAME_KEYS)
+            if subagent is None:
+                if _allow_unknown_agent_tool_input():
+                    logger.warning(
+                        "allowing %s call with missing subagent name due to "
+                        "KSEARCH_ALLOW_UNKNOWN_AGENT_TOOL_INPUT=1",
+                        tool_name,
+                    )
+                else:
+                    return _permission_deny(
+                        f"K-Search denied {tool_name} call with missing subagent name. "
+                        f"Expected one of: {sorted(allowed_agents)}",
+                        interrupt=True,
+                    )
+            elif not _agent_name_allowed(subagent, allowed_agents):
+                return _permission_deny(
+                    f"K-Search denied unavailable native subagent: {subagent}. "
+                    f"Allowed: {sorted(allowed_agents)}",
+                    interrupt=True,
+                )
         if tool_name == "Skill":
-            skill = _tool_input_value(updated_input, "skill", "skill_name", "name", "skill_id")
-            if skill is not None and skill not in allowed_skills:
-                return _permission_deny(f"K-Search denied unavailable native skill: {skill}", interrupt=True)
+            skill = _tool_input_value(updated_input, *SKILL_NAME_KEYS)
+            if skill is None:
+                if _allow_unknown_agent_tool_input():
+                    logger.warning(
+                        "allowing Skill call with missing skill name due to "
+                        "KSEARCH_ALLOW_UNKNOWN_AGENT_TOOL_INPUT=1"
+                    )
+                else:
+                    return _permission_deny(
+                        f"K-Search denied Skill call with missing skill name. "
+                        f"Expected one of: {sorted(allowed_skills)}",
+                        interrupt=True,
+                    )
+            elif skill not in allowed_skills:
+                return _permission_deny(
+                    f"K-Search denied unavailable native skill: {skill}. "
+                    f"Allowed: {sorted(allowed_skills)}",
+                    interrupt=True,
+                )
         return _permission_allow(updated_input=updated_input)
 
     return _can_use_tool

@@ -1,0 +1,36 @@
+{
+  "version": 2,
+  "strategy_form": "natural_language",
+  "strategies": [
+    {
+      "id": "fa_qkv_two_level_l1_reuse",
+      "title": "QKV two-level tiling with L1 reuse",
+      "summary": "Use bidirectional Q and KV two-level tiling so K/V tiles are reused across multiple Q microblocks, reducing repeated GM to L1 traffic. This strategy is the prerequisite structure for later pipeline overlap.",
+      "markdown_ref": "round1-qkv-two-level-l1-reuse-design.md",
+      "tags": [
+        "ascendc",
+        "flash_attention",
+        "tiling",
+        "l1_reuse"
+      ],
+      "difficulty_1_to_5": 3,
+      "score_0_to_1": 0.85,
+      "expected_vs_baseline_factor": 1.49
+    },
+    {
+      "id": "fa_multibuffer_soft_pipeline",
+      "title": "Multi-buffer soft pipeline after two-level tiling",
+      "summary": "Add TQue multi-buffering and PRELAUNCH soft pipeline on top of verified QKV two-level tiling to overlap movement and compute. Requires the two-level L1 reuse structure to already be present.",
+      "markdown_ref": "round2-multibuffer-soft-pipeline-design.md",
+      "tags": [
+        "ascendc",
+        "flash_attention",
+        "pipeline",
+        "tque"
+      ],
+      "difficulty_1_to_5": 4,
+      "score_0_to_1": 0.9,
+      "expected_vs_baseline_factor": 1.63
+    }
+  ]
+}

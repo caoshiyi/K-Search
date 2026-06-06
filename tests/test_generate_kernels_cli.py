@@ -1,13 +1,17 @@
 import json
+import os
+import sys
 from types import SimpleNamespace
 
 import pytest
 
+import generate_kernels_and_eval as cli
 from generate_kernels_and_eval import (
     _parse_strategy_form,
     _build_task_from_args,
     _resolve_llm_config_from_args,
     generate_and_evaluate,
+    main,
 )
 
 
@@ -79,6 +83,7 @@ def test_build_task_from_args_constructs_ascendc_task(tmp_path):
 
 
 def test_generate_and_evaluate_sets_task_run_id_unconditionally(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_TASK_ID", "task-meta")
     seen = {}
 
     class FakeTask:
@@ -123,7 +128,104 @@ def test_generate_and_evaluate_sets_task_run_id_unconditionally(tmp_path, monkey
     assert seen["generator_run_id"] == "run-meta"
     assert seen["final_eval_run_id"] == "run-meta"
     assert task._ksearch_run_id == "run-meta"
-    run_meta_path = tmp_path / "artifacts" / "lineage_task" / "runs" / "run-meta" / "run_meta.json"
+    task_meta_path = tmp_path / "artifacts" / "lineage_task" / "task-meta" / "task_meta.json"
+    run_meta_path = task_meta_path.parent / "runs" / "run-meta" / "run_meta.json"
     artifacts_meta_path = run_meta_path.parent / "artifacts" / "run_meta.json"
-    assert json.loads(run_meta_path.read_text(encoding="utf-8"))["run_id"] == "run-meta"
+    task_meta = json.loads(task_meta_path.read_text(encoding="utf-8"))
+    assert task_meta["task_id"] == "task-meta"
+    assert task_meta["task_name"] == "lineage_task"
+    assert task_meta["artifacts_dir"] == str(tmp_path / "artifacts")
+    assert task_meta["start_time"]
+    run_meta = json.loads(run_meta_path.read_text(encoding="utf-8"))
+    assert run_meta["task_id"] == "task-meta"
+    assert run_meta["run_id"] == "run-meta"
     assert not artifacts_meta_path.exists()
+
+
+def test_generate_and_evaluate_saves_solution_under_explicit_run_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_TASK_ID", "solution-task")
+    monkeypatch.delenv("KSEARCH_RUN_ID", raising=False)
+
+    class FakeTask:
+        name = "solution_task"
+
+        def get_config_for_logging(self):
+            return {}
+
+        def run_final_evaluation(self, *, solutions, config, dump_traces, workload_limit):
+            return SimpleNamespace()
+
+    class FakeKernelGenerator:
+        def __init__(self, **kwargs):
+            pass
+
+        def generate(self, *, task, max_opt_rounds, continue_from_solution=None):
+            return SimpleNamespace(name="fake_solution", description="")
+
+    monkeypatch.setattr(
+        "k_search.kernel_generators.kernel_generator.KernelGenerator",
+        FakeKernelGenerator,
+    )
+
+    generate_and_evaluate(
+        FakeTask(),
+        model_name="fake",
+        base_url=None,
+        api_key=None,
+        language="ascendc",
+        target_gpu="ascend_910b",
+        max_opt_rounds=1,
+        save_results=False,
+        save_solutions=True,
+        llm_provider="claude-agent",
+        run_id="explicit-save-run",
+        artifacts_dir=str(tmp_path / "artifacts"),
+    )
+
+    task_root = tmp_path / "artifacts" / "solution_task" / "solution-task"
+    runs = sorted(path.name for path in (task_root / "runs").iterdir() if path.is_dir())
+    assert runs == ["explicit-save-run"]
+    saved_solutions = list(
+        (task_root / "runs" / "explicit-save-run" / "artifacts" / "solutions" / "solution_task").glob(
+            "fake_solution_*.json"
+        )
+    )
+    assert len(saved_solutions) == 1
+
+
+def test_main_pins_task_id_when_absent(tmp_path, monkeypatch):
+    captured = {}
+
+    monkeypatch.delenv("KSEARCH_TASK_ID", raising=False)
+    monkeypatch.delenv("KSEARCH_TASK_START", raising=False)
+    monkeypatch.delenv("KSEARCH_RUN_ID", raising=False)
+    monkeypatch.delenv("KSEARCH_RUN_START", raising=False)
+    monkeypatch.delenv("KSEARCH_ARTIFACTS_DIR", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "generate_kernels_and_eval.py",
+            "--model-name",
+            "fake-model",
+            "--llm-provider",
+            "claude-agent",
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+        ],
+    )
+    monkeypatch.setattr(cli, "_resolve_llm_config_from_args", lambda args: ("claude-agent", None))
+    monkeypatch.setattr(cli, "_build_task_from_args", lambda args: SimpleNamespace(name="main_task"))
+
+    def fake_generate_and_evaluate(**kwargs):
+        captured["task_id"] = os.environ.get("KSEARCH_TASK_ID")
+        captured["run_id"] = os.environ.get("KSEARCH_RUN_ID")
+        captured["artifacts_dir"] = os.environ.get("KSEARCH_ARTIFACTS_DIR")
+
+    monkeypatch.setattr(cli, "generate_and_evaluate", fake_generate_and_evaluate)
+
+    main()
+
+    assert captured["task_id"]
+    assert captured["run_id"]
+    assert captured["artifacts_dir"] == str((tmp_path / "artifacts").resolve())

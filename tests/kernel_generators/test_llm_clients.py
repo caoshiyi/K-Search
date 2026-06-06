@@ -190,6 +190,41 @@ def test_llm_interaction_logger_writes_hierarchical_human_readable_logs(monkeypa
     assert "- action_node_id: n/3" in readable
 
 
+def test_llm_interaction_logger_defaults_under_task_run_logs(monkeypatch, tmp_path):
+    monkeypatch.delenv("KSEARCH_LLM_LOG_DIR", raising=False)
+    monkeypatch.setenv("KSEARCH_ARTIFACTS_DIR", str(tmp_path / "out"))
+    monkeypatch.setenv("KSEARCH_TASK_ID", "task-llm")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "run-llm")
+
+    with llm_log_context(
+        operator="multi/query attention",
+        flow="world model",
+        round_index=3,
+        stage="debug codegen",
+    ):
+        _log_llm_interaction(
+            provider="claude-agent",
+            model_name="claude/sonnet:4.6",
+            prompt="prompt",
+            response="response",
+        )
+
+    markdown_logs = list((tmp_path / "out").rglob("*.md"))
+    assert len(markdown_logs) == 1
+    rel_parts = markdown_logs[0].relative_to(tmp_path / "out").parts
+    assert rel_parts[0:9] == (
+        "multi_query_attention",
+        "task-llm",
+        "runs",
+        "run-llm",
+        "logs",
+        "llm",
+        "world_model",
+        "round_0003",
+        "debug_codegen",
+    )
+
+
 def test_llm_interaction_logger_uses_unknown_hierarchy_without_context(monkeypatch, tmp_path):
     monkeypatch.setenv("KSEARCH_LLM_LOG_DIR", str(tmp_path))
     monkeypatch.setenv("KSEARCH_LLM_LOG_JSON", "1")
@@ -1136,6 +1171,7 @@ def test_world_model_narrative_logger_uses_effective_run_id(tmp_path, monkeypatc
             captured["run_started"] = True
 
     monkeypatch.setenv("KSEARCH_RUN_ID", "global-run")
+    monkeypatch.setenv("KSEARCH_TASK_ID", "task-lineage")
     monkeypatch.setattr(wm_module, "RunNarrativeLogger", FakeNarrativeLogger)
 
     generator = WorldModelKernelGeneratorWithBaseline(
@@ -1158,7 +1194,15 @@ def test_world_model_narrative_logger_uses_effective_run_id(tmp_path, monkeypatc
 
     assert captured["meta"]["run_id"] == "effective-run"
     assert captured["run_started"] is True
-    assert "effective-run" in str(captured["root"])
+    assert captured["root"] == (
+        tmp_path
+        / "artifacts"
+        / "lineage_task"
+        / "task-lineage"
+        / "runs"
+        / "effective-run"
+        / "logs"
+    )
 
 
 def test_baseline_agentic_memory_writeback_only_for_new_best(tmp_path, monkeypatch):

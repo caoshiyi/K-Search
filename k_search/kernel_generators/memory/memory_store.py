@@ -25,7 +25,7 @@ KNOWLEDGE = MemoryKind(name="knowledge", filename="KNOWLEDGE.md", gated_writebac
 
 
 class MemoryStore:
-    """Persists per-task memory under <artifacts>/<task>/memory/<kind>/<filename>."""
+    """Persists per-task memory under <base>/<task>/<task_id>/artifacts/memory."""
 
     def __init__(self, *, artifacts_dir: str | Path | None, task_name: str | None) -> None:
         self._artifacts_dir = artifacts_dir
@@ -38,7 +38,11 @@ class MemoryStore:
         return cls(artifacts_dir=artifacts_dir, task_name=task_name)
 
     def _path(self, kind: MemoryKind) -> Path:
-        base = get_ksearch_artifacts_dir(base_dir=self._artifacts_dir, task_name=self._task_name)
+        base = get_ksearch_artifacts_dir(
+            base_dir=self._artifacts_dir,
+            task_name=self._task_name,
+            include_run=False,
+        )
         return base / "memory" / kind.name / kind.filename
 
     def load(self, kind: MemoryKind) -> str | None:

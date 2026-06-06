@@ -17,6 +17,30 @@ def test_save_then_load_roundtrip(tmp_path):
     assert store.load(CODE_MAP) == "# CODE_MAP\nhello\n"
 
 
+def test_save_uses_task_artifacts_root_not_run_artifacts(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_TASK_ID", "task-one")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "run-one")
+    store = MemoryStore(artifacts_dir=tmp_path / "out", task_name="opx")
+
+    store.save(CODE_MAP, "# CODE_MAP\nhello\n")
+
+    task_memory = tmp_path / "out" / "opx" / "task-one" / "artifacts" / "memory" / "code_map" / "CODE_MAP.md"
+    run_memory = (
+        tmp_path
+        / "out"
+        / "opx"
+        / "task-one"
+        / "runs"
+        / "run-one"
+        / "artifacts"
+        / "memory"
+        / "code_map"
+        / "CODE_MAP.md"
+    )
+    assert task_memory.is_file()
+    assert not run_memory.exists()
+
+
 def test_save_empty_is_noop(tmp_path):
     store = _store(tmp_path)
     store.save(CODE_MAP, "   ")

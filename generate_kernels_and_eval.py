@@ -156,7 +156,7 @@ def generate_and_evaluate(
     """
     Generate exactly one solution for the task, then run final evaluation.
     """
-    from k_search.utils.paths import get_ksearch_run_dir, get_run_id
+    from k_search.utils.paths import get_ksearch_run_dir, get_ksearch_task_dir, get_run_id, get_task_id
 
     # Determine run_id
     if continue_from_run:
@@ -165,19 +165,44 @@ def generate_and_evaluate(
         effective_run_id = run_id
     else:
         effective_run_id = get_run_id()
+    effective_task_id = get_task_id()
 
     task_name = str(getattr(task, "name", "") or "")
+    start_time = datetime.utcnow().isoformat() + "Z"
+
+    # Write task_meta.json
+    task_root = get_ksearch_task_dir(
+        base_dir=artifacts_dir,
+        task_name=task_name,
+        task_id=effective_task_id,
+    )
+    task_meta_path = task_root / "task_meta.json"
+    task_meta = {
+        "task_id": effective_task_id,
+        "task_name": task_name,
+        "start_time": start_time,
+        "artifacts_dir": str(task_root.parent.parent),
+    }
+    try:
+        task_meta_path.parent.mkdir(parents=True, exist_ok=True)
+        task_meta_path.write_text(json.dumps(task_meta, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"[TASK] Task ID: {effective_task_id}")
+        print(f"[TASK] Task metadata: {task_meta_path}")
+    except Exception as e:
+        print(f"[WARN] Failed to write task_meta.json: {e}")
 
     # Write run_meta.json
     run_root = get_ksearch_run_dir(
         base_dir=artifacts_dir,
         task_name=task_name,
+        task_id=effective_task_id,
         run_id=effective_run_id,
     )
     run_meta_path = run_root / "run_meta.json"
     run_meta = {
         "run_id": effective_run_id,
-        "start_time": datetime.utcnow().isoformat() + "Z",
+        "task_id": effective_task_id,
+        "start_time": start_time,
         "task_name": task_name,
         "model_name": model_name,
         "language": language,
@@ -325,7 +350,10 @@ def generate_and_evaluate(
     # Optionally persist to disk (k-search solution type)
     if save_solutions:
         saved_path = _persist_ksearch_solution(
-            solution, definition_name=str(getattr(task, "name", "") or ""), artifacts_dir=artifacts_dir
+            solution,
+            definition_name=str(getattr(task, "name", "") or ""),
+            artifacts_dir=artifacts_dir,
+            run_id=effective_run_id,
         )
         if saved_path:
             print(f"  ✓ Saved solution to: {saved_path}")
@@ -528,8 +556,8 @@ def main():
         default=None,
         help=(
             "Resume world-model prompting state from a JSON file path. "
-            "Use 'auto' to load <base>/<task>/runs/<run_id>/artifacts/world_model/world_model.json "
-            "if present, falling back to <base>/<task>/artifacts/world_model/world_model.json."
+            "Use 'auto' to load <base>/<task>/<task_id>/runs/<run_id>/artifacts/world_model/world_model.json "
+            "if present, falling back to <base>/<task>/<task_id>/artifacts/world_model/world_model.json."
         ),
     )
     parser.add_argument("--feedback-workloads", nargs="+", default=None, help="Explicit workload UUIDs to use for optimization feedback rounds")
@@ -610,14 +638,15 @@ def main():
 
     args = parser.parse_args()
 
-    # Pin a single output base + run id for the whole process so that artifacts,
+    # Pin a single output base plus task/run ids for the whole process so that artifacts,
     # llm logs, telemetry and the narrative summary all land under the same
-    # <base>/<task>/runs/<run_id>/ tree (and never drift apart across calls).
-    from k_search.utils.paths import get_run_id, resolve_output_base
+    # <base>/<task>/<task_id>/runs/<run_id>/ tree (and never drift apart across calls).
+    from k_search.utils.paths import get_run_id, get_task_id, resolve_output_base
 
     os.environ.setdefault(
         "KSEARCH_ARTIFACTS_DIR", str(resolve_output_base(getattr(args, "artifacts_dir", None)))
     )
+    os.environ.setdefault("KSEARCH_TASK_ID", get_task_id())
     os.environ.setdefault("KSEARCH_RUN_ID", get_run_id())
 
     # MLX runs on Apple Silicon; the CUDA-style --target-gpu hint is not meaningful.

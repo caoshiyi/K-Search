@@ -12,4 +12,5 @@ Rules:
 - Do not guess AscendC API signatures from general C++ experience.
 - Prefer strategy-provided API summaries first, then read full docs for details.
 - Treat anti-pattern warnings in strategy text as hard constraints.
-- If a signature or constraint is missing, report it in IMPLEMENTATION_PLAN.md instead of inventing a call.
+- If a signature or constraint is missing during design, report it in ASCENDC_DESIGN.md instead of inventing a call.
+- If a signature or constraint is missing during implementation, report it in IMPLEMENTATION_DEVIATIONS.md or IMPLEMENTATION_HANDOFF.md.

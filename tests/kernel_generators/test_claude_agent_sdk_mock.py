@@ -137,7 +137,9 @@ def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
         first_line = prompt.splitlines()[0]
         agent = first_line.split(":", 1)[1].strip() if ":" in first_line else "codegen"
         (project_dir / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
-        (project_dir / "IMPLEMENTATION_PLAN.md").write_text("# IMPLEMENTATION_PLAN\nInitial safe edit.\n", encoding="utf-8")
+        (project_dir / "ASCENDC_DESIGN.md").write_text("# ASCENDC_DESIGN\n" + "detail\n" * 20, encoding="utf-8")
+        (project_dir / "IMPLEMENTATION_EXECUTION_PLAN.md").write_text("# execution\nInitial safe edit.\n", encoding="utf-8")
+        (project_dir / "IMPLEMENTATION_HANDOFF.md").write_text("# handoff\nInitial safe edit complete.\n", encoding="utf-8")
         (project_dir / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
         (project_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n// initial agent edit\n", encoding="utf-8")
         return [
@@ -151,7 +153,7 @@ def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
                     )
                 ]
             ),
-            MockClaudeMessage(result="status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md\nnext: python_eval"),
+            MockClaudeMessage(result="status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, ASCENDC_DESIGN.md, IMPLEMENTATION_EXECUTION_PLAN.md, IMPLEMENTATION_HANDOFF.md, REVIEW_NOTES.md\nnext: python_eval"),
         ]
 
     def second_edit(prompt, options, call_index):
@@ -159,7 +161,9 @@ def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
         first_line = prompt.splitlines()[0]
         agent = first_line.split(":", 1)[1].strip() if ":" in first_line else "codegen"
         (project_dir / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
-        (project_dir / "IMPLEMENTATION_PLAN.md").write_text("# IMPLEMENTATION_PLAN\nChange beta to BETA.\n", encoding="utf-8")
+        (project_dir / "ASCENDC_DESIGN.md").write_text("# ASCENDC_DESIGN\n" + "detail\n" * 20, encoding="utf-8")
+        (project_dir / "IMPLEMENTATION_EXECUTION_PLAN.md").write_text("# execution\nChange beta to BETA.\n", encoding="utf-8")
+        (project_dir / "IMPLEMENTATION_HANDOFF.md").write_text("# handoff\nChanged beta to BETA.\n", encoding="utf-8")
         (project_dir / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
         (project_dir / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
         return [
@@ -173,7 +177,7 @@ def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
                     )
                 ]
             ),
-            MockClaudeMessage(result="status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md\nnext: python_eval"),
+            MockClaudeMessage(result="status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, ASCENDC_DESIGN.md, IMPLEMENTATION_EXECUTION_PLAN.md, IMPLEMENTATION_HANDOFF.md, REVIEW_NOTES.md\nnext: python_eval"),
         ]
 
     sdk = install_mock_claude_agent_sdk(
@@ -215,13 +219,13 @@ def test_claude_agent_sdk_mock_drives_agentic_ascendc_two_round_optimization(
     assert all("<ascendc_project>" not in call.prompt for call in sdk.client_calls)
     assert [call.prompt.splitlines()[0] for call in sdk.client_calls[:4]] == [
         "Stage 1/4: code-reader",
-        "Stage 2/4: plan",
+        "Stage 2/4: designer",
         "Stage 3/4: codegen",
         "Stage 4/4: reviewer",
     ]
     assert [call.prompt.splitlines()[0] for call in sdk.client_calls[4:]] == [
         "Stage 1/4: code-reader",
-        "Stage 2/4: plan",
+        "Stage 2/4: designer",
         "Stage 3/4: codegen",
         "Stage 4/4: reviewer",
     ]
@@ -373,12 +377,14 @@ def test_claude_project_editor_validates_native_agent_tool_invocation(monkeypatc
         if "code-reader" in first_line:
             agent = "code-reader"
             (project_dir / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
-        elif "plan" in first_line:
-            agent = "plan"
-            (project_dir / "IMPLEMENTATION_PLAN.md").write_text("# plan\n", encoding="utf-8")
+        elif "designer" in first_line:
+            agent = "designer"
+            (project_dir / "ASCENDC_DESIGN.md").write_text("# design\n" + "detail\n" * 20, encoding="utf-8")
         elif "codegen" in first_line:
             agent = "codegen"
             (project_dir / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+            (project_dir / "IMPLEMENTATION_EXECUTION_PLAN.md").write_text("# execution\nchange beta\n", encoding="utf-8")
+            (project_dir / "IMPLEMENTATION_HANDOFF.md").write_text("# handoff\nchanged beta\n", encoding="utf-8")
         elif "reviewer" in first_line:
             agent = "reviewer"
             (project_dir / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")

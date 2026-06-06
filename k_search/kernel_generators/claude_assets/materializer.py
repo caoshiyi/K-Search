@@ -16,11 +16,15 @@ CLAUDE_ASSET_MANAGED_MARKER = "<!-- K-Search managed Claude asset -->"
 
 NATIVE_AGENT_FILES = [
     "code-reader.md",
-    "plan.md",
+    "designer.md",
     "codegen.md",
     "reviewer.md",
     "bug-fixer.md",
     "knowledge-curator.md",
+]
+
+LEGACY_NATIVE_AGENT_FILES = [
+    "plan.md",
 ]
 
 # Skills whose only payload is SKILL.md (materialized as managed text).
@@ -99,6 +103,14 @@ def _remove_existing_path(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
+def _remove_legacy_managed_file(path: Path) -> None:
+    if not path.is_file():
+        return
+    current = path.read_text(encoding="utf-8", errors="replace")
+    if current.startswith(CLAUDE_ASSET_MANAGED_MARKER):
+        path.unlink()
+
+
 def _allow_missing_dev_knowledge() -> bool:
     return os.getenv("KSEARCH_ALLOW_MISSING_DEV_KNOWLEDGE", "").strip().lower() in {
         "1",
@@ -136,6 +148,9 @@ def materialize_claude_project_assets(project_dir: str | Path) -> ClaudeAssetMat
     written: list[Path] = []
     copied: list[Path] = []
     asset_root = _asset_root()
+
+    for name in LEGACY_NATIVE_AGENT_FILES:
+        _remove_legacy_managed_file(claude_dir / "agents" / name)
 
     for name in NATIVE_AGENT_FILES:
         text = _asset_text(f"agents/{name}")

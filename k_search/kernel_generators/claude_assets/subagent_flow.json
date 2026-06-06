@@ -16,21 +16,21 @@
           "run_when_missing_files": ["CODE_MAP.md"]
         },
         {
-          "name": "plan",
-          "agent": "plan",
-          "instruction": "Read CODE_MAP.md and the attempt context, then write IMPLEMENTATION_PLAN.md.",
-          "required_files": ["IMPLEMENTATION_PLAN.md"]
+          "name": "designer",
+          "agent": "designer",
+          "instruction": "Read CODE_MAP.md and the attempt context, then write ASCENDC_DESIGN.md as the AscendC detailed design. Do not edit source files.",
+          "required_files": ["ASCENDC_DESIGN.md"]
         },
         {
           "name": "codegen",
           "agent": "codegen",
-          "instruction": "Read CODE_MAP.md and IMPLEMENTATION_PLAN.md, edit the project according to the plan, and update CODE_MAP.md if project contracts changed.",
-          "required_files": ["CODE_MAP.md"]
+          "instruction": "Read CODE_MAP.md, ASCENDC_DESIGN.md, and the real source files. Write IMPLEMENTATION_EXECUTION_PLAN.md before edits, implement the project, update CODE_MAP.md if project contracts changed, and write IMPLEMENTATION_HANDOFF.md plus IMPLEMENTATION_DEVIATIONS.md if deviations exist.",
+          "required_files": ["CODE_MAP.md", "IMPLEMENTATION_EXECUTION_PLAN.md", "IMPLEMENTATION_HANDOFF.md"]
         },
         {
           "name": "reviewer",
           "agent": "reviewer",
-          "instruction": "Review the edited project, CODE_MAP.md, and IMPLEMENTATION_PLAN.md, then write REVIEW_NOTES.md.",
+          "instruction": "Review the edited project, CODE_MAP.md, ASCENDC_DESIGN.md, IMPLEMENTATION_EXECUTION_PLAN.md, IMPLEMENTATION_HANDOFF.md, and IMPLEMENTATION_DEVIATIONS.md if present, then write REVIEW_NOTES.md.",
           "required_files": ["REVIEW_NOTES.md"]
         }
       ]

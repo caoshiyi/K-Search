@@ -99,12 +99,14 @@ class FakeSessionClient:
         if "Stage 1/" in first_line and "code-reader" in first_line:
             (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
             text = "reader"
-        elif "Stage 2/" in first_line and "plan" in first_line:
-            (root / "IMPLEMENTATION_PLAN.md").write_text("# plan\n", encoding="utf-8")
-            text = "plan"
+        elif "Stage 2/" in first_line and "designer" in first_line:
+            (root / "ASCENDC_DESIGN.md").write_text("# design\n", encoding="utf-8")
+            text = "design"
         elif "codegen" in first_line:
             (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
             (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h updated\n", encoding="utf-8")
+            (root / "IMPLEMENTATION_EXECUTION_PLAN.md").write_text("# execution\n", encoding="utf-8")
+            (root / "IMPLEMENTATION_HANDOFF.md").write_text("# handoff\n", encoding="utf-8")
             text = "codegen"
         elif "bug-fixer" in first_line:
             (root / "kernel" / "foo.h").write_text("alpha\nBETA\nGAMMA\n", encoding="utf-8")

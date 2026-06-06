@@ -19,10 +19,15 @@ def test_load_default_subagent_flow_uses_configured_stage_order():
     flow = load_default_subagent_flow()
 
     assert flow.name == "ascendc-native-codegen"
-    assert [stage.name for stage in flow.stages] == ["code-reader", "plan", "codegen", "reviewer"]
+    assert [stage.name for stage in flow.stages] == ["code-reader", "designer", "codegen", "reviewer"]
     assert flow.stages[0].agent == "code-reader"
     assert flow.stages[0].run_when_missing_files == ("CODE_MAP.md",)
-    assert flow.stages[1].required_files == ("IMPLEMENTATION_PLAN.md",)
+    assert flow.stages[1].required_files == ("ASCENDC_DESIGN.md",)
+    assert flow.stages[2].required_files == (
+        "CODE_MAP.md",
+        "IMPLEMENTATION_EXECUTION_PLAN.md",
+        "IMPLEMENTATION_HANDOFF.md",
+    )
     assert flow.stages[3].required_files == ("REVIEW_NOTES.md",)
 
 
@@ -76,10 +81,10 @@ def test_render_subagent_stage_prompt_names_exact_agent_and_required_outputs():
         description="Test flow.",
         stages=(
             SubagentStageConfig(
-                name="plan",
-                agent="plan",
-                instruction="Write the implementation plan.",
-                required_files=("IMPLEMENTATION_PLAN.md",),
+                name="designer",
+                agent="designer",
+                instruction="Write the detailed design.",
+                required_files=("ASCENDC_DESIGN.md",),
             ),
         ),
     )
@@ -92,10 +97,10 @@ def test_render_subagent_stage_prompt_names_exact_agent_and_required_outputs():
         base_prompt="BASE ATTEMPT CONTEXT",
     )
 
-    assert "Stage 1/1: plan" in prompt
-    assert "Use the plan subagent for this stage." in prompt
+    assert "Stage 1/1: designer" in prompt
+    assert "Use the designer subagent for this stage." in prompt
     assert "Do not invoke any other subagent during this stage." in prompt
-    assert "IMPLEMENTATION_PLAN.md" in prompt
+    assert "ASCENDC_DESIGN.md" in prompt
     assert "BASE ATTEMPT CONTEXT" in prompt
 
 
@@ -113,10 +118,10 @@ def test_run_configured_subagent_flow_uses_one_session_and_skips_reader_when_cod
                 run_when_missing_files=("CODE_MAP.md",),
             ),
             SubagentStageConfig(
-                name="plan",
-                agent="plan",
-                instruction="Create IMPLEMENTATION_PLAN.md.",
-                required_files=("IMPLEMENTATION_PLAN.md",),
+                name="designer",
+                agent="designer",
+                instruction="Create ASCENDC_DESIGN.md.",
+                required_files=("ASCENDC_DESIGN.md",),
             ),
             SubagentStageConfig(
                 name="reviewer",
@@ -140,9 +145,9 @@ def test_run_configured_subagent_flow_uses_one_session_and_skips_reader_when_cod
         def send_prompt(self, session, *, prompt, telemetry_recorder=None):
             self.prompts.append(prompt)
             root = Path(session.project_dir)
-            if "Stage 1/2: plan" in prompt:
-                (root / "IMPLEMENTATION_PLAN.md").write_text("# plan\n", encoding="utf-8")
-                text = "plan done"
+            if "Stage 1/2: designer" in prompt:
+                (root / "ASCENDC_DESIGN.md").write_text("# design\n" + "detail\n" * 20, encoding="utf-8")
+                text = "designer done"
             elif "Stage 2/2: reviewer" in prompt:
                 (root / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
                 text = "review done"
@@ -173,10 +178,10 @@ def test_run_configured_subagent_flow_uses_one_session_and_skips_reader_when_cod
     assert client.closed is True
     assert len(client.prompts) == 2
     assert "code-reader" not in "\n".join(client.prompts)
-    assert "Use the plan subagent" in client.prompts[0]
+    assert "Use the designer subagent" in client.prompts[0]
     assert "Use the reviewer subagent" in client.prompts[1]
     assert result.text == "review done"
-    assert result.transcript == "plan done\nreview done"
+    assert result.transcript == "designer done\nreview done"
 
 
 def test_run_configured_subagent_flow_fails_when_required_file_missing(tmp_path):
@@ -185,10 +190,10 @@ def test_run_configured_subagent_flow_fails_when_required_file_missing(tmp_path)
         description="Test flow.",
         stages=(
             SubagentStageConfig(
-                name="plan",
-                agent="plan",
-                instruction="Create IMPLEMENTATION_PLAN.md.",
-                required_files=("IMPLEMENTATION_PLAN.md",),
+                name="designer",
+                agent="designer",
+                instruction="Create ASCENDC_DESIGN.md.",
+                required_files=("ASCENDC_DESIGN.md",),
             ),
         ),
     )
@@ -199,8 +204,8 @@ def test_run_configured_subagent_flow_fails_when_required_file_missing(tmp_path)
 
         def send_prompt(self, session, *, prompt, telemetry_recorder=None):
             return ClaudeProjectEditResult(
-                text="missing plan",
-                transcript="missing plan",
+                text="missing design",
+                transcript="missing design",
                 prompt=prompt,
                 prompt_chars=len(prompt),
                 prompt_lines=prompt.count("\n") + 1,
@@ -209,7 +214,7 @@ def test_run_configured_subagent_flow_fails_when_required_file_missing(tmp_path)
         def close_session(self, session):
             session._closed = True
 
-    with pytest.raises(RuntimeError, match="IMPLEMENTATION_PLAN.md"):
+    with pytest.raises(RuntimeError, match="ASCENDC_DESIGN.md"):
         run_configured_subagent_flow(
             editor_client=SessionClient(),
             project_dir=tmp_path,

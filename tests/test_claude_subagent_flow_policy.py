@@ -43,7 +43,7 @@ def test_initial_prompt_does_not_globally_ban_bug_fixer():
     assert "must not be invoked in this release" not in prompt
     assert "eval_failure_repair" in prompt
     assert "bug-fixer" in prompt
-    assert "Initial codegen flow agents: code-reader, plan, codegen, reviewer." in prompt
+    assert "Initial codegen flow agents: code-reader, designer, codegen, reviewer." in prompt
     assert "Eval-failure repair flow agents: bug-fixer, reviewer." in prompt
 
 

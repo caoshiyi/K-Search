@@ -47,3 +47,33 @@ def test_project_snapshot_records_large_files_modes_and_symlinks(tmp_path):
     assert os.readlink(materialized / "foo_link.h") == "kernel/foo.h"
     assert os.access(materialized / "bench.sh", os.X_OK)
     assert not (materialized / "build").exists()
+
+
+def test_project_snapshot_skips_native_runtime_files(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "kernel").mkdir()
+    (project / "kernel" / "foo.h").write_text("int foo = 1;\n", encoding="utf-8")
+    for name in [
+        "CODE_MAP.md",
+        "ASCENDC_DESIGN.md",
+        "IMPLEMENTATION_EXECUTION_PLAN.md",
+        "IMPLEMENTATION_HANDOFF.md",
+        "IMPLEMENTATION_DEVIATIONS.md",
+        "REVIEW_NOTES.md",
+        "debug_packet.json",
+        "debug_log.md",
+        "KNOWLEDGE.md",
+    ]:
+        (project / name).write_text("runtime artifact\n", encoding="utf-8")
+
+    snapshot = create_project_snapshot(
+        project_dir=project,
+        snapshot_id="snap_runtime",
+        parent_snapshot_id=None,
+        base_commit="abc123",
+        created_by_round=1,
+        eval_result={"status": "passed"},
+    )
+
+    assert set(snapshot.manifest) == {"kernel/foo.h"}

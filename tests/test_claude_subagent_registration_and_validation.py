@@ -37,10 +37,10 @@ def test_load_native_agent_specs_parses_block_style_skills():
 
     specs = load_native_agent_specs()
 
-    assert "plan" in specs
-    assert specs["plan"].skills is not None
-    assert "ascendc-hardware" in specs["plan"].skills
-    assert "ascendc-dev-knowledge" in specs["plan"].skills
+    assert "designer" in specs
+    assert specs["designer"].skills is not None
+    assert "ascendc-hardware" in specs["designer"].skills
+    assert "ascendc-dev-knowledge" in specs["designer"].skills
 
 
 def test_agent_definition_from_spec_filters_unknown_dataclass_fields(monkeypatch):
@@ -59,7 +59,7 @@ def test_agent_definition_from_spec_filters_unknown_dataclass_fields(monkeypatch
         NativeAgentSpec(
             name="codegen",
             description="Writes code",
-            prompt="Implement the plan.",
+            prompt="Implement the design.",
             tools=["Read", "Write"],
             model="ignored-by-fake",
         )
@@ -67,7 +67,7 @@ def test_agent_definition_from_spec_filters_unknown_dataclass_fields(monkeypatch
 
     assert definition == FakeAgentDefinition(
         description="Writes code",
-        prompt="Implement the plan.",
+        prompt="Implement the design.",
         tools=["Read", "Write"],
     )
 
@@ -152,7 +152,7 @@ def test_require_agent_tool_invocation_reports_wrong_subagent():
             SimpleNamespace(
                 event_type="tool_use",
                 tool_name="Agent",
-                tool_input={"subagent_type": "plan"},
+                tool_input={"subagent_type": "designer"},
             )
         ]
     )
@@ -168,7 +168,7 @@ def test_require_agent_tool_invocation_reports_wrong_subagent():
     assert "stage='codegen'" in message
     assert "expected_agent='codegen'" in message
     assert "observed_calls" in message
-    assert "plan" in message
+    assert "designer" in message
 
 
 def test_require_agent_tool_invocation_rejects_duplicate_matching_calls():
@@ -331,30 +331,46 @@ def test_native_handoff_validation_warns_for_short_code_map_by_default(tmp_path,
 
     monkeypatch.delenv("KSEARCH_STRICT_HANDOFF_VALIDATION", raising=False)
     (tmp_path / "CODE_MAP.md").write_text("tiny\n", encoding="utf-8")
-    (tmp_path / "IMPLEMENTATION_PLAN.md").write_text("# plan\nedit x\n", encoding="utf-8")
+    (tmp_path / "ASCENDC_DESIGN.md").write_text("# design\n" + "detail\n" * 20, encoding="utf-8")
+    (tmp_path / "IMPLEMENTATION_EXECUTION_PLAN.md").write_text("# execution\nedit x\n", encoding="utf-8")
+    (tmp_path / "IMPLEMENTATION_HANDOFF.md").write_text("# handoff\nchanged x\n", encoding="utf-8")
     (tmp_path / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
 
     handoffs = _require_native_handoff_files(
         tmp_path,
-        required_files={"CODE_MAP.md", "IMPLEMENTATION_PLAN.md", "REVIEW_NOTES.md"},
+        required_files={
+            "CODE_MAP.md",
+            "ASCENDC_DESIGN.md",
+            "IMPLEMENTATION_EXECUTION_PLAN.md",
+            "IMPLEMENTATION_HANDOFF.md",
+            "REVIEW_NOTES.md",
+        },
     )
 
     assert handoffs["CODE_MAP.md"] == "tiny\n"
     assert "CODE_MAP.md is too short to be useful" in caplog.text
 
 
-def test_native_handoff_validation_strict_env_fails_for_short_plan(tmp_path, monkeypatch):
+def test_native_handoff_validation_strict_env_fails_for_short_execution_plan(tmp_path, monkeypatch):
     from k_search.kernel_generators.ascendc_agentic_codegen import _require_native_handoff_files
 
     monkeypatch.setenv("KSEARCH_STRICT_HANDOFF_VALIDATION", "1")
     (tmp_path / "CODE_MAP.md").write_text("# CODE_MAP\n" + "file entry contract\n" * 8, encoding="utf-8")
-    (tmp_path / "IMPLEMENTATION_PLAN.md").write_text("tiny\n", encoding="utf-8")
+    (tmp_path / "ASCENDC_DESIGN.md").write_text("# design\n" + "detail\n" * 20, encoding="utf-8")
+    (tmp_path / "IMPLEMENTATION_EXECUTION_PLAN.md").write_text("tiny\n", encoding="utf-8")
+    (tmp_path / "IMPLEMENTATION_HANDOFF.md").write_text("# handoff\n" + "changed\n" * 8, encoding="utf-8")
     (tmp_path / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
 
-    with pytest.raises(RuntimeError, match="IMPLEMENTATION_PLAN.md is too short"):
+    with pytest.raises(RuntimeError, match="IMPLEMENTATION_EXECUTION_PLAN.md is too short"):
         _require_native_handoff_files(
             tmp_path,
-            required_files={"CODE_MAP.md", "IMPLEMENTATION_PLAN.md", "REVIEW_NOTES.md"},
+            required_files={
+                "CODE_MAP.md",
+                "ASCENDC_DESIGN.md",
+                "IMPLEMENTATION_EXECUTION_PLAN.md",
+                "IMPLEMENTATION_HANDOFF.md",
+                "REVIEW_NOTES.md",
+            },
         )
 
 

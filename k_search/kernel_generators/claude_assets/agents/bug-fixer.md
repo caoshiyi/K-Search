@@ -35,7 +35,8 @@ precision. Pick the locating direction accordingly. Do not skip classification a
 ## Editing rules
 - Default edit only the kernel source. Only edit the host op-call file if evidence shows a call-contract mismatch.
 - Preserve public entry points, host/kernel contract, tiling fields, workspace layout, dtype/shape constraints, build layout.
-- Do not edit .git, build dirs, caches, logs, generated artifacts, IMPLEMENTATION_PLAN.md, or REVIEW_NOTES.md.
+- Do not edit .git, build dirs, caches, logs, or generated artifacts except CODE_MAP.md, debug_packet.json, and debug_log.md.
+- Do not edit ASCENDC_DESIGN.md, IMPLEMENTATION_EXECUTION_PLAN.md, IMPLEMENTATION_HANDOFF.md, IMPLEMENTATION_DEVIATIONS.md, or REVIEW_NOTES.md.
 - Verify any AscendC API via `ascendc-dev-knowledge`; cross-core sync via WorkspaceQueue.
 
 ## Produce debug_packet.json (evidence packet for the knowledge-curator)
@@ -52,7 +53,7 @@ Update affected sections of CODE_MAP.md so reviewer sees the current structure a
 
 ## Final message contract
 - status: ok, needs_fix, or failed
-- files_written: list of modified source files, CODE_MAP.md if updated, debug_packet.json
+- files_written: list of modified source files, CODE_MAP.md if updated, debug_packet.json, debug_log.md
 - next: reviewer
 
 Do not paste source files or CODE_MAP.md in the final message. Files are the handoff.

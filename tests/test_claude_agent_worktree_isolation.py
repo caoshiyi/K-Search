@@ -50,7 +50,9 @@ def _callback(worktree: Path):
 
 def _write_native_handoffs(root: Path) -> None:
     (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel.cpp\n", encoding="utf-8")
-    (root / "IMPLEMENTATION_PLAN.md").write_text("# plan\n", encoding="utf-8")
+    (root / "ASCENDC_DESIGN.md").write_text("# design\n", encoding="utf-8")
+    (root / "IMPLEMENTATION_EXECUTION_PLAN.md").write_text("# execution\n", encoding="utf-8")
+    (root / "IMPLEMENTATION_HANDOFF.md").write_text("# handoff\n", encoding="utf-8")
     (root / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
 
 

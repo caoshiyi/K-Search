@@ -21,6 +21,6 @@ CODE_MAP.md must include:
 Final message contract:
 - status: ok, needs_fix, or failed
 - files_written: CODE_MAP.md
-- next: plan
+- next: designer
 
 Do not paste CODE_MAP.md in the final message. The file is the handoff.

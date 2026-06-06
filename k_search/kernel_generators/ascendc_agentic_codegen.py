@@ -306,9 +306,19 @@ def _validate_code_map(text: str) -> None:
         raise RuntimeError("CODE_MAP.md is too short to be useful")
 
 
-def _validate_implementation_plan(text: str) -> None:
+def _validate_ascendc_design(text: str) -> None:
+    if len(str(text or "").strip()) < 100:
+        raise RuntimeError("ASCENDC_DESIGN.md is too short")
+
+
+def _validate_execution_plan(text: str) -> None:
     if len(str(text or "").strip()) < 50:
-        raise RuntimeError("IMPLEMENTATION_PLAN.md is too short")
+        raise RuntimeError("IMPLEMENTATION_EXECUTION_PLAN.md is too short")
+
+
+def _validate_implementation_handoff(text: str) -> None:
+    if len(str(text or "").strip()) < 50:
+        raise RuntimeError("IMPLEMENTATION_HANDOFF.md is too short")
 
 
 def _validate_optional_handoff(text: str, validator: Any) -> None:
@@ -332,17 +342,23 @@ def _require_native_handoff_files(project_dir: Path, required_files: set[str] | 
     missing = [name for name in sorted(required) if not (project_dir / name).is_file()]
     if missing:
         raise RuntimeError(f"Claude native subagent flow did not produce required handoff file(s): {', '.join(missing)}")
+    present_optional = {name for name in NATIVE_HANDOFF_FILES - required if (project_dir / name).is_file()}
+    collected = required | present_optional
     handoffs = {
         name: (project_dir / name).read_text(encoding="utf-8", errors="replace")
-        for name in sorted(required)
+        for name in sorted(collected)
     }
     if "CODE_MAP.md" in required:
         _validate_optional_handoff(handoffs.get("CODE_MAP.md", ""), _validate_code_map)
-    if "IMPLEMENTATION_PLAN.md" in required:
+    if "ASCENDC_DESIGN.md" in required:
+        _validate_optional_handoff(handoffs.get("ASCENDC_DESIGN.md", ""), _validate_ascendc_design)
+    if "IMPLEMENTATION_EXECUTION_PLAN.md" in required:
         _validate_optional_handoff(
-            handoffs.get("IMPLEMENTATION_PLAN.md", ""),
-            _validate_implementation_plan,
+            handoffs.get("IMPLEMENTATION_EXECUTION_PLAN.md", ""),
+            _validate_execution_plan,
         )
+    if "IMPLEMENTATION_HANDOFF.md" in required:
+        _validate_optional_handoff(handoffs.get("IMPLEMENTATION_HANDOFF.md", ""), _validate_implementation_handoff)
     if "REVIEW_NOTES.md" in required:
         _validate_review_notes(handoffs.get("REVIEW_NOTES.md", ""))
     return handoffs
@@ -473,7 +489,7 @@ def _materialize_existing_code_map(store: MemoryStore | None, project_dir: Path)
 
 
 def _materialize_existing_knowledge(store: MemoryStore | None, project_dir: Path) -> bool:
-    """Copy accumulated KNOWLEDGE.md into the worktree so plan/codegen can read it."""
+    """Copy accumulated KNOWLEDGE.md into the worktree so designer/codegen can read it."""
     if store is None:
         return False
     return store.materialize(KNOWLEDGE, project_dir)
@@ -620,17 +636,17 @@ class AscendCAgenticPromptBuilder:
         }
         code_map_status = "yes" if has_code_map else "no"
         code_map_instruction = (
-            "CODE_MAP.md already exists: yes. Read it first and instruct plan/codegen/reviewer to read it before acting. "
+            "CODE_MAP.md already exists: yes. Read it first and instruct designer/codegen/reviewer to read it before acting. "
             "After editing code, update the affected sections of CODE_MAP.md to keep it accurate.\n"
             if has_code_map
-            else "CODE_MAP.md already exists: no. Use the code-reader subagent to create CODE_MAP.md before planning.\n"
+            else "CODE_MAP.md already exists: no. Use the code-reader subagent to create CODE_MAP.md before detailed design.\n"
         )
         flow_policy = str(flow_policy_text or "").strip()
         if not flow_policy:
             flow_policy = (
                 "Subagent usage policy:\n"
                 "- Flow names: initial_codegen=initial_codegen; eval_failure_repair=eval_failure_repair.\n"
-                "- Initial codegen flow agents: code-reader, plan, codegen, reviewer.\n"
+                "- Initial codegen flow agents: code-reader, designer, codegen, reviewer.\n"
                 "- Eval-failure repair flow agents: bug-fixer, reviewer.\n"
                 "- Do not invoke bug-fixer during initial_codegen.\n"
                 "- Invoke bug-fixer during eval_failure_repair when the active repair stage requests it.\n"
@@ -647,14 +663,16 @@ class AscendCAgenticPromptBuilder:
             f"CODE_MAP.md already exists: {code_map_status}\n\n"
             "Available tools: Read/Grep/Glob/Edit/Write, Skill, and Agent. Bash is disabled.\n"
             "Use the ascendc-codegen and ascendc-api-reference skills when relevant.\n"
-            "Required native subagent flow: code-reader -> plan -> codegen -> reviewer.\n"
+            "Required native subagent flow: code-reader -> designer -> codegen -> reviewer.\n"
             f"{flow_policy}\n"
             + code_map_instruction
-            + "The plan subagent must write IMPLEMENTATION_PLAN.md.\n"
+            + "The designer subagent must write ASCENDC_DESIGN.md as the detailed design.\n"
+            "The codegen subagent must write IMPLEMENTATION_EXECUTION_PLAN.md before source edits and IMPLEMENTATION_HANDOFF.md after source edits.\n"
+            "The codegen subagent may write IMPLEMENTATION_DEVIATIONS.md when design and real source constraints diverge.\n"
             "The reviewer subagent must write REVIEW_NOTES.md.\n"
-            "CODE_MAP.md, IMPLEMENTATION_PLAN.md, and REVIEW_NOTES.md are the only trusted cross-subagent handoff.\n"
+            "CODE_MAP.md, ASCENDC_DESIGN.md, IMPLEMENTATION_EXECUTION_PLAN.md, IMPLEMENTATION_HANDOFF.md, optional IMPLEMENTATION_DEVIATIONS.md, and REVIEW_NOTES.md are the trusted cross-subagent handoffs.\n"
             "Every subagent final message must be short and contain only status, files_written, and next.\n"
-            "Do not paste CODE_MAP.md, IMPLEMENTATION_PLAN.md, REVIEW_NOTES.md, or source files into final messages.\n"
+            "Do not paste CODE_MAP.md, ASCENDC_DESIGN.md, IMPLEMENTATION_EXECUTION_PLAN.md, IMPLEMENTATION_HANDOFF.md, IMPLEMENTATION_DEVIATIONS.md, REVIEW_NOTES.md, or source files into final messages.\n"
             + "Do not read or modify .git, build directories, caches, generated logs, or large artifacts.\n"
             "Preserve operator semantics, public entry points, host tiling contract, correctness harness behavior, and build layout.\n"
             "End with a concise summary and changed-file list after reviewer says eval_ready is true.\n\n"

@@ -254,7 +254,8 @@ def test_runner_edits_worktree_and_returns_solution(tmp_path):
     assert "<ascendc_project>" not in client.calls[0][1]
 
 
-def test_runner_evaluates_worktree_and_persists_project_snapshot_candidate(tmp_path):
+def test_runner_evaluates_worktree_and_persists_project_snapshot_candidate(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_TASK_ID", "task-artifact")
     task_dir = tmp_path / "task"
     task_dir.mkdir()
     (task_dir / "spec.md").write_text("Optimize tiny project.", encoding="utf-8")
@@ -303,7 +304,9 @@ def test_runner_evaluates_worktree_and_persists_project_snapshot_candidate(tmp_p
     assert result.eval_project_path is not None
     assert result.eval_result.metrics["workdir"] == result.eval_project_path
     assert result.eval_result.metrics["workdir"] != result.project_path
-    assert str(tmp_path / "artifacts" / "x" / "runs" / "artifact-run" / "worktrees") in result.project_path
+    assert str(
+        tmp_path / "artifacts" / "x" / "task-artifact" / "runs" / "artifact-run" / "worktrees"
+    ) in result.project_path
     assert result.evaluator_mutated_project is False
     assert "build saw edited complete worktree" in result.eval_result.log_excerpt
     assert result.candidate_patch is not None
@@ -316,6 +319,7 @@ def test_runner_evaluates_worktree_and_persists_project_snapshot_candidate(tmp_p
         tmp_path
         / "artifacts"
         / "x"
+        / "task-artifact"
         / "runs"
         / "artifact-run"
         / "artifacts"
@@ -368,6 +372,7 @@ def test_runner_allows_missing_run_context_with_escape_hatch(tmp_path, monkeypat
     monkeypatch.setenv("KSEARCH_ALLOW_MISSING_AGENTIC_RUN_CONTEXT", "1")
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
     monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    monkeypatch.setenv("KSEARCH_TASK_ID", "task-fallback")
     monkeypatch.setenv("KSEARCH_RUN_ID", "fallback-run")
     task_dir = tmp_path / "task"
     task_dir.mkdir()
@@ -393,7 +398,9 @@ def test_runner_allows_missing_run_context_with_escape_hatch(tmp_path, monkeypat
     )
 
     assert result.artifact_paths is not None
-    assert "/runs/fallback-run/artifacts/" in result.artifact_paths["manifest_path"]
+    assert str(
+        tmp_path / "artifacts" / "x" / "task-fallback" / "runs" / "fallback-run" / "artifacts"
+    ) in result.artifact_paths["manifest_path"]
 
 
 def test_runner_fails_when_agent_makes_no_file_changes(tmp_path):
@@ -1424,6 +1431,7 @@ def test_runner_filters_handoff_and_claude_asset_paths_from_candidate_outputs(tm
 def test_continue_fix_uses_native_prompt_and_run_scoped_artifacts(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
     monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    monkeypatch.setenv("KSEARCH_TASK_ID", "task-native-continue")
     monkeypatch.setenv("KSEARCH_RUN_ID", "native-continue")
     task_dir = tmp_path / "task"
     (task_dir / "kernel").mkdir(parents=True)
@@ -1468,7 +1476,9 @@ def test_continue_fix_uses_native_prompt_and_run_scoped_artifacts(tmp_path, monk
     assert "raw compile fix context" in client.prompts[4]
     assert "Use the bug-fixer subagent" in client.prompts[4]
     assert second.artifact_paths is not None
-    assert "/runs/native-continue/artifacts/" in second.artifact_paths["manifest_path"]
+    assert str(
+        tmp_path / "artifacts" / "x" / "task-native-continue" / "runs" / "native-continue" / "artifacts"
+    ) in second.artifact_paths["manifest_path"]
 
 
 def test_run_multi_turn_uses_repair_flow_when_eval_fails(tmp_path, monkeypatch):

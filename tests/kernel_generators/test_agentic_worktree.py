@@ -123,7 +123,7 @@ def test_create_agentic_worktree_uses_requested_parent_dir(tmp_path):
     task_path = tmp_path / "plain_task"
     task_path.mkdir()
     (task_path / "kernel.cpp").write_text("int old_value = 1;\n", encoding="utf-8")
-    parent = tmp_path / "out" / "task" / "runs" / "run1" / "worktrees"
+    parent = tmp_path / "out" / "task" / "task1" / "runs" / "run1" / "worktrees"
 
     session = create_agentic_worktree(task_path=task_path, worktree_parent_dir=parent)
 

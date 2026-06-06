@@ -345,7 +345,12 @@ def _require_agent_tool_invocation(*, telemetry_recorder: Any | None, event_star
         for item in observed_calls
         if _subagent_name_matches(item.get("subagent"), stage.agent)
     ]
-    if len(matching) != 1:
+    nonmatching = [
+        item
+        for item in observed_calls
+        if not _subagent_name_matches(item.get("subagent"), stage.agent)
+    ]
+    if not matching or nonmatching:
         raise RuntimeError(
             "subagent stage invocation validation failed: "
             f"stage={stage.name!r}, expected_agent={stage.agent!r}, "

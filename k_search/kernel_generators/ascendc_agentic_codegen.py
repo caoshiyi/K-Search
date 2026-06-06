@@ -222,8 +222,9 @@ def _field_value(text: str, field: str) -> str | None:
     prefix = f"{field.lower()}:"
     for line in str(text or "").splitlines():
         stripped = line.strip()
-        if stripped.lower().startswith(prefix):
-            return stripped[len(prefix) :].strip()
+        candidate = stripped.lstrip("#").strip()
+        if candidate.lower().startswith(prefix):
+            return candidate[len(prefix) :].strip()
     return None
 
 

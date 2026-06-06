@@ -171,7 +171,7 @@ def test_require_agent_tool_invocation_reports_wrong_subagent():
     assert "designer" in message
 
 
-def test_require_agent_tool_invocation_rejects_duplicate_matching_calls():
+def test_require_agent_tool_invocation_accepts_duplicate_matching_calls():
     from k_search.kernel_generators.subagent_orchestration import (
         SubagentStageConfig,
         _require_agent_tool_invocation,
@@ -179,17 +179,42 @@ def test_require_agent_tool_invocation_rejects_duplicate_matching_calls():
 
     recorder = SimpleNamespace(
         events=[
-            SimpleNamespace(event_type="tool_use", tool_name="Agent", tool_input={"subagent_type": "codegen"}),
-            SimpleNamespace(event_type="tool_use", tool_name="Task", tool_input={"agent": "plugin:codegen"}),
+            SimpleNamespace(event_type="tool_use", tool_name="Agent", tool_input={"subagent_type": "reviewer"}),
+            SimpleNamespace(event_type="tool_use", tool_name="Agent", tool_input={"agent": "plugin:reviewer"}),
         ]
     )
 
-    with pytest.raises(RuntimeError, match="matching_calls=2"):
+    _require_agent_tool_invocation(
+        telemetry_recorder=recorder,
+        event_start=0,
+        stage=SubagentStageConfig(name="reviewer", agent="reviewer", instruction="Review."),
+    )
+
+
+def test_require_agent_tool_invocation_rejects_mixed_subagents_in_stage():
+    from k_search.kernel_generators.subagent_orchestration import (
+        SubagentStageConfig,
+        _require_agent_tool_invocation,
+    )
+
+    recorder = SimpleNamespace(
+        events=[
+            SimpleNamespace(event_type="tool_use", tool_name="Agent", tool_input={"subagent_type": "reviewer"}),
+            SimpleNamespace(event_type="tool_use", tool_name="Agent", tool_input={"subagent_type": "codegen"}),
+        ]
+    )
+
+    with pytest.raises(RuntimeError) as exc:
         _require_agent_tool_invocation(
             telemetry_recorder=recorder,
             event_start=0,
-            stage=SubagentStageConfig(name="codegen", agent="codegen", instruction="Write code."),
+            stage=SubagentStageConfig(name="reviewer", agent="reviewer", instruction="Review."),
         )
+
+    message = str(exc.value)
+    assert "matching_calls=1" in message
+    assert "total_subagent_calls=2" in message
+    assert "codegen" in message
 
 
 def test_claude_project_editor_build_options_injects_programmatic_agents(monkeypatch, tmp_path):
@@ -323,6 +348,43 @@ def test_stage_completion_strict_marker_env_fails(tmp_path, monkeypatch):
             telemetry_recorder=SimpleNamespace(enabled=False, events=[]),
             event_start=0,
             require_agent_tool_use=True,
+        )
+
+
+def test_native_handoff_validation_accepts_review_notes_markdown_heading_fields(tmp_path):
+    from k_search.kernel_generators.ascendc_agentic_codegen import _require_native_handoff_files
+
+    (tmp_path / "REVIEW_NOTES.md").write_text(
+        "## status: ok\n\n"
+        "## changed_files_reviewed\n"
+        "- kernel/foo.h\n\n"
+        "### required_fixes: none\n\n"
+        "## eval_ready: true\n",
+        encoding="utf-8",
+    )
+
+    handoffs = _require_native_handoff_files(
+        tmp_path,
+        required_files={"REVIEW_NOTES.md"},
+    )
+
+    assert "## status: ok" in handoffs["REVIEW_NOTES.md"]
+
+
+def test_native_handoff_validation_rejects_markdown_heading_not_eval_ready(tmp_path):
+    from k_search.kernel_generators.ascendc_agentic_codegen import _require_native_handoff_files
+
+    (tmp_path / "REVIEW_NOTES.md").write_text(
+        "## status: needs_fix\n\n"
+        "## required_fixes: fix tiling contract\n\n"
+        "## eval_ready: false\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="REVIEW_NOTES.md"):
+        _require_native_handoff_files(
+            tmp_path,
+            required_files={"REVIEW_NOTES.md"},
         )
 
 

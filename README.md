@@ -291,7 +291,7 @@ python generate_kernels_and_eval.py \
   --max-opt-rounds 1
 ```
 
-Claude+AscendC uses agentic worktree codegen by default. K-Search creates an isolated candidate git worktree, materializes Claude native agents/skills, and drives configured subagent flows stage-by-stage in one Claude SDK session. The default flow config is `k_search/kernel_generators/claude_assets/subagent_flow.json`: `initial_codegen` runs `code-reader`, `plan`, `codegen`, and `reviewer`; `eval_failure_repair` runs `bug-fixer` and `reviewer` after Python evaluation fails. The SDK session is locked to `Read`, `Grep`, `Glob`, `Edit`, `Write`, `Skill`, and `Agent` with `permission_mode="dontAsk"`; K-Search validates that each stage invokes the expected native subagent. K-Search then scans the edited project into a `Solution` and still owns benchmark execution, world-model updates, and artifact persistence.
+Claude+AscendC uses agentic worktree codegen by default. K-Search creates an isolated candidate git worktree, materializes Claude native agents/skills, and drives configured subagent flows stage-by-stage in one Claude SDK session. The default flow config is `k_search/kernel_generators/claude_assets/subagent_flow.json`: `initial_codegen` runs `code-reader`, `designer`, `codegen`, and `reviewer`; `eval_failure_repair` runs `bug-fixer` and `reviewer` after Python evaluation fails. The SDK session is locked to `Read`, `Grep`, `Glob`, `Edit`, `Write`, `Skill`, and `Agent` with `permission_mode="dontAsk"`; K-Search validates that each stage invokes the expected native subagent. K-Search then scans the edited project into a `Solution` and still owns benchmark execution, world-model updates, and artifact persistence.
 
 Useful environment variables:
 

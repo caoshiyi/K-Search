@@ -8,8 +8,8 @@
 - [ ] AttentionPatternIndex.md 已读，已判断哪些 pattern 相关/无关
 - [ ] 相关 pattern 的 `先读这个` 部分已读
 - [ ] 每个命中 pattern 的职责边界已记录（影响什么、不决定什么）
-- [ ] TileLang kernel 已读（`current_task/design/tile_level/`）
-- [ ] flash_attention AscendC kernel 已读（`flash_attention/kernel/`）
+- [ ] 相关 tile-level / TileLang 参考已判定：存在且适用则已读，不存在或不适用则已说明
+- [ ] 相关 FA AscendC baseline 已判定：存在且适用则已读，不存在或不适用则已说明
 - [ ] 输入布局已判定
 - [ ] Q/K/V 连续性已判定
 - [ ] Hq/Hkv 已判定
@@ -104,7 +104,7 @@
 - [ ] 没有出现 TileLang 代码
 - [ ] 没有堆砌流水账式的 AscendC API 调用序列
 - [ ] 没有超过 5 行的连续 AscendC 代码
-- [ ] 设计文档正文在 400-500 行以内
+- [ ] 设计文档正文在 300-500 行以内
 
 ## basic_case 验证
 - [ ] 用 basic_case 参数走了一遍完整流程

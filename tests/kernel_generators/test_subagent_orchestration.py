@@ -31,6 +31,14 @@ def test_load_default_subagent_flow_uses_configured_stage_order():
     assert flow.stages[3].required_files == ("REVIEW_NOTES.md",)
 
 
+def test_readme_documents_configured_native_stage_order():
+    repo_root = Path(__file__).resolve().parents[2]
+    readme = (repo_root / "README.md").read_text(encoding="utf-8")
+
+    assert "initial_codegen` runs `code-reader`, `designer`, `codegen`, and `reviewer`" in readme
+    assert "initial_codegen` runs `code-reader`, `plan`, `codegen`, and `reviewer`" not in readme
+
+
 def test_load_default_subagent_flows_includes_eval_failure_repair_flow():
     flows = load_subagent_flows()
 

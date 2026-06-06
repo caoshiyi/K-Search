@@ -100,7 +100,7 @@ attention 的 buffer 设计要从“数据流”出发，不是从“我有几�
 
 attention 的同步不是”哪里写个 flag”，而是**把跨核数据依赖显式化**。
 
-WorkspaceQueue 是封装好的跨核同步工具类（参考 `flash_attention/kernel/workspace_queue.h`），内部管理 ring buffer + CrossCoreSetFlag/WaitFlag。
+WorkspaceQueue 是封装好的跨核同步工具类；如项目内存在 FA baseline，可参考其中的 `workspace_queue.h` 等价实现。它内部管理 ring buffer + CrossCoreSetFlag/WaitFlag。
 
 **详设中不许写裸 API**，只写 WorkspaceQueue 的使用方式：
 - `Init(workspace, slotSize, notifyId)` — 初始化
@@ -261,7 +261,7 @@ attention 的性能不是“尽量快”，而是**找出 bubble、带宽瓶颈�
 
 ### 9.0 行数与代码控制
 
-详设正文控制在 **400-500 行**。
+详设正文控制在 **300-500 行**。
 
 设计文档记录的是设计决策，不是实现代码。以下写法严格禁止：
 - 把 DataCopy / Mmad / Fixpipe 的完整调用展开写成流水账
@@ -279,7 +279,7 @@ attention 的性能不是“尽量快”，而是**找出 bubble、带宽瓶颈�
 
 **约束内容**：
 - 所有跨核数据传递必须采用 WorkspaceQueue 模式封装
-- WorkspaceQueue 是自定义工具类（参考 `flash_attention/kernel/workspace_queue.h`）
+- WorkspaceQueue 是自定义工具类；如项目内存在 FA baseline，可参考其中的 `workspace_queue.h` 等价实现
 - 内部封装：ring buffer 管理 + CrossCoreSetFlag/WaitFlag
 - 严禁直接使用 CrossCore 同步传递数据
 
@@ -289,7 +289,7 @@ attention 的性能不是“尽量快”，而是**找出 bubble、带宽瓶颈�
 - 所有 online softmax 必须调用 AscendC 官方 API `SoftmaxFlashV2`
 - 严禁手动实现 exp/reduce/rescale 组合
 
-**SoftmaxFlashV2 使用方式**（参考 `flash_attention/kernel/flash_attention_vec.h`）：
+**SoftmaxFlashV2 使用方式**（如项目内存在 FA baseline，可参考其中的 vector 实现）：
 - 先计算 tiling：`SoftMaxFlashV2TilingFunc(srcShape, sizeof(inType), sizeof(outType), tmpBufSize, isUpdate, isOutput)`
 - 调用：`SoftmaxFlashV2<T, isUpdate, isOutput, ..., CFG>(dst, sum, max, src, exp, inSum, inMax, tmp, smTiling, srcShape)`
 - 需传入 prev state（inSum, inMax）用于 online softmax 状态更新

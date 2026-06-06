@@ -109,6 +109,12 @@ def test_asset_files_contain_required_handoff_contracts(tmp_path):
     codegen = (tmp_path / ".claude" / "agents" / "codegen.md").read_text(encoding="utf-8")
     reviewer = (tmp_path / ".claude" / "agents" / "reviewer.md").read_text(encoding="utf-8")
     bug_fixer = (tmp_path / ".claude" / "agents" / "bug-fixer.md").read_text(encoding="utf-8")
+    attention_checklist = (
+        tmp_path / ".claude" / "references" / "ascendc-design" / "attention-checklist.md"
+    ).read_text(encoding="utf-8")
+    attention_principles = (
+        tmp_path / ".claude" / "references" / "ascendc-design" / "attention-design-principles.md"
+    ).read_text(encoding="utf-8")
 
     old_design_name = "IMPLEMENTATION_" + "PLAN.md"
 
@@ -131,12 +137,26 @@ def test_asset_files_contain_required_handoff_contracts(tmp_path):
     assert "ascendc-hardware" in designer
     assert "ascendc-sync-guide" in designer
     assert "ascendc-dev-knowledge" in designer
+    assert "参考资料发现与适用性判定" in designer
+    assert "领域专项参考" in designer
+    assert "不得硬编码某个算子目录为必读项" in designer
+    assert "读取 `current_task/design/tile_level/` 下的 TileLang kernel 实现" not in designer
+    assert "读取 `flash_attention/kernel/` 下的 AscendC kernel 代码" not in designer
     assert "attention-design-template.md" in designer
     assert "attention-checklist.md" in designer
     assert "WorkspaceQueue" in designer
     assert "HardEvent" in designer
     assert "basic_case" in designer
     assert "300-500" in designer
+    assert "300-500" in attention_checklist
+    assert "300-500" in attention_principles
+    assert "400-500" not in attention_checklist
+    assert "400-500" not in attention_principles
+    assert "flash_attention/kernel/" not in attention_principles
+    assert "TileLang kernel 已读（`current_task/design/tile_level/`）" not in attention_checklist
+    assert "flash_attention AscendC kernel 已读（`flash_attention/kernel/`）" not in attention_checklist
+    assert "相关 tile-level / TileLang 参考已判定" in attention_checklist
+    assert "相关 FA AscendC baseline 已判定" in attention_checklist
     assert "TileLang" in designer
     assert "next: codegen" in designer
 

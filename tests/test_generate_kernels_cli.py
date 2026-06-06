@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -122,3 +123,7 @@ def test_generate_and_evaluate_sets_task_run_id_unconditionally(tmp_path, monkey
     assert seen["generator_run_id"] == "run-meta"
     assert seen["final_eval_run_id"] == "run-meta"
     assert task._ksearch_run_id == "run-meta"
+    run_meta_path = tmp_path / "artifacts" / "lineage_task" / "runs" / "run-meta" / "run_meta.json"
+    artifacts_meta_path = run_meta_path.parent / "artifacts" / "run_meta.json"
+    assert json.loads(run_meta_path.read_text(encoding="utf-8"))["run_id"] == "run-meta"
+    assert not artifacts_meta_path.exists()

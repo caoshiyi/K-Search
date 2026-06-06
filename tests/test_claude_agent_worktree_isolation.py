@@ -149,7 +149,11 @@ def test_runner_fails_without_syncing_external_task_path_when_no_files_changed(t
             copied_task_back = True
         return real_copytree(src, dst, *args, **kwargs)
 
-    monkeypatch.setattr(codegen, "create_agentic_worktree", lambda *, task_path: FakeSession())
+    monkeypatch.setattr(
+        codegen,
+        "create_agentic_worktree",
+        lambda *, task_path, worktree_parent_dir=None: FakeSession(),
+    )
     monkeypatch.setattr(codegen, "_materialize_native_assets_baseline", lambda session: None)
     monkeypatch.setattr(shutil, "copytree", guard_copytree)
 

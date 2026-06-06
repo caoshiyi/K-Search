@@ -119,6 +119,26 @@ def test_create_agentic_worktree_falls_back_for_non_git_task_path(tmp_path):
     assert not path.exists()
 
 
+def test_create_agentic_worktree_uses_requested_parent_dir(tmp_path):
+    task_path = tmp_path / "plain_task"
+    task_path.mkdir()
+    (task_path / "kernel.cpp").write_text("int old_value = 1;\n", encoding="utf-8")
+    parent = tmp_path / "out" / "task" / "runs" / "run1" / "worktrees"
+
+    session = create_agentic_worktree(task_path=task_path, worktree_parent_dir=parent)
+
+    try:
+        assert session.worktree_root.parent == parent.resolve()
+        assert session.worktree_root.name.startswith("ksearch_agentic_temp_repo_")
+        assert (session.project_dir / "kernel.cpp").exists()
+    finally:
+        path = session.worktree_root
+        session.cleanup()
+
+    assert parent.exists()
+    assert not path.exists()
+
+
 def test_changed_paths_and_diff_include_new_untracked_files(tmp_path):
     task_path = tmp_path / "plain_task"
     task_path.mkdir()

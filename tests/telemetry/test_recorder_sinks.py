@@ -34,7 +34,34 @@ def test_telemetry_root_defaults_to_unified_logs_dir(monkeypatch, tmp_path):
     monkeypatch.delenv("KSEARCH_ARTIFACTS_DIR", raising=False)
     monkeypatch.chdir(tmp_path)
 
-    assert telemetry_root() == tmp_path / ".ksearch" / "logs"
+    assert telemetry_root() == tmp_path / ".ksearch"
+
+
+def test_build_attempt_dir_defaults_under_run_logs(monkeypatch, tmp_path):
+    monkeypatch.delenv("KSEARCH_TELEMETRY_DIR", raising=False)
+    monkeypatch.setenv("KSEARCH_ARTIFACTS_DIR", str(tmp_path / "out"))
+    monkeypatch.setenv("KSEARCH_RUN_ID", "run:alpha")
+    context = TelemetryContext(
+        task_name="task/name",
+        round_index=7,
+        attempt_index=2,
+        action_node_id="n/12",
+    )
+
+    path = build_attempt_dir(context)
+
+    assert path == (
+        tmp_path
+        / "out"
+        / "task_name"
+        / "runs"
+        / "run_alpha"
+        / "logs"
+        / "telemetry"
+        / "round_0007"
+        / "action_n_12"
+        / "attempt_0002"
+    )
 
 
 def test_is_telemetry_enabled_honors_falsey_env(monkeypatch):

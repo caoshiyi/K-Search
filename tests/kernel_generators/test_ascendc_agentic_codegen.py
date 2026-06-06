@@ -1139,6 +1139,36 @@ def test_runner_materializes_native_assets_and_uses_single_project_edit(tmp_path
     assert "BETA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
 
 
+def test_runner_accepts_split_heading_review_notes(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    client = NativeEditingClient(
+        review_text=(
+            "## status\n\n\n"
+            "ok\n\n"
+            "## eval_ready\n\n"
+            "true\n"
+        ),
+    )
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+        ),
+        base_solution=None,
+    )
+
+    assert result.eval_result.status == "passed"
+    assert "BETA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
+
+
 def test_runner_uses_configured_subagent_stages_in_one_session(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
     task_dir = tmp_path / "task"

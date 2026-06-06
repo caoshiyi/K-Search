@@ -351,24 +351,96 @@ def test_stage_completion_strict_marker_env_fails(tmp_path, monkeypatch):
         )
 
 
-def test_native_handoff_validation_accepts_review_notes_markdown_heading_fields(tmp_path):
-    from k_search.kernel_generators.ascendc_agentic_codegen import _require_native_handoff_files
+def test_stage_completion_does_not_warn_for_shared_code_map_marker(tmp_path, caplog, monkeypatch):
+    from k_search.kernel_generators.subagent_orchestration import (
+        SubagentStageConfig,
+        _validate_stage_completion,
+    )
 
-    (tmp_path / "REVIEW_NOTES.md").write_text(
-        "## status: ok\n\n"
-        "## changed_files_reviewed\n"
-        "- kernel/foo.h\n\n"
-        "### required_fixes: none\n\n"
-        "## eval_ready: true\n",
+    monkeypatch.delenv("KSEARCH_REQUIRE_STAGE_MARKERS", raising=False)
+    (tmp_path / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h updated\n", encoding="utf-8")
+    (tmp_path / "IMPLEMENTATION_EXECUTION_PLAN.md").write_text(
+        "<!-- ksearch-stage: codegen; ksearch-agent: codegen -->\n# execution\n",
         encoding="utf-8",
     )
+    (tmp_path / "IMPLEMENTATION_HANDOFF.md").write_text(
+        "<!-- ksearch-stage: codegen; ksearch-agent: codegen -->\n# handoff\n",
+        encoding="utf-8",
+    )
+
+    _validate_stage_completion(
+        project_root=tmp_path,
+        stage=SubagentStageConfig(
+            name="codegen",
+            agent="codegen",
+            instruction="Implement.",
+            required_files=("CODE_MAP.md", "IMPLEMENTATION_EXECUTION_PLAN.md", "IMPLEMENTATION_HANDOFF.md"),
+        ),
+        telemetry_recorder=SimpleNamespace(enabled=False, events=[]),
+        event_start=0,
+        require_agent_tool_use=True,
+    )
+
+    assert "CODE_MAP.md" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "review_text",
+    [
+        (
+            "## status: ok\n\n"
+            "## changed_files_reviewed\n"
+            "- kernel/foo.h\n\n"
+            "### required_fixes: none\n\n"
+            "## eval_ready: true\n"
+        ),
+        (
+            "## status\n\n\n"
+            "ok\n\n"
+            "## changed_files_reviewed\n"
+            "- kernel/foo.h\n\n"
+            "## eval_ready\n\n"
+            "true\n"
+        ),
+        (
+            "## status = ok\n"
+            "### required_fixes = 'none'\n"
+            "- eval_ready: `true`\n"
+        ),
+        (
+            "## status: \"ok\"\n"
+            "### required_fixes = 'none'\n"
+            "- eval_ready: `true`\n"
+        ),
+    ],
+)
+def test_native_handoff_validation_accepts_review_notes_markdown_field_variants(tmp_path, review_text):
+    from k_search.kernel_generators.ascendc_agentic_codegen import _require_native_handoff_files
+
+    (tmp_path / "REVIEW_NOTES.md").write_text(review_text, encoding="utf-8")
 
     handoffs = _require_native_handoff_files(
         tmp_path,
         required_files={"REVIEW_NOTES.md"},
     )
 
-    assert "## status: ok" in handoffs["REVIEW_NOTES.md"]
+    assert handoffs["REVIEW_NOTES.md"] == review_text
+
+
+def test_native_handoff_validation_rejects_status_pass_alias(tmp_path):
+    from k_search.kernel_generators.ascendc_agentic_codegen import _require_native_handoff_files
+
+    (tmp_path / "REVIEW_NOTES.md").write_text(
+        "## status: pass\n\n"
+        "## eval_ready: true\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="status=pass"):
+        _require_native_handoff_files(
+            tmp_path,
+            required_files={"REVIEW_NOTES.md"},
+        )
 
 
 def test_native_handoff_validation_rejects_markdown_heading_not_eval_ready(tmp_path):

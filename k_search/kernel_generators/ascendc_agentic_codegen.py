@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import logging
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass, replace
@@ -218,13 +219,74 @@ def _candidate_changed_paths(paths: list[str]) -> list[str]:
     return [path for path in paths if not _is_native_handoff_path(path)]
 
 
+def _markdown_field_candidate(line: str) -> str:
+    candidate = str(line or "").strip().lstrip("#").strip()
+    for bullet in ("- ", "* "):
+        if candidate.startswith(bullet):
+            return candidate[2:].strip()
+    return candidate
+
+
+def _split_field_candidate(candidate: str, field: str) -> tuple[bool, str | None]:
+    match = re.fullmatch(
+        rf"{re.escape(field)}\s*(?:(:|=)\s*(.*))?",
+        str(candidate or ""),
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return False, None
+    if match.group(1) is None:
+        return True, None
+    return True, (match.group(2) or "").strip()
+
+
+def _strip_wrapping_scalar_quotes(value: str) -> str:
+    stripped = str(value or "").strip()
+    if len(stripped) >= 2 and stripped[0] in {"'", '"', "`"} and stripped[-1] == stripped[0]:
+        return stripped[1:-1].strip()
+    return stripped
+
+
+def _is_fence_line(stripped: str) -> bool:
+    return stripped.startswith("```") or stripped.startswith("~~~")
+
+
+def _looks_like_field_assignment(candidate: str) -> bool:
+    return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_-]*\s*[:=]", str(candidate or "")))
+
+
+def _following_field_value(lines: list[str], start: int) -> str | None:
+    in_fence = False
+    for line in lines[start:]:
+        stripped = str(line or "").strip()
+        if _is_fence_line(stripped):
+            in_fence = not in_fence
+            continue
+        if in_fence or not stripped:
+            continue
+        candidate = _markdown_field_candidate(stripped)
+        if stripped.startswith("#") or _looks_like_field_assignment(candidate):
+            return None
+        return _strip_wrapping_scalar_quotes(candidate)
+    return None
+
+
 def _field_value(text: str, field: str) -> str | None:
-    prefix = f"{field.lower()}:"
-    for line in str(text or "").splitlines():
+    lines = str(text or "").splitlines()
+    in_fence = False
+    for index, line in enumerate(lines):
         stripped = line.strip()
-        candidate = stripped.lstrip("#").strip()
-        if candidate.lower().startswith(prefix):
-            return candidate[len(prefix) :].strip()
+        if _is_fence_line(stripped):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        candidate = _markdown_field_candidate(stripped)
+        matched, value = _split_field_candidate(candidate, field)
+        if matched:
+            if value:
+                return _strip_wrapping_scalar_quotes(value)
+            return _following_field_value(lines, index + 1)
     return None
 
 

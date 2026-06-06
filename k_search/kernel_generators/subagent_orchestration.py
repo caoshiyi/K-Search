@@ -21,6 +21,7 @@ SUBAGENT_NAME_KEYS = (
     "agent_name",
     "type",
 )
+SHARED_STAGE_MARKER_FILES = {"CODE_MAP.md"}
 
 
 @dataclass(frozen=True)
@@ -308,6 +309,8 @@ def _warn_on_missing_stage_markers(*, project_root: Path, stage: SubagentStageCo
     missing: list[str] = []
     expected = f"ksearch-agent: {stage.agent}"
     for rel in stage.required_files:
+        if rel in SHARED_STAGE_MARKER_FILES and stage.agent != "code-reader":
+            continue
         path = project_root / rel
         if not path.is_file():
             continue

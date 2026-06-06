@@ -54,19 +54,28 @@ complete? is there existing protection or design intent? Discard anything that i
 issue. Common false positives: compile-time branch judged as runtime risk; missing a needed
 definition; ignoring shape/attr preconditions; path already protected by sync or condition.
 
-## Write REVIEW_NOTES.md at the project root with EXACTLY these fields
-- status: ok, needs_fix, or failed
+## Write REVIEW_NOTES.md at the project root
+
+Start the file with exactly these three machine-readable header lines, replacing
+the values with the review result:
+status: ok | needs_fix | failed
+eval_ready: true | false
+required_fixes: none | <concrete minimal fixes>
+
+Use `status: ok`, `eval_ready: true`, and `required_fixes: none` ONLY when the
+candidate is correct, in-scope, contract-preserving, and free of confirmed
+precision/sync/bounds issues. Do not write aliases such as pass, passed, yes, or
+ready for these fields.
+
+After the header, include these review details:
 - changed_files_reviewed: <list>
 - contract_risks: <list or none>
 - precision_risks: <confirmed precision issues, or none>
 - required_fixes: <list of concrete minimal fixes, or none>
-- eval_ready: true or false
 
 If IMPLEMENTATION_DEVIATIONS.md contains any D1 entry, write `eval_ready: false`
 and list the design fix in `required_fixes`.
 
-Set eval_ready: true and status: ok and required_fixes: none ONLY when the candidate is
-correct, in-scope, contract-preserving, and free of confirmed precision/sync/bounds issues.
 If eval_ready is false, explain the minimal fix in REVIEW_NOTES.md (do not edit source).
 
 ## Final message contract

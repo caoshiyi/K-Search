@@ -36,7 +36,7 @@ from k_search.tasks.task_base import EvalResult, Solution
 from k_search.telemetry.context import TelemetryContext
 from k_search.telemetry.recorder import build_file_recorder
 from k_search.utils.path_sanitize import sanitize_worktree_paths
-from k_search.utils.paths import get_ksearch_artifacts_dir, get_run_id
+from k_search.utils.paths import get_ksearch_artifacts_dir, get_ksearch_worktrees_dir, get_run_id
 
 
 logger = logging.getLogger(__name__)
@@ -718,6 +718,11 @@ class AscendCAgenticCycle:
         try:
             self.wt_session = create_agentic_worktree(
                 task_path=getattr(self.task, "task_path", None),
+                worktree_parent_dir=get_ksearch_worktrees_dir(
+                    base_dir=getattr(self.task, "artifacts_dir", None),
+                    task_name=self.task_name,
+                    run_id=self.run_id,
+                ),
             )
             overlay = getattr(self.task, "overlay_solution_sources", None)
             if callable(overlay):

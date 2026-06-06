@@ -139,7 +139,11 @@ def _install_fake_worktree(monkeypatch, tmp_path: Path) -> FakeWorktree:
     (worktree_dir / "kernel").mkdir(parents=True)
     (worktree_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
     worktree = FakeWorktree(worktree_dir)
-    monkeypatch.setattr(codegen, "create_agentic_worktree", lambda *, task_path: worktree)
+    monkeypatch.setattr(
+        codegen,
+        "create_agentic_worktree",
+        lambda *, task_path, worktree_parent_dir=None: worktree,
+    )
     monkeypatch.setattr(codegen, "_materialize_native_assets_baseline", lambda wt_session: None)
     return worktree
 

@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from k_search.utils.paths import get_run_id, resolve_output_base, safe_path_component
+from k_search.utils.paths import get_run_id, get_run_logs_dir, resolve_output_base, safe_path_component
 
 
 @dataclass(frozen=True)
@@ -46,8 +46,9 @@ def telemetry_root() -> Path:
     raw = os.getenv("KSEARCH_TELEMETRY_DIR", "").strip()
     if raw:
         return Path(raw).expanduser().resolve()
-    # Unified: telemetry lives under the shared logs root next to llm logs.
-    return resolve_output_base() / "logs"
+    # Default telemetry is rooted at the shared output base; build_attempt_dir()
+    # places it under the run-local logs directory.
+    return resolve_output_base()
 
 
 def default_run_id() -> str:
@@ -71,6 +72,14 @@ def build_attempt_dir(context: TelemetryContext, *, root: Path | None = None) ->
     task_name = safe_path_component(context.task_name or context.definition, default="__unknown__")
     run_id = safe_path_component(context.run_id or default_run_id(), default="run")
     action = "action_" + safe_path_component(context.action_node_id, default="unknown")
+    if root is None and not os.getenv("KSEARCH_TELEMETRY_DIR", "").strip():
+        base = get_run_logs_dir(task_name=task_name, run_id=run_id) / "telemetry"
+        return (
+            base
+            / _round_component(context.round_index)
+            / action
+            / _attempt_component(context.attempt_index)
+        )
     return (
         (root or telemetry_root())
         / task_name

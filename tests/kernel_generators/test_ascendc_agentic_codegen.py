@@ -272,6 +272,7 @@ def test_runner_evaluates_worktree_and_persists_project_snapshot_candidate(tmp_p
     assert result.eval_project_path is not None
     assert result.eval_result.metrics["workdir"] == result.eval_project_path
     assert result.eval_result.metrics["workdir"] != result.project_path
+    assert str(tmp_path / "artifacts" / "x" / "runs" / "artifact-run" / "worktrees") in result.project_path
     assert result.evaluator_mutated_project is False
     assert "build saw edited complete worktree" in result.eval_result.log_excerpt
     assert result.candidate_patch is not None
@@ -280,6 +281,15 @@ def test_runner_evaluates_worktree_and_persists_project_snapshot_candidate(tmp_p
     assert result.project_snapshot is not None
     assert "kernel/large_header.hpp" in result.project_snapshot.manifest
     assert result.artifact_paths is not None
+    assert str(
+        tmp_path
+        / "artifacts"
+        / "x"
+        / "runs"
+        / "artifact-run"
+        / "artifacts"
+        / "candidates"
+    ) in result.artifact_paths["manifest_path"]
     manifest = json.loads(Path(result.artifact_paths["manifest_path"]).read_text(encoding="utf-8"))
     assert manifest["candidate_id"] == result.candidate_patch.candidate_id
     assert manifest["snapshot_id"] == result.project_snapshot.snapshot_id
@@ -352,7 +362,7 @@ def test_runner_allows_missing_run_context_with_escape_hatch(tmp_path, monkeypat
     )
 
     assert result.artifact_paths is not None
-    assert "/runs/fallback-run/" in result.artifact_paths["manifest_path"]
+    assert "/runs/fallback-run/artifacts/" in result.artifact_paths["manifest_path"]
 
 
 def test_runner_fails_when_agent_makes_no_file_changes(tmp_path):
@@ -1363,7 +1373,7 @@ def test_continue_fix_uses_native_prompt_and_run_scoped_artifacts(tmp_path, monk
     assert "raw compile fix context" in client.prompts[4]
     assert "Use the bug-fixer subagent" in client.prompts[4]
     assert second.artifact_paths is not None
-    assert "/runs/native-continue/" in second.artifact_paths["manifest_path"]
+    assert "/runs/native-continue/artifacts/" in second.artifact_paths["manifest_path"]
 
 
 def test_run_multi_turn_uses_repair_flow_when_eval_fails(tmp_path, monkeypatch):

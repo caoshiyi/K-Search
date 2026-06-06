@@ -59,6 +59,12 @@ def _remove_path(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
+def _mkdtemp(*, prefix: str, parent_dir: Path | None) -> str:
+    if parent_dir is None:
+        return tempfile.mkdtemp(prefix=prefix)
+    return tempfile.mkdtemp(prefix=prefix, dir=parent_dir)
+
+
 def _mirror_project_state(src: Path, dst: Path, *, worktree_root: Path) -> None:
     """Make the candidate project match the current task directory on disk."""
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -211,7 +217,11 @@ def _commit_all(root: Path, message: str) -> str:
     return _git_stdout(root, "rev-parse", "HEAD")
 
 
-def create_agentic_worktree(*, task_path: str | Path | None) -> AgenticWorktreeSession:
+def create_agentic_worktree(
+    *,
+    task_path: str | Path | None,
+    worktree_parent_dir: str | Path | None = None,
+) -> AgenticWorktreeSession:
     if task_path is None:
         raise AgenticWorktreeError("AscendC agentic codegen requires task_path")
 
@@ -227,9 +237,12 @@ def create_agentic_worktree(*, task_path: str | Path | None) -> AgenticWorktreeS
     }
 
     repo_root = _find_git_root(task_root)
+    parent_dir = Path(worktree_parent_dir).expanduser().resolve() if worktree_parent_dir is not None else None
+    if parent_dir is not None:
+        parent_dir.mkdir(parents=True, exist_ok=True)
 
     if repo_root is not None:
-        temp_root = Path(tempfile.mkdtemp(prefix="ksearch_agentic_worktree_")).resolve()
+        temp_root = Path(_mkdtemp(prefix="ksearch_agentic_worktree_", parent_dir=parent_dir)).resolve()
         try:
             _git(repo_root, "worktree", "add", "--detach", str(temp_root), "HEAD")
             rel_project = task_root.relative_to(repo_root)
@@ -247,7 +260,7 @@ def create_agentic_worktree(*, task_path: str | Path | None) -> AgenticWorktreeS
         except Exception:
             shutil.rmtree(temp_root, ignore_errors=True)
 
-    fallback_root = Path(tempfile.mkdtemp(prefix="ksearch_agentic_temp_repo_")).resolve()
+    fallback_root = Path(_mkdtemp(prefix="ksearch_agentic_temp_repo_", parent_dir=parent_dir)).resolve()
     _copy_project(task_root, fallback_root)
     _git(fallback_root, "init")
     baseline_commit = _commit_all(fallback_root, "ksearch agentic baseline")

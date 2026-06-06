@@ -156,7 +156,7 @@ def generate_and_evaluate(
     """
     Generate exactly one solution for the task, then run final evaluation.
     """
-    from k_search.utils.paths import get_ksearch_artifacts_dir, get_run_id
+    from k_search.utils.paths import get_ksearch_run_dir, get_run_id
 
     # Determine run_id
     if continue_from_run:
@@ -169,7 +169,7 @@ def generate_and_evaluate(
     task_name = str(getattr(task, "name", "") or "")
 
     # Write run_meta.json
-    run_root = get_ksearch_artifacts_dir(
+    run_root = get_ksearch_run_dir(
         base_dir=artifacts_dir,
         task_name=task_name,
         run_id=effective_run_id,
@@ -528,7 +528,8 @@ def main():
         default=None,
         help=(
             "Resume world-model prompting state from a JSON file path. "
-            "Use 'auto' to load <artifacts>/<task>/world_model/world_model.json if present."
+            "Use 'auto' to load <base>/<task>/runs/<run_id>/artifacts/world_model/world_model.json "
+            "if present, falling back to <base>/<task>/artifacts/world_model/world_model.json."
         ),
     )
     parser.add_argument("--feedback-workloads", nargs="+", default=None, help="Explicit workload UUIDs to use for optimization feedback rounds")
@@ -609,9 +610,9 @@ def main():
 
     args = parser.parse_args()
 
-    # Pin a single output base + run id for the whole process so that llm logs,
-    # telemetry and the narrative summary all land under the same
-    # <base>/logs/<task>/<run_id>/ tree (and never drift apart across calls).
+    # Pin a single output base + run id for the whole process so that artifacts,
+    # llm logs, telemetry and the narrative summary all land under the same
+    # <base>/<task>/runs/<run_id>/ tree (and never drift apart across calls).
     from k_search.utils.paths import get_run_id, resolve_output_base
 
     os.environ.setdefault(

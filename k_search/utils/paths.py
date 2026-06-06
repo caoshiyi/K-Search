@@ -55,19 +55,34 @@ def get_ksearch_artifacts_dir(
     """
     Default k-search artifacts directory (independent of flashinfer-bench dataset paths).
 
-    Artifacts (solutions, eval, candidates, snapshots, world_model, memory) live at
-    `<base>/<task>`. Base resolution is shared with logs via resolve_output_base().
+    Run-scoped artifacts live under the shared run root:
+    `<base>/<task>/runs/<run_id>/artifacts`.
 
-    When include_run=True and run_id is provided, artifacts are scoped under
-    `<base>/<task>/runs/<run_id>/` for run-level isolation.
+    When include_run=False, returns the task-level artifacts root:
+    `<base>/<task>/artifacts`.
     """
+    if include_run:
+        return get_ksearch_run_dir(base_dir=base_dir, task_name=task_name, run_id=run_id) / "artifacts"
     root = resolve_output_base(base_dir)
     if task_name:
         root = root / safe_path_component(task_name, default="__unknown__")
-    if include_run:
-        rid = run_id or get_run_id()
-        root = root / "runs" / safe_path_component(rid, default="run")
-    return root
+    return root / "artifacts"
+
+
+def get_ksearch_run_dir(
+    *,
+    base_dir: Optional[PathLike] = None,
+    task_name: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> Path:
+    """Shared run root: `<base>/<task>/runs/<run_id>`.
+
+    Artifacts, logs, and worktrees are siblings beneath this directory.
+    """
+    base = resolve_output_base(base_dir)
+    task = safe_path_component(task_name, default="__unknown__")
+    rid = safe_path_component(run_id or get_run_id(), default="run")
+    return base / task / "runs" / rid
 
 
 def get_run_logs_dir(
@@ -77,19 +92,22 @@ def get_run_logs_dir(
     run_id: Optional[str] = None,
     sub: Optional[str] = None,
 ) -> Path:
-    """Unified run-scoped logs directory: `<base>/logs/<task>/<run_id>[/<sub>]`.
+    """Unified run-scoped logs directory: `<base>/<task>/runs/<run_id>/logs[/<sub>]`.
 
-    `sub` is typically "llm" or "telemetry". When omitted, returns the run root
+    `sub` is typically "llm" or "telemetry". When omitted, returns the logs root
     (where summary.md / events.jsonl / run_meta.json live).
     """
-    base = resolve_output_base(base_dir)
-    rid = run_id or get_run_id()
-    path = (
-        base
-        / "logs"
-        / safe_path_component(task_name, default="__unknown__")
-        / safe_path_component(rid, default="run")
-    )
+    path = get_ksearch_run_dir(base_dir=base_dir, task_name=task_name, run_id=run_id) / "logs"
     if sub:
         path = path / safe_path_component(sub, default="sub")
     return path
+
+
+def get_ksearch_worktrees_dir(
+    *,
+    base_dir: Optional[PathLike] = None,
+    task_name: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> Path:
+    """Run-scoped worktree parent: `<base>/<task>/runs/<run_id>/worktrees`."""
+    return get_ksearch_run_dir(base_dir=base_dir, task_name=task_name, run_id=run_id) / "worktrees"

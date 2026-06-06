@@ -22,11 +22,11 @@ fi
 # --- Required env ------------------------------------------------------------
 : "${ANTHROPIC_AUTH_TOKEN:?missing - export it or set .env.ANTHROPIC_AUTH_TOKEN in ~/.claude/settings.json}"
 : "${ANTHROPIC_BASE_URL:?missing - export it or set .env.ANTHROPIC_BASE_URL in ~/.claude/settings.json}"
-: "${BASELINE_MS:?run baseline first and export BASELINE_MS (mean_us/1000 from utils/run_perf.py)}"
+export BASELINE_MS="${BASELINE_MS:-0.437}"
 
 # --- Configurable ------------------------------------------------------------
-KSEARCH_ROOT="${KSEARCH_ROOT:-/mnt/workspace/K-Search}"
-TASK_DIR="${TASK_DIR:-/mnt/workspace/cv_agent/tile2asc/multi_query_attention}"
+KSEARCH_ROOT="${KSEARCH_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+TASK_DIR="${TASK_DIR:-/home/c00958677/cv_agent/tile2asc/multi_query_attention}"
 MODEL_NAME="${MODEL_NAME:-glm-5.1}"
 MAX_ROUNDS="${MAX_ROUNDS:-20}"
 TARGET_GPU="${TARGET_GPU:-Ascend910B3}"
@@ -49,7 +49,6 @@ export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-64000}"
 # Cap max turns per session so the agent doesn't spin indefinitely.
 export CLAUDE_AGENT_MAX_TURNS=50
 
-export BASELINE_MS=0.437
 
 cd "$KSEARCH_ROOT"
 

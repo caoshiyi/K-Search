@@ -1,0 +1,295 @@
+diff --git a/agent_workdir/flash_attention/kernel/flash_attention_cube.h b/agent_workdir/flash_attention/kernel/flash_attention_cube.h
+index 9068c5d..0afdeb8 100644
+--- a/agent_workdir/flash_attention/kernel/flash_attention_cube.h
++++ b/agent_workdir/flash_attention/kernel/flash_attention_cube.h
+@@ -41,13 +41,17 @@ public:
+         uint32_t dim = tiling_.dim;
+         // Q big block resides in L1 for the whole task (mBaseSize rows), reused by
+         // every KV outer block. K/V/P stay at the 128 micro-block granularity.
++        // Round2: K/P merged into one TQue depth 3 (MM1 K / MM2 P), V TQue depth 2,
++        // L0C TQue depth 2 — multi-buffer pipeline to overlap MTE2 load with Mmad/Fix.
+         pipe.InitBuffer(qBufL1_, tiling_.mBaseSize * dim * sizeof(QType));
+-        pipe.InitBuffer(kvBufL1_, BLOCK_N * dim * sizeof(QType));
+-        pipe.InitBuffer(vBufL1_,  BLOCK_N * dim * sizeof(QType));
+-        pipe.InitBuffer(pBufL1_, BLOCK_M * BLOCK_N * sizeof(QType));
++        uint32_t kElems = BLOCK_N * dim;        // MM1: K micro-block (kvRows x dim)
++        uint32_t pElems = BLOCK_M * BLOCK_N;    // MM2: P micro-block (mRows x kRows)
++        uint32_t kpSlot = kElems > pElems ? kElems : pElems;
++        pipe.InitBuffer(kpQueL1_, 3, kpSlot * sizeof(QType));
++        pipe.InitBuffer(vQueL1_, 2, BLOCK_N * dim * sizeof(QType));
+         pipe.InitBuffer(queL0A_, 2, BLOCK_M * BASE_K * sizeof(QType));
+         pipe.InitBuffer(queL0B_, 2, BASE_K * BLOCK_N * sizeof(QType));
+-        pipe.InitBuffer(queL0C_, 1, BLOCK_M * BASE_K * sizeof(float));
++        pipe.InitBuffer(queL0C_, 2, BLOCK_M * BASE_K * sizeof(float));
+     }
+ 
+     // Load the entire Q big block (qRows x dim, qRows <= mBaseSize) into L1 once.
+@@ -89,13 +93,14 @@ public:
+             uint32_t kvRows      = (s2Rows - nStart) < BLOCK_N ? (s2Rows - nStart) : BLOCK_N;
+             uint32_t kvRowsAlign = AlignUp(kvRows, C0);
+ 
+-            LocalTensor<QType> kvL1 = kvBufL1_.Get<QType>();
++            // K micro-block GM->L1 via TQue (ping-pong, auto MTE2<->MTE1 flag).
++            LocalTensor<QType> kvL1 = kpQueL1_.AllocTensor<QType>();
+             uint64_t kOffset = ((uint64_t)bz * tiling_.nkv * kvSeqLen
+                               + (uint64_t)kvHead * kvSeqLen
+                               + (uint64_t)(s2Start + nStart)) * dim;
+-            SetWaitFlag<HardEvent::MTE1_MTE2>();  // prior K-block L0 reads done before reload
+             LoadNdGmToNzL1(kvL1, kGm_[kOffset], kvRows, dim, dim, kvRowsAlign);
+-            SetWaitFlag<HardEvent::MTE2_MTE1>();
++            kpQueL1_.EnQue(kvL1);
++            kvL1 = kpQueL1_.DeQue<QType>();
+ 
+             // ---- middle: Q micro-block (128) along qRows ----
+             for (uint32_t mStart = 0; mStart < qRows; mStart += BLOCK_M) {
+@@ -105,7 +110,6 @@ public:
+                 LocalTensor<float> cL0 = queL0C_.AllocTensor<float>();
+ 
+                 for (uint32_t ki = 0; ki < kTiles; ki++) {
+-                    SetWaitFlag<HardEvent::M_MTE1>();
+                     LocalTensor<QType> aL0 = queL0A_.AllocTensor<QType>();
+                     {
+                         uint64_t qL1Off = (uint64_t)ki * BASE_K * qC0Stride;
+@@ -121,7 +125,6 @@ public:
+                     }
+                     queL0A_.EnQue(aL0);
+ 
+-                    SetWaitFlag<HardEvent::M_MTE1>();
+                     LocalTensor<QType> bL0 = queL0B_.AllocTensor<QType>();
+                     {
+                         uint64_t kL1Off = (uint64_t)ki * kvRowsAlign * BASE_K;
+@@ -144,7 +147,6 @@ public:
+                     mp.k = BASE_K;
+                     mp.cmatrixInitVal = (ki == 0);
+                     mp.cmatrixSource  = false;
+-                    SetWaitFlag<HardEvent::MTE1_M>();
+                     PipeBarrier<PIPE_M>();
+                     Mmad(cL0, aL0, bL0, cL0, mp);
+                     queL0A_.FreeTensor(aL0);
+@@ -153,7 +155,6 @@ public:
+ 
+                 if (kRemain > 0) {
+                     uint32_t kAligned = AlignUp(kRemain, C0);
+-                    SetWaitFlag<HardEvent::M_MTE1>();
+                     LocalTensor<QType> aL0 = queL0A_.AllocTensor<QType>();
+                     {
+                         uint64_t qL1Off = (uint64_t)kTiles * BASE_K * qC0Stride;
+@@ -169,7 +170,6 @@ public:
+                     }
+                     queL0A_.EnQue(aL0);
+ 
+-                    SetWaitFlag<HardEvent::M_MTE1>();
+                     LocalTensor<QType> bL0 = queL0B_.AllocTensor<QType>();
+                     {
+                         uint64_t kL1Off = (uint64_t)kTiles * kvRowsAlign * BASE_K;
+@@ -192,7 +192,6 @@ public:
+                     mp.k = kAligned;
+                     mp.cmatrixInitVal = (kTiles == 0);
+                     mp.cmatrixSource  = false;
+-                    SetWaitFlag<HardEvent::MTE1_M>();
+                     PipeBarrier<PIPE_M>();
+                     Mmad(cL0, aL0, bL0, cL0, mp);
+                     queL0A_.FreeTensor(aL0);
+@@ -201,7 +200,6 @@ public:
+ 
+                 queL0C_.EnQue(cL0);
+                 cL0 = queL0C_.DeQue<float>();
+-                SetWaitFlag<HardEvent::M_FIX>();
+ 
+                 // L0C(mRows x kvRowsAlign) -> wsS slot at (mStart, nStart)
+                 FixpipeParamsV220 fixParams;
+@@ -214,10 +212,9 @@ public:
+                 fixParams.dstNdStride = 0;
+                 Fixpipe(sSlot[(uint64_t)mStart * outerCols + nStart], cL0, fixParams);
+                 queL0C_.FreeTensor(cL0);
+-                SetWaitFlag<HardEvent::FIX_MTE2>();
+             }
++            kpQueL1_.FreeTensor(kvL1);
+         }
+-        SetWaitFlag<HardEvent::FIX_MTE2>();
+         sQueue_.ProducerReleaseFix();
+     }
+ 
+@@ -236,9 +233,6 @@ public:
+         auto pSlot = pQueue_.ConsumerAcquire();
+         auto oSlot = oQueue_.ProducerAcquire();
+ 
+-        LocalTensor<QType> pL1 = pBufL1_.Get<QType>();
+-        LocalTensor<QType> vL1 = vBufL1_.Get<QType>();
+-
+         // ---- outer: Q micro-block (128) ----
+         for (uint32_t mStart = 0; mStart < qRows; mStart += BLOCK_M) {
+             uint32_t mRows      = (qRows - mStart) < BLOCK_M ? (qRows - mStart) : BLOCK_M;
+@@ -259,22 +253,26 @@ public:
+                     uint32_t kRows      = (s2Rows - kStart) < BLOCK_N ? (s2Rows - kStart) : BLOCK_N;
+                     uint32_t kRowsAlign = AlignUp(kRows, C0);
+ 
+-                    // P slice (mRows x kRows) from wsP slot -> L1 NZ
++                    // P slice (mRows x kRows) from wsP slot -> L1 NZ (TQue ping-pong)
++                    LocalTensor<QType> pL1 = kpQueL1_.AllocTensor<QType>();
+                     uint64_t pOff = (uint64_t)mStart * outerCols + kStart;
+                     LoadNdGmToNzL1(pL1, pSlot[pOff], mRows, kRows, outerCols, mRowsAlign);
+-                    // V slice (kRows x dim) from GM -> L1 NZ
++                    kpQueL1_.EnQue(pL1);
++                    // V slice (kRows x dim) from GM -> L1 NZ (TQue ping-pong)
++                    LocalTensor<QType> vL1 = vQueL1_.AllocTensor<QType>();
+                     uint64_t vOffset = ((uint64_t)bz * tiling_.nkv * kvSeqLen
+                                       + (uint64_t)kvHead * kvSeqLen
+                                       + (uint64_t)(s2Start + kStart)) * dim;
+                     LoadNdGmToNzL1(vL1, vGm_[vOffset], kRows, dim, dim, kRowsAlign);
+-                    SetWaitFlag<HardEvent::MTE2_MTE1>();
++                    vQueL1_.EnQue(vL1);
++
++                    pL1 = kpQueL1_.DeQue<QType>();
++                    vL1 = vQueL1_.DeQue<QType>();
+ 
+-                    SetWaitFlag<HardEvent::M_MTE1>();
+                     LocalTensor<QType> aL0 = queL0A_.AllocTensor<QType>();
+                     LoadNzL1ToZzL0A(aL0, pL1, mRowsAlign, kRowsAlign, mRowsAlign);
+                     queL0A_.EnQue(aL0);
+ 
+-                    SetWaitFlag<HardEvent::M_MTE1>();
+                     LocalTensor<QType> bL0 = queL0B_.AllocTensor<QType>();
+                     uint64_t vL1Off = (uint64_t)ni * kRowsAlign * BASE_K;
+                     LoadNzL1ToZnL0B(bL0, vL1[vL1Off], kRowsAlign, nAlign, kRowsAlign);
+@@ -289,18 +287,17 @@ public:
+                     mp.k = kRowsAlign;
+                     mp.cmatrixInitVal = isFirstK;
+                     mp.cmatrixSource  = false;
+-                    SetWaitFlag<HardEvent::MTE1_M>();
+                     PipeBarrier<PIPE_M>();
+                     Mmad(cL0, aL0, bL0, cL0, mp);
+                     queL0A_.FreeTensor(aL0);
+                     queL0B_.FreeTensor(bL0);
++                    kpQueL1_.FreeTensor(pL1);
++                    vQueL1_.FreeTensor(vL1);
+                     isFirstK = false;
+-                    SetWaitFlag<HardEvent::MTE1_MTE2>();  // L1 read done before next reload
+                 }
+ 
+                 queL0C_.EnQue(cL0);
+                 cL0 = queL0C_.DeQue<float>();
+-                SetWaitFlag<HardEvent::M_FIX>();
+ 
+                 FixpipeParamsV220 fixParams;
+                 fixParams.mSize       = mRows;
+@@ -312,10 +309,8 @@ public:
+                 fixParams.dstNdStride = 0;
+                 Fixpipe(oSlot[(uint64_t)mStart * dimAlign_ + nOff], cL0, fixParams);
+                 queL0C_.FreeTensor(cL0);
+-                SetWaitFlag<HardEvent::FIX_MTE2>();
+             }
+         }
+-        SetWaitFlag<HardEvent::FIX_MTE2>();
+         oQueue_.ProducerReleaseFix();
+     }
+ 
+@@ -332,13 +327,12 @@ private:
+     WorkspaceQueue<float, RING_SLOTS> oQueue_;
+ 
+     TBuf<TPosition::A1> qBufL1_;
+-    TBuf<TPosition::A1> kvBufL1_;
+-    TBuf<TPosition::A1> vBufL1_;
+-    TBuf<TPosition::A1> pBufL1_;
++    TQue<TPosition::A1, 3> kpQueL1_;   // MM1 K / MM2 P, depth 3 for PRELAUNCH=2
++    TQue<TPosition::A1, 2> vQueL1_;    // MM2 V, ping-pong
+ 
+     TQue<TPosition::A2, 2> queL0A_;
+     TQue<TPosition::B2, 2> queL0B_;
+-    TQue<TPosition::CO1, 1> queL0C_;
++    TQue<TPosition::CO1, 2> queL0C_;
+ };
+ 
+ #endif // FLASH_ATTENTION_CUBE_H
+diff --git a/agent_workdir/flash_attention/kernel/flash_attention_kernel.h b/agent_workdir/flash_attention/kernel/flash_attention_kernel.h
+index 9866c94..2f6e0ba 100644
+--- a/agent_workdir/flash_attention/kernel/flash_attention_kernel.h
++++ b/agent_workdir/flash_attention/kernel/flash_attention_kernel.h
+@@ -107,25 +107,43 @@ public:
+             if ASCEND_IS_AIC {
+                 cubeKernel_.LoadQ(bz, qHead, qRowStart, qRows);
+ 
+-                for (uint32_t t2 = 0; t2 < s2OuterBlocks; t2++) {
+-                    uint32_t s2Start = t2 * s2BaseSize;
+-                    uint32_t s2Rows = (kvSeqLen - s2Start) < s2BaseSize ? (kvSeqLen - s2Start) : s2BaseSize;
+-                    cubeKernel_.ComputeMM1(bz, kvHead, s2Start, s2Rows, qRows);
+-                    cubeKernel_.ComputeMM2(bz, kvHead, s2Start, s2Rows, qRows);
++                // PRELAUNCH staggered software pipeline: in iteration t, first do
++                // MM2(t-PRELAUNCH) (consume P), then MM1(t) (produce S). MM1 leads
++                // MM2 by PRELAUNCH blocks so the next block's K MTE2 load overlaps
++                // the current block's Mmad/Fixpipe (multi-buffer).
++                for (uint32_t t = 0; t < s2OuterBlocks + PRELAUNCH; t++) {
++                    if (t >= PRELAUNCH) {
++                        uint32_t o = t - PRELAUNCH;
++                        uint32_t s2Start = o * s2BaseSize;
++                        uint32_t s2Rows = (kvSeqLen - s2Start) < s2BaseSize ? (kvSeqLen - s2Start) : s2BaseSize;
++                        cubeKernel_.ComputeMM2(bz, kvHead, s2Start, s2Rows, qRows);
++                    }
++                    if (t < s2OuterBlocks) {
++                        uint32_t s2Start = t * s2BaseSize;
++                        uint32_t s2Rows = (kvSeqLen - s2Start) < s2BaseSize ? (kvSeqLen - s2Start) : s2BaseSize;
++                        cubeKernel_.ComputeMM1(bz, kvHead, s2Start, s2Rows, qRows);
++                    }
+                 }
+             }
+ 
+             if ASCEND_IS_AIV {
+                 vecKernel_.SetTaskContext(bz, qHead, qRowStart, qRows);
+ 
+-                for (uint32_t t2 = 0; t2 < s2OuterBlocks; t2++) {
+-                    uint32_t s2Start = t2 * s2BaseSize;
+-                    uint32_t s2Rows = (kvSeqLen - s2Start) < s2BaseSize ? (kvSeqLen - s2Start) : s2BaseSize;
+-                    int slot = t2 % RING_SLOTS;
+-                    bool isFirst = (t2 == 0);
+-                    bool isLast = (t2 == s2OuterBlocks - 1);
+-                    vecKernel_.ComputeVec1(slot, isFirst, s2Rows);
+-                    vecKernel_.ComputeVec2(slot, isFirst, isLast);
++                for (uint32_t t = 0; t < s2OuterBlocks + PRELAUNCH; t++) {
++                    if (t >= PRELAUNCH) {
++                        uint32_t o = t - PRELAUNCH;
++                        int slot = o % RING_SLOTS;
++                        bool isFirst = (o == 0);
++                        bool isLast = (o == s2OuterBlocks - 1);
++                        vecKernel_.ComputeVec2(slot, isFirst, isLast);
++                    }
++                    if (t < s2OuterBlocks) {
++                        uint32_t s2Start = t * s2BaseSize;
++                        uint32_t s2Rows = (kvSeqLen - s2Start) < s2BaseSize ? (kvSeqLen - s2Start) : s2BaseSize;
++                        int slot = t % RING_SLOTS;
++                        bool isFirst = (t == 0);
++                        vecKernel_.ComputeVec1(slot, isFirst, s2Rows);
++                    }
+                 }
+             }
+ 
+diff --git a/agent_workdir/flash_attention/kernel/flash_attention_vec.h b/agent_workdir/flash_attention/kernel/flash_attention_vec.h
+index 946aff9..9ac3b8e 100644
+--- a/agent_workdir/flash_attention/kernel/flash_attention_vec.h
++++ b/agent_workdir/flash_attention/kernel/flash_attention_vec.h
+@@ -65,7 +65,7 @@ public:
+         uint32_t vec2OutFloat = VEC2_M_CHUNK * dimAlign_ * sizeof(float);
+         if (vec2OutHalf > outputBufSize) outputBufSize = vec2OutHalf;
+         if (vec2OutFloat > outputBufSize) outputBufSize = vec2OutFloat;
+-        pipe->InitBuffer(outputQue1_, 1, outputBufSize);
++        pipe->InitBuffer(outputQue1_, 2, outputBufSize);
+ 
+         pipe->InitBuffer(tmpBuf_, 32 * 1024);
+         pipe->InitBuffer(softmaxMaxBuf_, SOFTMAX_TMP_BUF_SIZE);
+@@ -118,7 +118,7 @@ public:
+     __aicore__ inline void ComputeVec1(int slot, bool isFirst, uint32_t kvRows)
+     {
+         auto sSlot = sQueue_.ConsumerAcquire();
+-        if (vecDealM_ == 0) { return; }
++        if (vecDealM_ == 0) { pQueue_.ProducerReleaseMte3(); return; }
+         uint32_t outerCols = s2BaseSize_;
+         uint32_t prevSlot = (slot + RING_SLOTS - 1) % RING_SLOTS;
+ 
+@@ -307,7 +307,7 @@ private:
+     WorkspaceQueue<float, RING_SLOTS> oQueue_;
+ 
+     TQue<TPosition::VECIN, 2> inputQue1_;
+-    TQue<TPosition::VECOUT, 1> outputQue1_;
++    TQue<TPosition::VECOUT, 2> outputQue1_;
+ 
+     TBuf<TPosition::VECCALC> tmpBuf_;
+     TBuf<TPosition::VECCALC> softmaxMaxBuf_;

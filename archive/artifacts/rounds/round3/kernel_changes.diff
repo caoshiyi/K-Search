@@ -1,0 +1,303 @@
+diff --git a/agent_workdir/flash_attention/kernel/flash_attention_cube.h b/agent_workdir/flash_attention/kernel/flash_attention_cube.h
+index 0afdeb8..d00296b 100644
+--- a/agent_workdir/flash_attention/kernel/flash_attention_cube.h
++++ b/agent_workdir/flash_attention/kernel/flash_attention_cube.h
+@@ -44,7 +44,8 @@ public:
+         // Round2: K/P merged into one TQue depth 3 (MM1 K / MM2 P), V TQue depth 2,
+         // L0C TQue depth 2 — multi-buffer pipeline to overlap MTE2 load with Mmad/Fix.
+         pipe.InitBuffer(qBufL1_, tiling_.mBaseSize * dim * sizeof(QType));
+-        uint32_t kElems = BLOCK_N * dim;        // MM1: K micro-block (kvRows x dim)
++        // MM1: K big block (nL1Size x dim); nL1Size=256 when dim<=128, else 128.
++        uint32_t kElems = ((dim <= BASE_K) ? 256U : BLOCK_N) * dim;
+         uint32_t pElems = BLOCK_M * BLOCK_N;    // MM2: P micro-block (mRows x kRows)
+         uint32_t kpSlot = kElems > pElems ? kElems : pElems;
+         pipe.InitBuffer(kpQueL1_, 3, kpSlot * sizeof(QType));
+@@ -85,19 +86,21 @@ public:
+         uint32_t qC0Stride  = qRowsAlign;       // NZ col stride of resident Q block
+         uint32_t kTiles     = dim / BASE_K;
+         uint32_t kRemain    = dim % BASE_K;
++        // K big-block rows: dim<=128 loads 256 K rows at once, else 128 (=round2).
++        uint32_t nL1Size    = (dim <= BASE_K) ? 256U : BLOCK_N;
+ 
+         LocalTensor<QType> qL1 = qBufL1_.Get<QType>();
+ 
+-        // ---- outer: K micro-block (128) along s2Rows, loaded once each ----
+-        for (uint32_t nStart = 0; nStart < s2Rows; nStart += BLOCK_N) {
+-            uint32_t kvRows      = (s2Rows - nStart) < BLOCK_N ? (s2Rows - nStart) : BLOCK_N;
++        // ---- outer: K big block (nL1Size rows) GM->L1, once each ----
++        for (uint32_t nL1Start = 0; nL1Start < s2Rows; nL1Start += nL1Size) {
++            uint32_t kvRows      = (s2Rows - nL1Start) < nL1Size ? (s2Rows - nL1Start) : nL1Size;
+             uint32_t kvRowsAlign = AlignUp(kvRows, C0);
+ 
+-            // K micro-block GM->L1 via TQue (ping-pong, auto MTE2<->MTE1 flag).
++            // K big block GM->L1 via TQue (ping-pong, auto MTE2<->MTE1 flag).
+             LocalTensor<QType> kvL1 = kpQueL1_.AllocTensor<QType>();
+             uint64_t kOffset = ((uint64_t)bz * tiling_.nkv * kvSeqLen
+                               + (uint64_t)kvHead * kvSeqLen
+-                              + (uint64_t)(s2Start + nStart)) * dim;
++                              + (uint64_t)(s2Start + nL1Start)) * dim;
+             LoadNdGmToNzL1(kvL1, kGm_[kOffset], kvRows, dim, dim, kvRowsAlign);
+             kpQueL1_.EnQue(kvL1);
+             kvL1 = kpQueL1_.DeQue<QType>();
+@@ -107,114 +110,115 @@ public:
+                 uint32_t mRows      = (qRows - mStart) < BLOCK_M ? (qRows - mStart) : BLOCK_M;
+                 uint32_t mRowsAlign = AlignUp(mRows, C0);
+ 
+-                LocalTensor<float> cL0 = queL0C_.AllocTensor<float>();
+-
+-                for (uint32_t ki = 0; ki < kTiles; ki++) {
+-                    LocalTensor<QType> aL0 = queL0A_.AllocTensor<QType>();
+-                    {
+-                        uint64_t qL1Off = (uint64_t)ki * BASE_K * qC0Stride;
+-                        for (uint32_t i = 0; i < mRowsAlign / C0; i++) {
+-                            LoadData2DParams p;
+-                            p.startIndex  = mStart / C0 + i;
+-                            p.repeatTimes = BASE_K / C0;
+-                            p.srcStride   = qC0Stride / C0;
+-                            p.dstGap      = 0;
+-                            p.ifTranspose = false;
+-                            LoadData(aL0[C0 * i * BASE_K], qL1[qL1Off], p);
++                // ---- inner: n sub-block (128) along current K big block ----
++                for (uint32_t nL0Start = 0; nL0Start < kvRows; nL0Start += BLOCK_N) {
++                    uint32_t nRows      = (kvRows - nL0Start) < BLOCK_N ? (kvRows - nL0Start) : BLOCK_N;
++                    uint32_t nRowsAlign = AlignUp(nRows, C0);
++
++                    LocalTensor<float> cL0 = queL0C_.AllocTensor<float>();
++
++                    for (uint32_t ki = 0; ki < kTiles; ki++) {
++                        // Q -> L0A: keep round2 per-C0-row LoadData2D (unchanged).
++                        LocalTensor<QType> aL0 = queL0A_.AllocTensor<QType>();
++                        {
++                            uint64_t qL1Off = (uint64_t)ki * BASE_K * qC0Stride;
++                            for (uint32_t i = 0; i < mRowsAlign / C0; i++) {
++                                LoadData2DParams p;
++                                p.startIndex  = mStart / C0 + i;
++                                p.repeatTimes = BASE_K / C0;
++                                p.srcStride   = qC0Stride / C0;
++                                p.dstGap      = 0;
++                                p.ifTranspose = false;
++                                LoadData(aL0[C0 * i * BASE_K], qL1[qL1Off], p);
++                            }
+                         }
+-                    }
+-                    queL0A_.EnQue(aL0);
+-
+-                    LocalTensor<QType> bL0 = queL0B_.AllocTensor<QType>();
+-                    {
+-                        uint64_t kL1Off = (uint64_t)ki * kvRowsAlign * BASE_K;
+-                        LoadData2DParams p;
+-                        p.startIndex  = 0;
+-                        p.repeatTimes = (BASE_K / C0) * (kvRowsAlign / C0);
+-                        p.srcStride   = 1;
+-                        p.dstGap      = 0;
+-                        p.ifTranspose = false;
+-                        LoadData(bL0, kvL1[kL1Off], p);
+-                    }
+-                    queL0B_.EnQue(bL0);
+-
+-                    aL0 = queL0A_.DeQue<QType>();
+-                    bL0 = queL0B_.DeQue<QType>();
+-
+-                    MmadParams mp;
+-                    mp.m = mRowsAlign;
+-                    mp.n = kvRowsAlign;
+-                    mp.k = BASE_K;
+-                    mp.cmatrixInitVal = (ki == 0);
+-                    mp.cmatrixSource  = false;
+-                    PipeBarrier<PIPE_M>();
+-                    Mmad(cL0, aL0, bL0, cL0, mp);
+-                    queL0A_.FreeTensor(aL0);
+-                    queL0B_.FreeTensor(bL0);
+-                }
+-
+-                if (kRemain > 0) {
+-                    uint32_t kAligned = AlignUp(kRemain, C0);
+-                    LocalTensor<QType> aL0 = queL0A_.AllocTensor<QType>();
+-                    {
+-                        uint64_t qL1Off = (uint64_t)kTiles * BASE_K * qC0Stride;
+-                        for (uint32_t i = 0; i < mRowsAlign / C0; i++) {
+-                            LoadData2DParams p;
+-                            p.startIndex  = mStart / C0 + i;
+-                            p.repeatTimes = kAligned / C0;
+-                            p.srcStride   = qC0Stride / C0;
+-                            p.dstGap      = 0;
+-                            p.ifTranspose = false;
+-                            LoadData(aL0[C0 * i * kAligned], qL1[qL1Off], p);
++                        queL0A_.EnQue(aL0);
++
++                        // K -> L0B: transpose helper extracting n sub-block.
++                        LocalTensor<QType> bL0 = queL0B_.AllocTensor<QType>();
++                        {
++                            uint64_t kL1Off = (uint64_t)ki * kvRowsAlign * BASE_K
++                                            + (uint64_t)C0 * nL0Start;
++                            LoadNzL1ToZnL0BWithTranspose(bL0, kvL1[kL1Off],
++                                                         BASE_K, nRowsAlign, kvRowsAlign);
+                         }
++                        queL0B_.EnQue(bL0);
++
++                        aL0 = queL0A_.DeQue<QType>();
++                        bL0 = queL0B_.DeQue<QType>();
++
++                        MmadParams mp;
++                        mp.m = mRowsAlign;
++                        mp.n = nRowsAlign;
++                        mp.k = BASE_K;
++                        mp.cmatrixInitVal = (ki == 0);
++                        mp.cmatrixSource  = false;
++                        PipeBarrier<PIPE_M>();
++                        Mmad(cL0, aL0, bL0, cL0, mp);
++                        queL0A_.FreeTensor(aL0);
++                        queL0B_.FreeTensor(bL0);
+                     }
+-                    queL0A_.EnQue(aL0);
+ 
+-                    LocalTensor<QType> bL0 = queL0B_.AllocTensor<QType>();
+-                    {
+-                        uint64_t kL1Off = (uint64_t)kTiles * kvRowsAlign * BASE_K;
+-                        LoadData2DParams p;
+-                        p.startIndex  = 0;
+-                        p.repeatTimes = (kAligned / C0) * (kvRowsAlign / C0);
+-                        p.srcStride   = 1;
+-                        p.dstGap      = 0;
+-                        p.ifTranspose = false;
+-                        LoadData(bL0, kvL1[kL1Off], p);
++                    if (kRemain > 0) {
++                        uint32_t kAligned = AlignUp(kRemain, C0);
++                        LocalTensor<QType> aL0 = queL0A_.AllocTensor<QType>();
++                        {
++                            uint64_t qL1Off = (uint64_t)kTiles * BASE_K * qC0Stride;
++                            for (uint32_t i = 0; i < mRowsAlign / C0; i++) {
++                                LoadData2DParams p;
++                                p.startIndex  = mStart / C0 + i;
++                                p.repeatTimes = kAligned / C0;
++                                p.srcStride   = qC0Stride / C0;
++                                p.dstGap      = 0;
++                                p.ifTranspose = false;
++                                LoadData(aL0[C0 * i * kAligned], qL1[qL1Off], p);
++                            }
++                        }
++                        queL0A_.EnQue(aL0);
++
++                        LocalTensor<QType> bL0 = queL0B_.AllocTensor<QType>();
++                        {
++                            uint64_t kL1Off = (uint64_t)kTiles * kvRowsAlign * BASE_K
++                                            + (uint64_t)C0 * nL0Start;
++                            LoadNzL1ToZnL0BWithTranspose(bL0, kvL1[kL1Off],
++                                                         kAligned, nRowsAlign, kvRowsAlign);
++                        }
++                        queL0B_.EnQue(bL0);
++
++                        aL0 = queL0A_.DeQue<QType>();
++                        bL0 = queL0B_.DeQue<QType>();
++
++                        MmadParams mp;
++                        mp.m = mRowsAlign;
++                        mp.n = nRowsAlign;
++                        mp.k = kAligned;
++                        mp.cmatrixInitVal = (kTiles == 0);
++                        mp.cmatrixSource  = false;
++                        PipeBarrier<PIPE_M>();
++                        Mmad(cL0, aL0, bL0, cL0, mp);
++                        queL0A_.FreeTensor(aL0);
++                        queL0B_.FreeTensor(bL0);
+                     }
+-                    queL0B_.EnQue(bL0);
+-
+-                    aL0 = queL0A_.DeQue<QType>();
+-                    bL0 = queL0B_.DeQue<QType>();
+-
+-                    MmadParams mp;
+-                    mp.m = mRowsAlign;
+-                    mp.n = kvRowsAlign;
+-                    mp.k = kAligned;
+-                    mp.cmatrixInitVal = (kTiles == 0);
+-                    mp.cmatrixSource  = false;
+-                    PipeBarrier<PIPE_M>();
+-                    Mmad(cL0, aL0, bL0, cL0, mp);
+-                    queL0A_.FreeTensor(aL0);
+-                    queL0B_.FreeTensor(bL0);
+-                }
+-
+-                queL0C_.EnQue(cL0);
+-                cL0 = queL0C_.DeQue<float>();
+ 
+-                // L0C(mRows x kvRowsAlign) -> wsS slot at (mStart, nStart)
+-                FixpipeParamsV220 fixParams;
+-                fixParams.mSize       = mRows;
+-                fixParams.nSize       = kvRowsAlign;
+-                fixParams.srcStride   = mRowsAlign;
+-                fixParams.dstStride   = outerCols;
+-                fixParams.ndNum       = 1;
+-                fixParams.srcNdStride = 0;
+-                fixParams.dstNdStride = 0;
+-                Fixpipe(sSlot[(uint64_t)mStart * outerCols + nStart], cL0, fixParams);
+-                queL0C_.FreeTensor(cL0);
+-            }
++                    queL0C_.EnQue(cL0);
++                    cL0 = queL0C_.DeQue<float>();
++
++                    // L0C(mRows x nRowsAlign) -> wsS slot at (mStart, nL1Start+nL0Start)
++                    FixpipeParamsV220 fixParams;
++                    fixParams.mSize       = mRows;
++                    fixParams.nSize       = nRowsAlign;
++                    fixParams.srcStride   = mRowsAlign;
++                    fixParams.dstStride   = outerCols;
++                    fixParams.ndNum       = 1;
++                    fixParams.srcNdStride = 0;
++                    fixParams.dstNdStride = 0;
++                    Fixpipe(sSlot[(uint64_t)mStart * outerCols + nL1Start + nL0Start],
++                            cL0, fixParams);
++                    queL0C_.FreeTensor(cL0);
++                }   // n sub-block
++            }       // Q micro-block
+             kpQueL1_.FreeTensor(kvL1);
+-        }
++        }           // K big block
+         sQueue_.ProducerReleaseFix();
+     }
+ 
+diff --git a/agent_workdir/flash_attention/kernel/matmul_tile.h b/agent_workdir/flash_attention/kernel/matmul_tile.h
+index 3576900..7a7b572 100644
+--- a/agent_workdir/flash_attention/kernel/matmul_tile.h
++++ b/agent_workdir/flash_attention/kernel/matmul_tile.h
+@@ -87,6 +87,40 @@ __aicore__ inline void LoadNzL1ToZnL0B(const AscendC::LocalTensor<T> &dst,
+     AscendC::LoadData(dst, src, params);
+ }
+ 
++// L1(Nz) -> L0B(Zn), extract an n sub-block from a wider L1 big block.
++// Params:
++//   dst         : L0B target (Zn layout), single sub-block k x n
++//   src         : L1 source pointer, already offset to the n sub-block / k-tile
++//   k           : k dim of current K-tile (BASE_K=128, tail = kAligned)
++//   n           : aligned rows of current n sub-block (nRowsAlign, usually 128)
++//   colC0Stride : NZ col stride of the L1 big block (= kvRowsAlign, 256 or 128)
++template<typename T>
++__aicore__ inline void LoadNzL1ToZnL0BWithTranspose(
++        const AscendC::LocalTensor<T> &dst,
++        const AscendC::LocalTensor<T> &src,
++        uint32_t k, uint32_t n, uint32_t colC0Stride)
++{
++    constexpr uint32_t c0 = 32 / sizeof(T);     // half/bf16 -> 16
++    AscendC::LoadData2DParams p;
++    p.startIndex  = 0;
++    p.srcStride   = 1;
++    p.dstGap      = 0;
++    p.ifTranspose = false;
++    if (colC0Stride == n) {
++        // Degenerate branch: L1 block width == n sub-block -> byte-identical to
++        // baseline single LoadData2D.
++        p.repeatTimes = (k / c0) * (n / c0);
++        AscendC::LoadData(dst, src, p);
++    } else {
++        // Big-block branch: L1 width colC0Stride > n, extract per C0 row.
++        p.repeatTimes = n / c0;
++        for (uint32_t i = 0; i < (k / c0); ++i) {
++            AscendC::LoadData(dst[(uint64_t)n * i * c0],
++                              src[(uint64_t)colC0Stride * i * c0], p);
++        }
++    }
++}
++
+ // L0C(Nz) -> GM(ND), contiguous output
+ template<typename T>
+ __aicore__ inline void FixpipeNzL0cToNdGm(const AscendC::GlobalTensor<T> &dst,

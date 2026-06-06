@@ -1,123 +1,283 @@
-"""Strategy injection module for K-Search world model.
+"""Markdown-backed natural-language strategy injection for K-Search.
 
-Loads external optimization strategies from a JSON catalog file and injects
-them as action nodes into the WM decision tree, enabling strategy-guided
-optimization instead of purely LLM-driven search.
-
-Three strategy forms are supported:
-- "natural_language": renders the natural_language field from each strategy
-- "structured_params": renders the structured_params field as formatted JSON
-- "dsl": renders the dsl field from each strategy
+Strategy catalogs are concise JSON indexes. Each entry carries searchable
+metadata plus a relative reference to a markdown file containing the full
+natural-language strategy body. World-model initialization uses only summary
+metadata; the full markdown is loaded only after an action node is selected.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import warnings
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 
-STRATEGY_FORMS = ("natural_language", "structured_params", "dsl")
+STRATEGY_FORMS = ("natural_language",)
+INLINE_STRATEGY_COMPAT_ENV = "KSEARCH_ALLOW_INLINE_STRATEGY"
 
 
-def load_strategy_catalog(path: str | Path) -> list[dict[str, Any]]:
-    """Load a strategy catalog JSON file and return the strategy list."""
-    p = Path(path).expanduser().resolve()
-    if not p.exists():
-        raise FileNotFoundError(f"Strategy catalog not found: {p}")
-    with open(p, "r", encoding="utf-8") as f:
+@dataclass(frozen=True)
+class StrategyCatalogEntry:
+    id: str
+    title: str
+    summary: str
+    markdown_ref: str
+    markdown_path: Path
+    tags: tuple[str, ...] = ()
+    difficulty_1_to_5: int = 3
+    score_0_to_1: float = 0.5
+    expected_vs_baseline_factor: float | None = None
+    inline_natural_language: str | None = None
+
+
+def _allow_inline_strategy_compat() -> bool:
+    value = os.getenv(INLINE_STRATEGY_COMPAT_ENV, "")
+    return value.strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _resolve_markdown_ref(catalog_path: Path, markdown_ref: str) -> Path:
+    root = catalog_path.parent.resolve(strict=True)
+    p = Path(markdown_ref)
+    if p.is_absolute():
+        raise ValueError(f"strategy markdown_ref must be relative: {markdown_ref}")
+
+    resolved = (root / p).resolve(strict=False)
+    if resolved != root and root not in resolved.parents:
+        raise ValueError(f"strategy markdown_ref escapes catalog directory: {markdown_ref}")
+    if resolved.suffix.lower() != ".md":
+        raise ValueError(f"strategy markdown_ref must point to a .md file: {markdown_ref}")
+    if not resolved.is_file():
+        raise FileNotFoundError(f"strategy markdown file not found: {resolved}")
+    return resolved
+
+
+def _required_str(raw: dict[str, Any], key: str, strategy_label: str) -> str:
+    value = raw.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"strategy {strategy_label} missing {key}")
+    return value.strip()
+
+
+def _coerce_optional_float(raw: dict[str, Any], key: str, strategy_id: str) -> float | None:
+    value = raw.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"strategy {strategy_id} field {key} must be numeric")
+    return float(value)
+
+
+def _coerce_score(raw: dict[str, Any], strategy_id: str) -> float:
+    value = raw.get("score_0_to_1", 0.5)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"strategy {strategy_id} field score_0_to_1 must be numeric")
+    score = float(value)
+    if not 0.0 <= score <= 1.0:
+        raise ValueError(f"strategy {strategy_id} field score_0_to_1 must be in [0, 1]")
+    return score
+
+
+def _coerce_difficulty(raw: dict[str, Any], strategy_id: str) -> int:
+    value = raw.get("difficulty_1_to_5", 3)
+    if "difficulty" in raw and "difficulty_1_to_5" not in raw:
+        value = raw.get("difficulty", 3)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"strategy {strategy_id} field difficulty_1_to_5 must be an integer")
+    if not 1 <= value <= 5:
+        raise ValueError(f"strategy {strategy_id} field difficulty_1_to_5 must be in [1, 5]")
+    return int(value)
+
+
+def _coerce_tags(raw: dict[str, Any], strategy_id: str) -> tuple[str, ...]:
+    tags = raw.get("tags", ())
+    if tags is None:
+        return ()
+    if isinstance(tags, str):
+        tags = [tags]
+    if not isinstance(tags, (list, tuple)):
+        raise ValueError(f"strategy {strategy_id} field tags must be a list of strings")
+    result: list[str] = []
+    for tag in tags:
+        if not isinstance(tag, str) or not tag.strip():
+            raise ValueError(f"strategy {strategy_id} field tags must be a list of strings")
+        result.append(tag.strip())
+    if not result and isinstance(raw.get("category"), str) and raw["category"].strip():
+        result.append(raw["category"].strip())
+    return tuple(result)
+
+
+def load_strategy_catalog(strategy_file: str | Path) -> list[StrategyCatalogEntry]:
+    """Load and validate a markdown-backed natural-language strategy catalog."""
+    catalog_path = Path(strategy_file).expanduser().resolve()
+    if not catalog_path.exists():
+        raise FileNotFoundError(f"Strategy catalog not found: {catalog_path}")
+    if not catalog_path.is_file():
+        raise ValueError(f"Strategy catalog path is not a file: {catalog_path}")
+
+    with catalog_path.open("r", encoding="utf-8") as f:
         data = json.load(f)
-    catalog = data.get("strategy_catalog", [])
-    if not isinstance(catalog, list):
-        raise ValueError(f"Expected 'strategy_catalog' to be a list, got {type(catalog).__name__}")
-    return catalog
+    if not isinstance(data, dict):
+        raise ValueError("Strategy catalog JSON must be an object")
+
+    form = str(data.get("strategy_form", "natural_language") or "").strip().lower()
+    if form != "natural_language":
+        raise ValueError("Only natural_language strategy form is supported")
+
+    allow_inline = _allow_inline_strategy_compat()
+    raw_entries = data.get("strategies")
+    if raw_entries is None and allow_inline and isinstance(data.get("strategy_catalog"), list):
+        warnings.warn(
+            "'strategy_catalog' with inline natural_language is deprecated; "
+            "migrate to 'strategies' with markdown_ref.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        raw_entries = data.get("strategy_catalog")
+
+    if not isinstance(raw_entries, list):
+        raise ValueError(f"Expected 'strategies' to be a list, got {type(raw_entries).__name__}")
+
+    entries: list[StrategyCatalogEntry] = []
+    seen_ids: set[str] = set()
+    for idx, raw in enumerate(raw_entries):
+        label = f"at index {idx}"
+        if not isinstance(raw, dict):
+            raise ValueError(f"strategy {label} must be an object")
+
+        sid = _required_str(raw, "id", label)
+        label = sid
+        if sid in seen_ids:
+            raise ValueError(f"duplicate strategy id: {sid}")
+        seen_ids.add(sid)
+
+        for forbidden in ("structured_params", "dsl"):
+            if forbidden in raw:
+                raise ValueError(
+                    f"strategy {sid} uses unsupported field {forbidden}; "
+                    "only natural_language markdown_ref is supported"
+                )
+
+        inline_text = None
+        if "natural_language" in raw:
+            if not allow_inline:
+                raise ValueError(
+                    f"strategy {sid} contains inline natural_language text. "
+                    "Move full strategy text to markdown_ref and keep only summary in JSON."
+                )
+            inline_value = str(raw.get("natural_language", "") or "").strip()
+            if inline_value:
+                inline_text = inline_value
+            warnings.warn(
+                f"strategy {sid} uses deprecated inline natural_language compatibility mode; "
+                "migrate to markdown_ref.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        if allow_inline and "title" not in raw and isinstance(raw.get("name"), str):
+            title = str(raw.get("name", "")).strip()
+            if not title:
+                raise ValueError(f"strategy {sid} missing title")
+        else:
+            title = _required_str(raw, "title", sid)
+
+        summary = str(raw.get("summary", "") or "").strip()
+        if not summary and allow_inline and inline_text:
+            summary = inline_text[:800].strip()
+        if not summary:
+            raise ValueError(f"strategy {sid} missing summary")
+        if len(summary) > 1200:
+            raise ValueError(f"strategy {sid} summary too long; keep JSON summary concise")
+
+        markdown_ref = str(raw.get("markdown_ref", "") or "").strip()
+        if markdown_ref:
+            markdown_path = _resolve_markdown_ref(catalog_path, markdown_ref)
+            inline_for_entry = None
+        elif allow_inline and inline_text:
+            markdown_path = catalog_path
+            inline_for_entry = inline_text
+        else:
+            raise ValueError(f"strategy {sid} missing markdown_ref")
+
+        entries.append(
+            StrategyCatalogEntry(
+                id=sid,
+                title=title,
+                summary=summary,
+                markdown_ref=markdown_ref,
+                markdown_path=markdown_path,
+                tags=_coerce_tags(raw, sid),
+                difficulty_1_to_5=_coerce_difficulty(raw, sid),
+                score_0_to_1=_coerce_score(raw, sid),
+                expected_vs_baseline_factor=_coerce_optional_float(
+                    raw,
+                    "expected_vs_baseline_factor",
+                    sid,
+                ),
+                inline_natural_language=inline_for_entry,
+            )
+        )
+
+    return entries
+
+
+def render_strategy_action_text(
+    *,
+    entry: StrategyCatalogEntry,
+    max_markdown_chars: int = 12000,
+) -> str:
+    """Read and render the selected strategy's full natural-language text."""
+    if not isinstance(entry, StrategyCatalogEntry):
+        raise TypeError("entry must be a StrategyCatalogEntry")
+    if max_markdown_chars <= 0:
+        raise ValueError("max_markdown_chars must be positive")
+
+    if entry.inline_natural_language is not None:
+        full_text = entry.inline_natural_language.strip()
+    else:
+        full_text = entry.markdown_path.read_text(
+            encoding="utf-8",
+            errors="replace",
+        ).strip()
+
+    if len(full_text) > max_markdown_chars:
+        full_text = full_text[:max_markdown_chars] + "\n\n[truncated strategy markdown]"
+
+    return (
+        f"Strategy ID: {entry.id}\n"
+        f"Strategy title: {entry.title}\n"
+        f"Strategy summary: {entry.summary}\n"
+        f"Strategy tags: {', '.join(entry.tags) if entry.tags else '(none)'}\n"
+        f"Strategy difficulty: {entry.difficulty_1_to_5}/5\n\n"
+        "Full natural-language strategy markdown:\n"
+        f"{full_text}"
+    )
 
 
 def render_strategy_as_action_text(
-    strategy: dict[str, Any],
+    strategy: StrategyCatalogEntry,
     form: str = "natural_language",
 ) -> str:
-    """Render a single strategy into action_text for WM codegen prompts.
+    """Compatibility wrapper around render_strategy_action_text.
 
-    Args:
-        strategy: A strategy dict from the catalog (must have id, name, and
-                  at least one of natural_language/structured_params/dsl).
-        form: One of "natural_language", "structured_params", "dsl".
-
-    Returns:
-        A string suitable for injection as action_text in WM action prompts.
+    Only natural_language is supported. The old structured_params and dsl
+    branches intentionally fail fast.
     """
     form = form.strip().lower()
-    if form not in STRATEGY_FORMS:
-        raise ValueError(f"Invalid strategy form '{form}'; must be one of {STRATEGY_FORMS}")
-
-    sid = strategy.get("id", "unknown")
-    name = strategy.get("name", "unknown")
-    category = strategy.get("category", "unknown")
-    difficulty = strategy.get("difficulty", 3)
-    impact = strategy.get("impact", "medium")
-
-    header = f"Strategy {sid}: {name} (category={category}, impact={impact}, difficulty={difficulty})\n"
-
-    if form == "natural_language":
-        text = str(strategy.get("natural_language", "") or "").strip()
-        if not text:
-            raise ValueError(f"Strategy {sid} has no natural_language field")
-        base_text = header + text
-
-    elif form == "structured_params":
-        params = strategy.get("structured_params")
-        if not isinstance(params, dict):
-            raise ValueError(f"Strategy {sid} has no structured_params dict")
-        intro = (
-            f"Apply this optimization using the following structured parameters.\n"
-            f"Each parameter specifies the exact change to make, with constraints and expected impact.\n"
+    if form != "natural_language":
+        raise ValueError(
+            "Only natural_language strategy form is supported. "
+            "Use markdown_ref in strategy catalog."
         )
-        base_text = header + intro + json.dumps(params, indent=2, ensure_ascii=False)
-
-    elif form == "dsl":
-        text = str(strategy.get("dsl", "") or "").strip()
-        if not text:
-            raise ValueError(f"Strategy {sid} has no dsl field")
-        intro = (
-            f"Apply this optimization expressed as a domain-specific language (DSL) specification.\n"
-            f"The DSL defines the exact transformation, constraints, and expected outcome.\n"
-        )
-        base_text = header + intro + text
-
-    else:
-        raise ValueError(f"Unhandled form: {form}")
-
-    # === Implementation Priorities Section（放在策略描述后面）===
-    priorities = strategy.get("implementation_priorities")
-    if isinstance(priorities, list) and priorities:
-        priority_section = _render_priorities_section(priorities)
-        if priority_section:
-            base_text = base_text + "\n\n" + priority_section
-
-    # Append API Reference and Anti-Pattern sections if api_references exists
-    api_references = strategy.get("api_references")
-    if isinstance(api_references, list) and api_references:
-        api_section = _render_api_references_section(api_references)
-        if api_section:
-            base_text += "\n\n" + api_section
-        anti_section = _render_anti_patterns_section(api_references, sid)
-        if anti_section:
-            base_text += "\n\n" + anti_section
-
-    return base_text
+    return render_strategy_action_text(entry=strategy)
 
 
 def _render_api_references_section(api_references: list[dict[str, Any]]) -> str:
-    """Render api_references into an API Reference section for prompt injection.
-
-    Args:
-        api_references: List of dicts with api_name, doc_path, summary fields.
-
-    Returns:
-        A formatted string with the API Reference section, or empty string
-        if api_references is empty.
-    """
+    """Render api_references into an API Reference section for prompt injection."""
     if not api_references:
         return ""
 
@@ -138,15 +298,7 @@ def _render_api_references_section(api_references: list[dict[str, Any]]) -> str:
 
 
 def _render_priorities_section(priorities: list[dict[str, Any]]) -> str:
-    """Render implementation priorities into a structured section.
-
-    Args:
-        priorities: List of dicts with priority, action, dependency fields.
-
-    Returns:
-        A formatted string with the Implementation Priority section,
-        or empty string if priorities is empty.
-    """
+    """Render implementation priorities into a structured section."""
     if not priorities:
         return ""
 
@@ -174,16 +326,7 @@ def _render_anti_patterns_section(
     api_references: list[dict[str, Any]],
     strategy_id: str,
 ) -> str:
-    """Render anti-pattern warnings from all api_references into a unified section.
-
-    Args:
-        api_references: List of dicts that may contain anti_patterns lists.
-        strategy_id: The strategy id used in the anti-pattern label format.
-
-    Returns:
-        A formatted string with aggregated anti-pattern warnings, or empty
-        string if no anti_patterns exist across all api_references.
-    """
+    """Render anti-pattern warnings from all api_references into a section."""
     all_patterns: list[dict[str, Any]] = []
     for ref in api_references:
         patterns = ref.get("anti_patterns")
@@ -207,13 +350,7 @@ def _render_anti_patterns_section(
 
 
 def _text_similarity_ratio(text_a: str, text_b: str) -> float:
-    """Compute simple word-level overlap ratio between two strings.
-
-    Returns a value in [0, 1]. Used for dedup: patterns with similarity > 0.8
-    are considered duplicates.
-
-    Edge cases: both empty = 1.0, one empty = 0.0.
-    """
+    """Compute simple word-level overlap ratio between two strings."""
     if not text_a and not text_b:
         return 1.0
     if not text_a or not text_b:
@@ -233,15 +370,11 @@ def learn_anti_pattern_from_failure(
     new_anti_pattern: dict[str, Any],
     round_index: int,
 ) -> list[dict[str, Any]]:
-    """Learn a new anti-pattern from a failure and append to the catalog.
+    """Learn a new anti-pattern from a failure and append to a dict catalog.
 
-    Finds the strategy by strategy_id, then finds the api_reference by api_name.
-    Deduplicates using _text_similarity_ratio > 0.8.
-    Auto-generates id: finds max existing ap number and increments.
-    Modifies catalog in-place and returns it.
-    Returns unchanged if strategy/api not found or dedup'd.
+    This helper remains dict-based because it mutates experimental anti-pattern
+    catalogs, not the markdown-backed production catalog entries.
     """
-    # Find the strategy by strategy_id
     strategy = None
     for s in strategy_catalog:
         if s.get("id") == strategy_id:
@@ -250,7 +383,6 @@ def learn_anti_pattern_from_failure(
     if strategy is None:
         return strategy_catalog
 
-    # Find the api_reference by api_name
     api_references = strategy.get("api_references", [])
     api_ref = None
     for ref in api_references:
@@ -260,7 +392,6 @@ def learn_anti_pattern_from_failure(
     if api_ref is None:
         return strategy_catalog
 
-    # Dedup: check similarity against existing patterns
     new_pattern_text = new_anti_pattern.get("pattern", "")
     existing_patterns = api_ref.get("anti_patterns", [])
     for existing in existing_patterns:
@@ -268,7 +399,6 @@ def learn_anti_pattern_from_failure(
         if _text_similarity_ratio(new_pattern_text, existing_text) > 0.8:
             return strategy_catalog
 
-    # Auto-generate id: find max existing ap number across all strategies
     max_ap_num = 0
     for s in strategy_catalog:
         for ref in s.get("api_references", []):
@@ -283,8 +413,6 @@ def learn_anti_pattern_from_failure(
                         pass
 
     next_id = f"ap{max_ap_num + 1}"
-
-    # Build the entry (only pattern, reason, source, discovered_at; ignore api_name_hint)
     entry = {
         "id": next_id,
         "pattern": new_anti_pattern.get("pattern", "unknown pattern"),
@@ -293,7 +421,6 @@ def learn_anti_pattern_from_failure(
         "discovered_at": round_index,
     }
 
-    # Append to anti_patterns list
     if not isinstance(existing_patterns, list):
         existing_patterns = []
         api_ref["anti_patterns"] = existing_patterns
@@ -304,52 +431,35 @@ def learn_anti_pattern_from_failure(
 
 def _build_action_node(
     idx: int,
-    strategy: dict[str, Any],
-    form: str,
+    strategy: StrategyCatalogEntry,
+    form: str = "natural_language",
 ) -> dict[str, Any]:
-    """Build a single action node dict from a strategy."""
-    sid = strategy.get("id", f"s{idx}")
-    name = strategy.get("name", f"strategy_{idx}")
-    category = strategy.get("category", "unknown")
-    difficulty = strategy.get("difficulty", 3)
-    impact = strategy.get("impact", "medium")
-    impact_score = {"low": 0.3, "medium": 0.6, "high": 0.8}.get(impact, 0.5)
+    """Build a single summary-only world-model action node from a strategy."""
+    form = form.strip().lower()
+    if form != "natural_language":
+        raise ValueError(
+            "Only natural_language strategy form is supported. "
+            "Use markdown_ref in strategy catalog."
+        )
+    if not isinstance(strategy, StrategyCatalogEntry):
+        raise TypeError("strategy must be a StrategyCatalogEntry")
 
-    # Priority: expected_speedup_interval.likely > structured_params.expected_speedup.min
-    expected_speedup = None
+    sid = strategy.id
+    node_id = f"s{idx + 1}"
+    optimization_type = strategy.tags[0] if strategy.tags else "strategy"
+    rating = max(1, min(10, round(strategy.score_0_to_1 * 10)))
+    description = strategy.summary
 
-    # First: try expected_speedup_interval.likely
-    interval = strategy.get("expected_speedup_interval")
-    if isinstance(interval, dict):
-        likely = interval.get("likely")
-        if isinstance(likely, (int, float)):
-            expected_speedup = float(likely)
-
-    # Fallback: structured_params.expected_speedup.min
-    if expected_speedup is None:
-        sp = strategy.get("structured_params", {})
-        if isinstance(sp, dict):
-            es = sp.get("expected_speedup")
-            if isinstance(es, dict):
-                min_val = es.get("min")
-                if isinstance(min_val, (int, float)):
-                    expected_speedup = float(min_val)
-
-    action_text = render_strategy_as_action_text(strategy, form)
-    title = f"{sid}: {name}"
-    description = action_text
-
-    node_id = f"s{idx+1}"
     return {
         "id": node_id,
         "parent_id": "root",
         "description": description[:300] if len(description) > 300 else description,
         "strategy_combination": [sid],
         "mode": "strategy_guided",
-        "optimization_type": category,
+        "optimization_type": optimization_type,
         "status": "open",
         "score": None,
-        "difficulty": difficulty,
+        "difficulty": strategy.difficulty_1_to_5,
         "depth": 1,
         "solution_ref": {
             "eval": {"score": None, "score_name": None, "status": ""},
@@ -365,49 +475,51 @@ def _build_action_node(
         "retry_count": 0,
         "node_id": node_id,
         "node_type": "action",
-        "notes": f"Strategy from catalog, rendered as '{form}'.\n\n{action_text}",
-        "overall_rating_0_to_10": {"low": 5, "medium": 7, "high": 8}.get(impact, 6),
-        "confidence_0_to_1": {"low": 0.5, "medium": 0.6, "high": 0.7}.get(impact, 0.6),
+        "notes": (
+            "Strategy from catalog. This node stores summary metadata only; "
+            "the full markdown strategy is loaded when the action is selected.\n\n"
+            f"{description}"
+        ),
+        "overall_rating_0_to_10": rating,
+        "confidence_0_to_1": strategy.score_0_to_1,
         "last_updated_round": 0,
         "choice": None,
         "decision": None,
         "action": {
-            "title": title,
-            "description": action_text,
-            "rationale": f"Catalog strategy {sid} ({category}/{impact}). Expected speedup: {expected_speedup or 'unknown'}x.",
-            "score_0_to_1": impact_score,
-            "difficulty_1_to_5": difficulty,
-            "expected_vs_baseline_factor": expected_speedup,
+            "title": strategy.title,
+            "description": description,
+            "rationale": (
+                f"Catalog strategy {sid}. Full natural-language details are loaded from "
+                f"{strategy.markdown_ref or 'inline compatibility text'} at execution time."
+            ),
+            "score_0_to_1": strategy.score_0_to_1,
+            "difficulty_1_to_5": strategy.difficulty_1_to_5,
+            "expected_vs_baseline_factor": strategy.expected_vs_baseline_factor,
+            "strategy_ref": {
+                "id": sid,
+                "markdown_ref": strategy.markdown_ref,
+            },
         },
         "impacts": _build_impacts_from_strategy(strategy),
     }
 
 
 def build_wm_from_strategies(
-    strategy_catalog: list[dict[str, Any]],
+    strategy_catalog: list[StrategyCatalogEntry],
     form: str = "natural_language",
     *,
     definition_name: str = "multi_query_attention",
     kernel_summary: str = "",
     hw_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build a complete world model JSON from a strategy catalog.
+    """Build a complete world model JSON from summary-only strategy nodes."""
+    form = form.strip().lower()
+    if form != "natural_language":
+        raise ValueError(
+            "Only natural_language strategy form is supported. "
+            "Use markdown_ref in strategy catalog."
+        )
 
-    Creates a decision tree with root node and strategy-derived action nodes.
-    Each strategy becomes a child action node of root with the action text
-    rendered in the specified form. Nodes are stored as a **list** (matching
-    WM convention where each dict has a node_id field).
-
-    Args:
-        strategy_catalog: List of strategy dicts from load_strategy_catalog.
-        form: Strategy rendering form ("natural_language", "structured_params", "dsl").
-        definition_name: Task definition name.
-        kernel_summary: Brief kernel summary for WM root.
-        hw_params: Hardware parameters dict for WM root.
-
-    Returns:
-        A normalized world model dict ready for dump_world_model_obj().
-    """
     if hw_params is None:
         hw_params = {
             "chip_model": "910B3",
@@ -423,15 +535,14 @@ def build_wm_from_strategies(
             "alignment_bytes": 32,
         }
 
-    # Build root node
-    children_ids = [f"s{i+1}" for i in range(len(strategy_catalog))]
+    children_ids = [f"s{i + 1}" for i in range(len(strategy_catalog))]
     root_node = {
         "id": "root",
         "parent_id": None,
         "description": kernel_summary or f"Baseline {definition_name} kernel.",
         "strategy_combination": [],
         "mode": "strategy_guided",
-        "optimization_type": "bandwidth",
+        "optimization_type": "strategy",
         "status": "completed",
         "score": 1.0,
         "difficulty": 1,
@@ -450,8 +561,11 @@ def build_wm_from_strategies(
         "retry_count": 0,
         "node_id": "root",
         "node_type": "root",
-        "notes": f"Strategy-guided optimization using {len(strategy_catalog)} strategies rendered as '{form}'. "
-                 f"Each child node represents one strategy from the catalog.",
+        "notes": (
+            f"Strategy-guided optimization using {len(strategy_catalog)} natural-language "
+            "strategy summaries. Full markdown documents are loaded only for the "
+            "selected action node."
+        ),
         "overall_rating_0_to_10": 5,
         "confidence_0_to_1": 0.7,
         "last_updated_round": 0,
@@ -472,16 +586,11 @@ def build_wm_from_strategies(
         },
     }
 
-    # Build action nodes from strategies
-    action_nodes = []
-    for i, strategy in enumerate(strategy_catalog):
-        action_nodes.append(_build_action_node(i, strategy, form))
-
-    # Nodes as a list (matching WM convention)
+    action_nodes = [_build_action_node(i, strategy, form) for i, strategy in enumerate(strategy_catalog)]
     all_nodes = [root_node] + action_nodes
 
-    wm = {
-        "kernel_summary": kernel_summary or f"{definition_name} optimization via strategy catalog ({form} form)",
+    return {
+        "kernel_summary": kernel_summary or f"{definition_name} optimization via strategy catalog",
         "baseline_performance": {"speedup": 1.0, "time_ms": None},
         "computed_signals": {
             "round_index": 0,
@@ -499,9 +608,9 @@ def build_wm_from_strategies(
             "nodes": all_nodes,
         },
         "open_questions": [
-            "Which strategy form (natural language / structured params / DSL) yields best optimization results?",
-            "What is the optimal strategy ordering for maximum cumulative speedup?",
-            "Can strategies be combined for synergistic effects?",
+            "Which strategy summary should be executed next?",
+            "What evidence confirms the selected markdown strategy improves the kernel?",
+            "Can successful strategies be combined after single-strategy validation?",
         ],
         "stagnation_count": 0,
         "stagnation_count_vs_base": 0,
@@ -512,40 +621,50 @@ def build_wm_from_strategies(
         "solution_db_path": None,
     }
 
-    return wm
 
+def _build_impacts_from_strategy(strategy: StrategyCatalogEntry) -> dict[str, dict[str, Any]]:
+    """Build broad impact ratings from strategy metadata."""
+    rating = max(1, min(10, round(strategy.score_0_to_1 * 10)))
+    tags = {tag.lower() for tag in strategy.tags}
+    expected_note = (
+        f"Expected vs baseline factor: {strategy.expected_vs_baseline_factor}"
+        if strategy.expected_vs_baseline_factor is not None
+        else ""
+    )
+    memory_tags = {"memory", "ub", "l1", "cache", "data-movement", "bandwidth"}
+    compute_tags = {"compute", "vector", "pipeline", "tiling"}
 
-def _build_impacts_from_strategy(strategy: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Build impact ratings from strategy metadata."""
-    category = strategy.get("category", "unknown")
-    impact = strategy.get("impact", "medium")
-    ratings = {"low": 3, "medium": 6, "high": 8}.get(impact, 5)
-
-    base = {
-        "memory_bandwidth": {"rating_0_to_10": ratings if category in ("memory", "tiling") else 5, "risk": "", "notes": ""},
-        "register_pressure": {"rating_0_to_10": ratings if category in ("memory",) else 5, "risk": "", "notes": ""},
-        "compute_intensity_and_hw_fit": {"rating_0_to_10": ratings if category in ("compute", "pipeline") else 5, "risk": "", "notes": ""},
+    return {
+        "memory_bandwidth": {
+            "rating_0_to_10": rating if tags & memory_tags else 5,
+            "risk": "",
+            "notes": expected_note,
+        },
+        "register_pressure": {
+            "rating_0_to_10": rating if "register" in tags else 5,
+            "risk": "",
+            "notes": "",
+        },
+        "compute_intensity_and_hw_fit": {
+            "rating_0_to_10": rating if tags & compute_tags else 5,
+            "risk": "",
+            "notes": expected_note if tags & compute_tags else "",
+        },
     }
-
-    # Override with structured_params impacts if present
-    sp = strategy.get("structured_params", {})
-    if isinstance(sp, dict) and "expected_speedup" in sp:
-        es = sp["expected_speedup"]
-        if isinstance(es, dict):
-            base["memory_bandwidth"]["notes"] = f"Expected speedup range: {es}"
-
-    return base
 
 
 def get_strategy_action_text_for_node(
-    strategy_catalog: list[dict[str, Any]],
+    strategy_catalog: list[StrategyCatalogEntry],
     node_id: str,
     form: str = "natural_language",
 ) -> Optional[str]:
-    """Look up a strategy by node_id and render it as action_text.
-
-    Node IDs are formatted as s{i+1} where i is the strategy index.
-    """
+    """Look up a strategy by node_id and render its full markdown action text."""
+    form = form.strip().lower()
+    if form != "natural_language":
+        raise ValueError(
+            "Only natural_language strategy form is supported. "
+            "Use markdown_ref in strategy catalog."
+        )
     if not node_id.startswith("s"):
         return None
     try:
@@ -554,4 +673,4 @@ def get_strategy_action_text_for_node(
         return None
     if idx < 0 or idx >= len(strategy_catalog):
         return None
-    return render_strategy_as_action_text(strategy_catalog[idx], form)
+    return render_strategy_action_text(entry=strategy_catalog[idx])

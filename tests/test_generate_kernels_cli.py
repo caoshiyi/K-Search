@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from generate_kernels_and_eval import (
+    _parse_strategy_form,
     _build_task_from_args,
     _resolve_llm_config_from_args,
     generate_and_evaluate,
@@ -43,6 +44,13 @@ def test_resolve_llm_config_rejects_unknown_provider(monkeypatch):
 
     with pytest.raises(ValueError, match="Unsupported LLM provider"):
         _resolve_llm_config_from_args(args)
+
+
+def test_parse_strategy_form_only_accepts_natural_language():
+    assert _parse_strategy_form("natural_language") == "natural_language"
+
+    with pytest.raises(Exception, match="Only natural_language strategy form is supported"):
+        _parse_strategy_form("dsl")
 
 
 def test_build_task_from_args_constructs_ascendc_task(tmp_path):

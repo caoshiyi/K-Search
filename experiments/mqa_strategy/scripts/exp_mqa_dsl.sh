@@ -6,6 +6,10 @@
 #
 set -euo pipefail
 
+echo "dsl strategy form is no longer supported." >&2
+echo "Migrate the strategy catalog to v2 natural_language + markdown_ref and use exp_mqa_natural_language.sh." >&2
+exit 2
+
 # --- Auto-load env ---
 if command -v jq >/dev/null 2>&1 && [ -f "$HOME/.claude/settings.json" ]; then
     while IFS='=' read -r k v; do

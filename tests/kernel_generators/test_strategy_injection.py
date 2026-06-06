@@ -1,18 +1,249 @@
-"""Tests for strategy_injection API reference and anti-pattern rendering."""
+"""Tests for markdown-backed natural-language strategy injection."""
+
+import argparse
+import json
+from pathlib import Path
 
 import pytest
 
+from k_search.kernel_generators.kernel_generator_world_model import (
+    WorldModelKernelGeneratorWithBaseline,
+)
 from k_search.kernel_generators.strategy_injection import (
+    StrategyCatalogEntry,
     _build_action_node,
     _render_api_references_section,
     _render_anti_patterns_section,
+    build_wm_from_strategies,
+    load_strategy_catalog,
+    render_strategy_action_text,
     render_strategy_as_action_text,
 )
+from k_search.kernel_generators.world_model import render_chosen_action_node_block
 
 
-# ---------------------------------------------------------------------------
-# _render_api_references_section
-# ---------------------------------------------------------------------------
+def _write_catalog(
+    tmp_path: Path,
+    *,
+    markdown_ref: str = "strategies/ub_reuse.md",
+    entry_overrides: dict | None = None,
+    catalog_overrides: dict | None = None,
+) -> Path:
+    strategy_dir = tmp_path / "strategies"
+    strategy_dir.mkdir(parents=True, exist_ok=True)
+    (strategy_dir / "ub_reuse.md").write_text(
+        "# Reuse UB cache\n\n"
+        "Full strategy body here.\n\n"
+        "Implementation checklist:\n"
+        "1. Identify repeated GM reads.\n"
+        "2. Check UB capacity.\n",
+        encoding="utf-8",
+    )
+    entry = {
+        "id": "ub_reuse",
+        "title": "Reuse UB cache",
+        "summary": "Cache reused tiles in UB to reduce GM traffic.",
+        "markdown_ref": markdown_ref,
+        "tags": ["memory", "ub"],
+        "difficulty_1_to_5": 3,
+        "score_0_to_1": 0.7,
+        "expected_vs_baseline_factor": 1.05,
+    }
+    if entry_overrides:
+        entry.update(entry_overrides)
+    catalog = {
+        "version": 2,
+        "strategy_form": "natural_language",
+        "strategies": [entry],
+    }
+    if catalog_overrides:
+        catalog.update(catalog_overrides)
+    catalog_path = tmp_path / "strategy_catalog.json"
+    catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+    return catalog_path
+
+
+class TestStrategyCatalogLoading:
+    def test_valid_catalog_loads_and_resolves_markdown_ref(self, tmp_path):
+        catalog_path = _write_catalog(tmp_path)
+
+        entries = load_strategy_catalog(catalog_path)
+
+        assert len(entries) == 1
+        entry = entries[0]
+        assert isinstance(entry, StrategyCatalogEntry)
+        assert entry.id == "ub_reuse"
+        assert entry.title == "Reuse UB cache"
+        assert entry.summary == "Cache reused tiles in UB to reduce GM traffic."
+        assert entry.markdown_ref == "strategies/ub_reuse.md"
+        assert entry.markdown_path == (tmp_path / "strategies" / "ub_reuse.md").resolve()
+        assert entry.tags == ("memory", "ub")
+        assert entry.difficulty_1_to_5 == 3
+        assert entry.score_0_to_1 == 0.7
+        assert entry.expected_vs_baseline_factor == 1.05
+
+    def test_absolute_markdown_ref_rejected(self, tmp_path):
+        absolute = str((tmp_path / "strategies" / "ub_reuse.md").resolve())
+        catalog_path = _write_catalog(tmp_path, markdown_ref=absolute)
+
+        with pytest.raises(ValueError, match="must be relative"):
+            load_strategy_catalog(catalog_path)
+
+    def test_parent_path_escape_rejected(self, tmp_path):
+        outside = tmp_path.parent / "outside.md"
+        outside.write_text("# outside\n", encoding="utf-8")
+        catalog_path = _write_catalog(tmp_path, markdown_ref="../outside.md")
+
+        with pytest.raises(ValueError, match="escapes catalog directory"):
+            load_strategy_catalog(catalog_path)
+
+    def test_non_md_markdown_ref_rejected(self, tmp_path):
+        (tmp_path / "strategies").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "strategies" / "ub_reuse.txt").write_text("text", encoding="utf-8")
+        catalog_path = _write_catalog(tmp_path, markdown_ref="strategies/ub_reuse.txt")
+
+        with pytest.raises(ValueError, match=r"\.md"):
+            load_strategy_catalog(catalog_path)
+
+    def test_missing_markdown_file_rejected(self, tmp_path):
+        catalog_path = _write_catalog(tmp_path, markdown_ref="strategies/missing.md")
+
+        with pytest.raises(FileNotFoundError, match="strategy markdown file not found"):
+            load_strategy_catalog(catalog_path)
+
+    def test_duplicate_id_rejected(self, tmp_path):
+        catalog_path = _write_catalog(tmp_path)
+        data = json.loads(catalog_path.read_text(encoding="utf-8"))
+        data["strategies"].append(dict(data["strategies"][0]))
+        catalog_path.write_text(json.dumps(data), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="duplicate strategy id"):
+            load_strategy_catalog(catalog_path)
+
+    @pytest.mark.parametrize("field", ["structured_params", "dsl"])
+    def test_structured_params_and_dsl_rejected(self, tmp_path, field):
+        catalog_path = _write_catalog(tmp_path, entry_overrides={field: {"x": 1}})
+
+        with pytest.raises(ValueError, match=f"unsupported field {field}"):
+            load_strategy_catalog(catalog_path)
+
+    def test_inline_natural_language_rejected_by_default(self, tmp_path):
+        catalog_path = _write_catalog(
+            tmp_path,
+            entry_overrides={"natural_language": "Full inline strategy text."},
+        )
+
+        with pytest.raises(ValueError, match="inline natural_language"):
+            load_strategy_catalog(catalog_path)
+
+    def test_inline_natural_language_can_be_loaded_with_explicit_compat_env(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("KSEARCH_ALLOW_INLINE_STRATEGY", "1")
+        catalog_path = tmp_path / "legacy_catalog.json"
+        catalog_path.write_text(
+            json.dumps(
+                {
+                    "strategy_catalog": [
+                        {
+                            "id": "inline_strategy",
+                            "name": "Inline strategy",
+                            "summary": "Legacy inline summary.",
+                            "natural_language": "Legacy full inline body.",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        entry = load_strategy_catalog(catalog_path)[0]
+        rendered = render_strategy_action_text(entry=entry)
+
+        assert entry.id == "inline_strategy"
+        assert entry.title == "Inline strategy"
+        assert "Legacy inline summary." in rendered
+        assert "Legacy full inline body." in rendered
+
+
+class TestStrategyActionRendering:
+    def test_render_strategy_action_text_includes_full_markdown(self, tmp_path):
+        entry = load_strategy_catalog(_write_catalog(tmp_path))[0]
+
+        rendered = render_strategy_action_text(entry=entry)
+
+        assert "Strategy ID: ub_reuse" in rendered
+        assert "Strategy title: Reuse UB cache" in rendered
+        assert "Strategy summary: Cache reused tiles in UB" in rendered
+        assert "Strategy tags: memory, ub" in rendered
+        assert "Full natural-language strategy markdown:" in rendered
+        assert "Implementation checklist" in rendered
+
+    def test_render_strategy_as_action_text_rejects_old_forms(self, tmp_path):
+        entry = load_strategy_catalog(_write_catalog(tmp_path))[0]
+
+        with pytest.raises(ValueError, match="Only natural_language"):
+            render_strategy_as_action_text(entry, form="dsl")
+
+    def test_render_strategy_action_text_truncates_long_markdown(self, tmp_path):
+        entry = load_strategy_catalog(_write_catalog(tmp_path))[0]
+
+        rendered = render_strategy_action_text(entry=entry, max_markdown_chars=12)
+
+        assert "# Reuse UB c" in rendered
+        assert "[truncated strategy markdown]" in rendered
+
+
+class TestWorldModelStrategySeeding:
+    def test_world_model_seed_contains_summary_but_not_full_markdown(self, tmp_path):
+        entry = load_strategy_catalog(_write_catalog(tmp_path))[0]
+
+        wm = build_wm_from_strategies(
+            [entry],
+            definition_name="mqa",
+            kernel_summary="MQA kernel.",
+        )
+        dumped = json.dumps(wm)
+
+        assert "Cache reused tiles in UB to reduce GM traffic." in dumped
+        assert "Implementation checklist" not in dumped
+        action_node = wm["decision_tree"]["nodes"][1]
+        assert action_node["action"]["strategy_ref"] == {
+            "id": "ub_reuse",
+            "markdown_ref": "strategies/ub_reuse.md",
+        }
+
+    def test_build_action_node_uses_entry_metadata(self, tmp_path):
+        entry = load_strategy_catalog(_write_catalog(tmp_path))[0]
+
+        node = _build_action_node(0, entry, "natural_language")
+
+        assert node["action"]["title"] == "Reuse UB cache"
+        assert node["action"]["description"] == "Cache reused tiles in UB to reduce GM traffic."
+        assert node["action"]["score_0_to_1"] == 0.7
+        assert node["action"]["difficulty_1_to_5"] == 3
+        assert node["action"]["expected_vs_baseline_factor"] == 1.05
+        assert "Implementation checklist" not in json.dumps(node)
+
+    def test_chosen_action_prompt_includes_referenced_markdown(self, tmp_path):
+        entry = load_strategy_catalog(_write_catalog(tmp_path))[0]
+        wm = build_wm_from_strategies([entry], definition_name="mqa")
+        node = wm["decision_tree"]["nodes"][1]
+        generator = object.__new__(WorldModelKernelGeneratorWithBaseline)
+        generator._strategy_catalog = [entry]
+
+        chosen_action_text = render_chosen_action_node_block(node).strip()
+        strategy_text = generator._strategy_text_for_node(node)
+        final_action_text = (
+            chosen_action_text
+            + "\n\nReferenced strategy document:\n"
+            + strategy_text
+        )
+
+        assert "Cache reused tiles in UB to reduce GM traffic." in chosen_action_text
+        assert "Implementation checklist" not in chosen_action_text
+        assert "Implementation checklist" in final_action_text
+
 
 class TestRenderApiReferencesSection:
     """Tests for _render_api_references_section standalone function."""
@@ -35,40 +266,6 @@ class TestRenderApiReferencesSection:
         assert "DataCopy(src, dst, len)" in result
         assert "references/ascendc/api/DataCopy.md" in result
 
-    def test_multiple_api_references(self):
-        refs = [
-            {
-                "api_name": "DataCopy",
-                "doc_path": "ascendc/api/DataCopy.md",
-                "summary": "DataCopy(src, dst, len) - copy between buffers",
-            },
-            {
-                "api_name": "LocalToGlobal",
-                "doc_path": "ascendc/api/LocalToGlobal.md",
-                "summary": "LocalToGlobal(dst, src) - move from UB to GM",
-            },
-        ]
-        result = _render_api_references_section(refs)
-        assert "DataCopy" in result
-        assert "LocalToGlobal" in result
-        assert "references/ascendc/api/DataCopy.md" in result
-        assert "references/ascendc/api/LocalToGlobal.md" in result
-
-    def test_doc_path_hint_present(self):
-        refs = [
-            {
-                "api_name": "DataCopy",
-                "doc_path": "ascendc/api/DataCopy.md",
-                "summary": "DataCopy(src, dst, len) - copy between buffers",
-            },
-        ]
-        result = _render_api_references_section(refs)
-        assert "If you need more details" in result
-
-
-# ---------------------------------------------------------------------------
-# _render_anti_patterns_section
-# ---------------------------------------------------------------------------
 
 class TestRenderAntiPatternsSection:
     """Tests for _render_anti_patterns_section standalone function."""
@@ -85,17 +282,6 @@ class TestRenderAntiPatternsSection:
         result = _render_anti_patterns_section(refs, "S01")
         assert result == ""
 
-    def test_no_anti_patterns_key_returns_empty_string(self):
-        refs = [
-            {
-                "api_name": "DataCopy",
-                "doc_path": "ascendc/api/DataCopy.md",
-                "summary": "DataCopy(src, dst, len)",
-            },
-        ]
-        result = _render_anti_patterns_section(refs, "S01")
-        assert result == ""
-
     def test_single_anti_pattern(self):
         refs = [
             {
@@ -106,7 +292,7 @@ class TestRenderAntiPatternsSection:
                     {
                         "id": "ap1",
                         "pattern": "DataCopy inside a loop",
-                        "reason": "Causes redundant UB-to-UB transfers; use batch copy instead",
+                        "reason": "Causes redundant UB-to-UB transfers",
                         "source": "ascendc/api/DataCopy.md",
                     },
                 ],
@@ -118,284 +304,3 @@ class TestRenderAntiPatternsSection:
         assert "Do NOT use DataCopy inside a loop" in result
         assert "Causes redundant UB-to-UB transfers" in result
         assert "Discovered from ascendc/api/DataCopy.md" in result
-
-    def test_multiple_anti_patterns_across_apis(self):
-        refs = [
-            {
-                "api_name": "DataCopy",
-                "doc_path": "ascendc/api/DataCopy.md",
-                "summary": "DataCopy(src, dst, len)",
-                "anti_patterns": [
-                    {
-                        "id": "ap1",
-                        "pattern": "DataCopy inside a loop",
-                        "reason": "Causes redundant transfers",
-                        "source": "ascendc/api/DataCopy.md",
-                    },
-                ],
-            },
-            {
-                "api_name": "LocalToGlobal",
-                "doc_path": "ascendc/api/LocalToGlobal.md",
-                "summary": "LocalToGlobal(dst, src)",
-                "anti_patterns": [
-                    {
-                        "id": "ap2",
-                        "pattern": "LocalToGlobal on misaligned address",
-                        "reason": "Address must be 32-byte aligned",
-                        "source": "ascendc/api/LocalToGlobal.md",
-                    },
-                ],
-            },
-        ]
-        result = _render_anti_patterns_section(refs, "S02")
-        assert "[AP-S02-ap1]" in result
-        assert "[AP-S02-ap2]" in result
-        assert "DataCopy inside a loop" in result
-        assert "LocalToGlobal on misaligned address" in result
-
-    def test_anti_pattern_id_format(self):
-        refs = [
-            {
-                "api_name": "DataCopy",
-                "doc_path": "ascendc/api/DataCopy.md",
-                "summary": "DataCopy(src, dst, len)",
-                "anti_patterns": [
-                    {
-                        "id": "ap3",
-                        "pattern": "bad pattern",
-                        "reason": "bad reason",
-                        "source": "source.md",
-                    },
-                ],
-            },
-        ]
-        result = _render_anti_patterns_section(refs, "S07")
-        assert "[AP-S07-ap3]" in result
-
-
-# ---------------------------------------------------------------------------
-# render_strategy_as_action_text with api_references
-# ---------------------------------------------------------------------------
-
-class TestRenderStrategyWithApiReferences:
-    """Tests for render_strategy_as_action_text when api_references are present."""
-
-    def _make_strategy(self, api_references=None, **overrides):
-        base = {
-            "id": "S01",
-            "name": "Vectorize inner loop",
-            "category": "compute",
-            "difficulty": 3,
-            "impact": "medium",
-            "natural_language": "Replace the scalar inner loop with vector operations for better throughput.",
-        }
-        if api_references is not None:
-            base["api_references"] = api_references
-        base.update(overrides)
-        return base
-
-    def test_strategy_without_api_references_rendered_unchanged(self):
-        strategy = self._make_strategy()
-        result = render_strategy_as_action_text(strategy, form="natural_language")
-        assert "=== AscendC API Reference ===" not in result
-        assert "=== Anti-Pattern Warnings ===" not in result
-        assert "Strategy S01" in result
-
-    def test_strategy_with_api_references_includes_both_sections(self):
-        strategy = self._make_strategy(
-            api_references=[
-                {
-                    "api_name": "DataCopy",
-                    "doc_path": "ascendc/api/DataCopy.md",
-                    "summary": "DataCopy(src, dst, len) - copy between buffers",
-                    "anti_patterns": [
-                        {
-                            "id": "ap1",
-                            "pattern": "DataCopy inside a loop",
-                            "reason": "Causes redundant transfers",
-                            "source": "ascendc/api/DataCopy.md",
-                        },
-                    ],
-                },
-            ],
-        )
-        result = render_strategy_as_action_text(strategy, form="natural_language")
-        assert "=== AscendC API Reference ===" in result
-        assert "=== Anti-Pattern Warnings ===" in result
-        assert "Strategy S01" in result
-        assert "DataCopy" in result
-
-    def test_anti_pattern_section_only_when_anti_patterns_exist(self):
-        strategy = self._make_strategy(
-            api_references=[
-                {
-                    "api_name": "DataCopy",
-                    "doc_path": "ascendc/api/DataCopy.md",
-                    "summary": "DataCopy(src, dst, len) - copy between buffers",
-                    "anti_patterns": [],
-                },
-            ],
-        )
-        result = render_strategy_as_action_text(strategy, form="natural_language")
-        assert "=== AscendC API Reference ===" in result
-        assert "=== Anti-Pattern Warnings ===" not in result
-
-    def test_api_references_with_structured_params_form(self):
-        strategy = {
-            "id": "S02",
-            "name": "Tiling optimization",
-            "category": "tiling",
-            "difficulty": 4,
-            "impact": "high",
-            "structured_params": {"tile_size": 128, "alignment": 32},
-            "api_references": [
-                {
-                    "api_name": "DataCopy",
-                    "doc_path": "ascendc/api/DataCopy.md",
-                    "summary": "DataCopy(src, dst, len)",
-                    "anti_patterns": [
-                        {
-                            "id": "ap1",
-                            "pattern": "misaligned copy",
-                            "reason": "alignment required",
-                            "source": "doc.md",
-                        },
-                    ],
-                },
-            ],
-        }
-        result = render_strategy_as_action_text(strategy, form="structured_params")
-        assert "=== AscendC API Reference ===" in result
-        assert "=== Anti-Pattern Warnings ===" in result
-
-    def test_api_references_with_dsl_form(self):
-        strategy = {
-            "id": "S03",
-            "name": "Pipeline DSL",
-            "category": "pipeline",
-            "difficulty": 5,
-            "impact": "high",
-            "dsl": "PIPELINE(stage1, stage2) -> fused_compute",
-            "api_references": [
-                {
-                    "api_name": "Pipeline",
-                    "doc_path": "ascendc/api/Pipeline.md",
-                    "summary": "Pipeline(stages) - multi-stage compute",
-                },
-            ],
-        }
-        result = render_strategy_as_action_text(strategy, form="dsl")
-        assert "=== AscendC API Reference ===" in result
-        assert "=== Anti-Pattern Warnings ===" not in result
-
-    def test_doc_path_hint_in_rendered_output(self):
-        strategy = self._make_strategy(
-            api_references=[
-                {
-                    "api_name": "DataCopy",
-                    "doc_path": "ascendc/api/DataCopy.md",
-                    "summary": "DataCopy(src, dst, len)",
-                },
-            ],
-        )
-        result = render_strategy_as_action_text(strategy, form="natural_language")
-        assert "If you need more details" in result
-
-    def test_existing_value_error_handling_preserved(self):
-        """Verify that existing ValueError for missing fields still works."""
-        strategy = {"id": "S04", "name": "No content", "category": "compute"}
-        with pytest.raises(ValueError, match="no natural_language field"):
-            render_strategy_as_action_text(strategy, form="natural_language")
-
-
-# ---------------------------------------------------------------------------
-# _build_action_node
-# ---------------------------------------------------------------------------
-
-
-class TestBuildActionNode:
-    """Tests for _build_action_node expected_speedup handling."""
-
-    def test_build_action_node_with_min_none(self):
-        """Test that min=None does not cause TypeError and returns None."""
-        strategy = {
-            "id": "S5",
-            "name": "Min None",
-            "category": "tiling",
-            "impact": "medium",
-            "difficulty": 2,
-            "natural_language": "Description",
-            "structured_params": {
-                "expected_speedup": {"min": None},
-            },
-        }
-        node = _build_action_node(4, strategy, "natural_language")
-
-        action = node.get("action", {})
-        expected_speedup = action.get("expected_vs_baseline_factor")
-
-        # min=None 应被跳过，expected_speedup 为 None
-        assert expected_speedup is None
-
-    def test_build_action_node_with_valid_min(self):
-        """Test that valid min value is correctly extracted."""
-        strategy = {
-            "id": "S6",
-            "name": "Valid Min",
-            "category": "tiling",
-            "impact": "high",
-            "difficulty": 3,
-            "natural_language": "Description",
-            "structured_params": {
-                "expected_speedup": {"min": 2.5},
-            },
-        }
-        node = _build_action_node(5, strategy, "natural_language")
-
-        action = node.get("action", {})
-        expected_speedup = action.get("expected_vs_baseline_factor")
-
-        assert expected_speedup == 2.5
-
-    def test_build_action_node_with_expected_speedup_interval(self):
-        """Test that expected_speedup_interval.likely takes priority."""
-        strategy = {
-            "id": "S7",
-            "name": "Interval Priority",
-            "category": "compute",
-            "impact": "high",
-            "difficulty": 4,
-            "natural_language": "Description",
-            "expected_speedup_interval": {"likely": 3.0},
-            "structured_params": {
-                "expected_speedup": {"min": 2.0},
-            },
-        }
-        node = _build_action_node(6, strategy, "natural_language")
-
-        action = node.get("action", {})
-        expected_speedup = action.get("expected_vs_baseline_factor")
-
-        # expected_speedup_interval.likely takes priority over structured_params.expected_speedup.min
-        assert expected_speedup == 3.0
-
-    def test_build_action_node_with_missing_min_key(self):
-        """Test that missing min key returns None."""
-        strategy = {
-            "id": "S8",
-            "name": "No Min Key",
-            "category": "tiling",
-            "impact": "low",
-            "difficulty": 1,
-            "natural_language": "Description",
-            "structured_params": {
-                "expected_speedup": {},  # no min key
-            },
-        }
-        node = _build_action_node(7, strategy, "natural_language")
-
-        action = node.get("action", {})
-        expected_speedup = action.get("expected_vs_baseline_factor")
-
-        assert expected_speedup is None

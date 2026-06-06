@@ -7,6 +7,16 @@ from typing import Any, Optional
 import json
 
 
+def _parse_strategy_form(value: str) -> str:
+    form = str(value or "").strip().lower()
+    if form != "natural_language":
+        raise argparse.ArgumentTypeError(
+            "Only natural_language strategy form is supported. "
+            "Use markdown_ref in strategy catalog."
+        )
+    return form
+
+
 def _resolve_llm_config_from_args(args: Any) -> tuple[str, Optional[str]]:
     from k_search.kernel_generators.llm_clients import normalize_llm_provider
 
@@ -583,19 +593,17 @@ def main():
         help=(
             "Path to a strategy catalog JSON file. When provided alongside --world-model, "
             "the WM decision tree is seeded with strategy-derived action nodes instead of "
-            "LLM-generated ones. Enables controlled strategy-form experiments."
+            "LLM-generated ones. Catalog entries must reference markdown strategy files."
         ),
     )
     parser.add_argument(
         "--strategy-form",
-        choices=["natural_language", "structured_params", "dsl"],
-        default=None,
+        type=_parse_strategy_form,
+        default="natural_language",
         help=(
-            "Strategy rendering form for action text injection. "
-            "'natural_language' renders plain English descriptions. "
-            "'structured_params' renders JSON parameter specifications. "
-            "'dsl' renders domain-specific language specifications. "
-            "Must be used with --strategy-file."
+            "Strategy rendering form. Only 'natural_language' is supported. "
+            "Use --strategy-file with a JSON catalog whose entries reference "
+            "markdown strategy files."
         ),
     )
 

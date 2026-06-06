@@ -1,6 +1,11 @@
-# MQA Strategy Form Experiment
+# MQA Strategy Experiment Archive
 
-Multi-Query Attention (MQA) 算子优化策略形式对比实验的完整归档。
+Multi-Query Attention (MQA) 算子优化策略实验归档。
+
+当前 K-Search 只支持 `natural_language` 策略形式，并要求 JSON catalog
+使用 v2 schema：JSON 保存摘要和 `markdown_ref`，完整策略正文保存在
+markdown 文件中。旧的 `structured_params` 和 `dsl` form 对比脚本只作为历史
+实验材料保留，不能直接用于当前 CLI。
 
 ## 目录结构
 
@@ -23,29 +28,26 @@ experiments/mqa_strategy/
 3. Claude Agent SDK 已安装：`pip install claude-agent-sdk`
 4. `ANTHROPIC_AUTH_TOKEN` 和 `ANTHROPIC_BASE_URL` 已设置
 
-### 运行单个策略形式实验
+### 运行当前支持的策略实验
 
 ```bash
 # Baseline（纯 LLM WM，无策略注入）
 bash experiments/mqa_strategy/scripts/exp_mqa_baseline_llm.sh
 
-# Natural Language 策略形式
+# Natural Language markdown 策略注入
 bash experiments/mqa_strategy/scripts/exp_mqa_natural_language.sh
-
-# Structured Params 策略形式
-bash experiments/mqa_strategy/scripts/exp_mqa_structured_params.sh
-
-# DSL 策略形式
-bash experiments/mqa_strategy/scripts/exp_mqa_dsl.sh
 ```
 
-### 运行全部 4 个对比实验
+### 历史 form 对比实验
 
-```bash
-bash experiments/mqa_strategy/scripts/run_all_experiments.sh
-```
+`exp_mqa_structured_params.sh`、`exp_mqa_dsl.sh` 和旧的 `run_all_experiments.sh`
+记录了早期 strategy-form 对比实验。当前 CLI 会拒绝
+`--strategy-form structured_params` 和 `--strategy-form dsl`。
 
-### 策略变体对照实验
+### 历史策略变体对照实验
+
+以下脚本依赖旧的 inline JSON 变体文件，属于历史归档。当前 CLI 使用 v2
+catalog 后，需要先把对应单策略 JSON 迁移为 `summary + markdown_ref` 才能重跑。
 
 ```bash
 # S1 系列（tiling 策略对照）
@@ -61,7 +63,7 @@ python3 experiments/mqa_strategy/scripts/run_s6_series_comparison.py
 python3 experiments/mqa_strategy/scripts/run_s10_series_comparison.py
 ```
 
-### 批量运行所有变体
+### 历史批量运行所有变体
 
 ```bash
 python3 experiments/mqa_strategy/scripts/run_mqa_strategy_experiments.sh --baseline-ms <ms>
@@ -71,21 +73,26 @@ python3 experiments/mqa_strategy/scripts/run_mqa_strategy_experiments.sh --basel
 
 ## 路径设计
 
-所有脚本中的路径已修复为**相对推导**，不再硬编码绝对路径：
+当前支持的 shell 脚本使用相对路径推导，不再硬编码 K-Search 根目录：
 
-| 路径 | Shell 脚本 | Python 脚本 |
-|------|-----------|-------------|
-| KSEARCH_ROOT | `${KSEARCH_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}` | `Path(__file__).resolve().parent.parent` |
-| TASK_DIR | `${TASK_DIR:-/mnt/workspace/cv_agent/tile2asc/multi_query_attention}` | `os.environ.get("TASK_DIR", "...")` |
-| STRATEGIES_DIR | `$KSEARCH_ROOT/experiments/mqa_strategy/strategies/mqa_experiments` | `KSEARCH_ROOT / "experiments" / "mqa_strategy" / "strategies" / "mqa_experiments"` |
+| 路径 | Shell 脚本 |
+|------|-----------|
+| KSEARCH_ROOT | `${KSEARCH_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}` |
+| TASK_DIR | `${TASK_DIR:-/mnt/workspace/cv_agent/tile2asc/multi_query_attention}` |
+| STRATEGY_CATALOG | `$KSEARCH_ROOT/strategies/mqa_strategies_catalog.json` |
 
 如果将 K-Search 部署到不同位置，只需：
 - Shell 脚本：设置 `export KSEARCH_ROOT=<new_path>` 和 `export TASK_DIR=<new_task_path>`
-- Python 脚本：设置 `export TASK_DIR=<new_task_path>`（KSEARCH_ROOT 通过 `__file__` 自动推导）
 
 ## 策略目录说明
 
-`strategies/mqa_strategies_catalog.json`（在 K-Search 根目录下）包含完整的 12 个策略定义（S1-S12），而 `strategies/mqa_experiments/` 下是每个策略变体的独立 JSON 文件，由 `extract_strategy_variants.py` 从 `mqa_strategy_variants_test.json` 生成。
+`strategies/mqa_strategies_catalog.json`（在 K-Search 根目录下）是当前可用的
+v2 catalog，包含 12 个策略的摘要、元数据和 markdown 引用。
+完整策略正文位于 `strategies/mqa_strategies/*.md`。
+
+`experiments/mqa_strategy/strategies/` 下的旧 JSON 变体属于历史实验归档，
+仍包含 inline `natural_language`、`structured_params` 或 `dsl` 字段；如需重跑，
+需要先迁移到 v2 catalog + markdown_ref schema。
 
 ## 文档说明
 

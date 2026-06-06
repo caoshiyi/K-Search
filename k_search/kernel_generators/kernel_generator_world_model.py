@@ -76,6 +76,38 @@ def _definition_text_for_codegen_prompt(
 class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
     """Baseline-aware generator variant that maintains and injects a persistent world model."""
 
+    def _strategy_text_for_node(self, node_obj: dict[str, Any] | None) -> str:
+        """Render full markdown strategy text for a selected action node."""
+        if not isinstance(node_obj, dict) or not self._strategy_catalog:
+            return ""
+        action = node_obj.get("action") if isinstance(node_obj.get("action"), dict) else {}
+        strategy_ref = action.get("strategy_ref") if isinstance(action.get("strategy_ref"), dict) else {}
+        ref_id = str(strategy_ref.get("id") or "").strip()
+        ref_markdown = str(strategy_ref.get("markdown_ref") or "").strip()
+        node_id = str(node_obj.get("node_id") or "").strip()
+
+        entry = None
+        for candidate in self._strategy_catalog:
+            if ref_id and candidate.id == ref_id:
+                entry = candidate
+                break
+            if ref_markdown and candidate.markdown_ref == ref_markdown:
+                entry = candidate
+                break
+        if entry is None and node_id.startswith("s"):
+            try:
+                idx = int(node_id[1:]) - 1
+            except ValueError:
+                idx = -1
+            if 0 <= idx < len(self._strategy_catalog):
+                entry = self._strategy_catalog[idx]
+        if entry is None:
+            return ""
+
+        from k_search.kernel_generators.strategy_injection import render_strategy_action_text
+
+        return render_strategy_action_text(entry=entry)
+
     def _default_world_model_path(self, *, task: Any, run_id: str | None = None, include_run: bool = True) -> Optional[Path]:
         try:
             root = get_ksearch_artifacts_dir(
@@ -154,15 +186,19 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         self._strategy_file = strategy_file
         self._strategy_form = strategy_form
 
-        # Load strategy catalog if provided
-        self._strategy_catalog: list[dict[str, Any]] | None = None
+        # Load strategy catalog if provided.
+        self._strategy_catalog: list[Any] | None = None
         if strategy_file:
             from k_search.kernel_generators.strategy_injection import load_strategy_catalog
+
+            if strategy_form not in (None, "", "natural_language"):
+                raise ValueError(
+                    "Only natural_language strategy form is supported. "
+                    "Use markdown_ref in strategy catalog."
+                )
             self._strategy_catalog = load_strategy_catalog(strategy_file)
-            if not strategy_form:
-                strategy_form = "natural_language"
-            self._strategy_form = strategy_form
-            print(f"[STRATEGY] Loaded {len(self._strategy_catalog)} strategies from {strategy_file}, form={strategy_form}")
+            self._strategy_form = "natural_language"
+            print(f"[STRATEGY] Loaded {len(self._strategy_catalog)} strategies from {strategy_file}, form=natural_language")
 
         def _llm_call(prompt: str) -> str:
             with llm_log_context(flow="world_model", phase="world_model_manager"):
@@ -397,10 +433,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     build_wm_from_strategies,
                 )
                 from k_search.kernel_generators.world_model import dump_world_model_obj
-                _emit(f"[STRATEGY] Building WM from strategy catalog ({len(self._strategy_catalog)} strategies, form={self._strategy_form})")
+                _emit(f"[STRATEGY] Building WM from strategy catalog ({len(self._strategy_catalog)} strategies, form=natural_language)")
                 wm_obj = build_wm_from_strategies(
                     strategy_catalog=self._strategy_catalog,
-                    form=self._strategy_form,
                     definition_name=task.name,
                     kernel_summary=str(definition_text[:500] or ""),
                 )
@@ -627,6 +662,13 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             blk = render_chosen_action_node_block(node_obj or {})
             if blk.strip():
                 chosen_action_text = blk.strip()
+                strategy_text = self._strategy_text_for_node(node_obj)
+                if strategy_text:
+                    chosen_action_text = (
+                        chosen_action_text
+                        + "\n\nReferenced strategy document:\n"
+                        + strategy_text
+                    )
                 _emit(chosen_action_text)
 
             try:

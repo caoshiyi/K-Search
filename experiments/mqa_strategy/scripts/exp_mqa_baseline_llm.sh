@@ -22,7 +22,7 @@ fi
 : "${BASELINE_MS:?run baseline first}"
 
 # --- Fixed experiment parameters (identical to strategy experiments) ---
-KSEARCH_ROOT="${KSEARCH_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+KSEARCH_ROOT="${KSEARCH_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 TASK_DIR="${TASK_DIR:-/mnt/workspace/cv_agent/tile2asc/multi_query_attention}"
 MODEL_NAME="glm-5.1"
 MAX_ROUNDS=12

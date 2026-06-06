@@ -1,9 +1,9 @@
 """Tests for implementation_priorities rendering."""
 
-import pytest
 from k_search.kernel_generators.strategy_injection import (
+    StrategyCatalogEntry,
+    _build_action_node,
     _render_priorities_section,
-    render_strategy_as_action_text,
 )
 
 
@@ -54,106 +54,41 @@ def test_render_priorities_section_missing_fields():
 
 
 # ==============================================================================
-# Tests for render_strategy_as_action_text with implementation_priorities
+# Tests for _build_action_node with new natural-language catalog entries
 # ==============================================================================
 
 
-def test_render_strategy_with_priorities():
-    """Test that priorities section appears after natural_language."""
-    strategy = {
-        "id": "S1",
-        "name": "Test Strategy",
-        "category": "tiling",
-        "impact": "high",
-        "difficulty": 2,
-        "natural_language": "This is the strategy description.",
-        "implementation_priorities": [
-            {"priority": "P0", "action": "First step", "dependency": None},
-            {"priority": "P1", "action": "Second step", "dependency": "P0 verified"},
-        ],
-    }
-    result = render_strategy_as_action_text(strategy, form="natural_language")
-
-    # 策略描述应该在前面
-    strategy_desc_pos = result.find("Strategy S1: Test Strategy")
-    priorities_pos = result.find("=== Implementation Priority ===")
-
-    assert strategy_desc_pos < priorities_pos
-    assert "This is the strategy description" in result
-    assert "P0: First step" in result
-    assert "P1: Second step" in result
-
-
-def test_render_strategy_without_priorities():
-    """Test that strategy without priorities still renders correctly."""
-    strategy = {
-        "id": "S2",
-        "name": "No Priorities",
-        "category": "compute",
-        "impact": "medium",
-        "difficulty": 1,
-        "natural_language": "Simple strategy without priorities.",
-    }
-    result = render_strategy_as_action_text(strategy, form="natural_language")
-
-    assert "=== Implementation Priority ===" not in result
-    assert "Simple strategy without priorities" in result
+def _entry(**overrides):
+    entry = StrategyCatalogEntry(
+        id="S1",
+        title="Test",
+        summary="Summary description",
+        markdown_ref="strategies/s1.md",
+        markdown_path=__file__,
+        tags=("tiling",),
+        difficulty_1_to_5=2,
+        score_0_to_1=0.8,
+        expected_vs_baseline_factor=1.47,
+    )
+    return StrategyCatalogEntry(
+        id=overrides.get("id", entry.id),
+        title=overrides.get("title", entry.title),
+        summary=overrides.get("summary", entry.summary),
+        markdown_ref=overrides.get("markdown_ref", entry.markdown_ref),
+        markdown_path=overrides.get("markdown_path", entry.markdown_path),
+        tags=overrides.get("tags", entry.tags),
+        difficulty_1_to_5=overrides.get("difficulty_1_to_5", entry.difficulty_1_to_5),
+        score_0_to_1=overrides.get("score_0_to_1", entry.score_0_to_1),
+        expected_vs_baseline_factor=overrides.get(
+            "expected_vs_baseline_factor",
+            entry.expected_vs_baseline_factor,
+        ),
+    )
 
 
-def test_render_strategy_with_priorities_and_api_refs():
-    """Test ordering: description -> priorities -> api_refs -> anti_patterns."""
-    strategy = {
-        "id": "S4",
-        "name": "Complex Strategy",
-        "category": "compute",
-        "impact": "high",
-        "difficulty": 2,
-        "natural_language": "Strategy description.",
-        "implementation_priorities": [
-            {"priority": "P0", "action": "Step one", "dependency": None},
-        ],
-        "api_references": [
-            {
-                "api_name": "RowMuls",
-                "doc_path": "some/path.md",
-                "summary": "API summary",
-            }
-        ],
-    }
-    result = render_strategy_as_action_text(strategy, form="natural_language")
-
-    # 检查顺序
-    desc_pos = result.find("Strategy description")
-    priorities_pos = result.find("=== Implementation Priority ===")
-    api_ref_pos = result.find("=== AscendC API Reference ===")
-
-    assert desc_pos < priorities_pos
-    assert priorities_pos < api_ref_pos
-
-
-# ==============================================================================
-# Tests for _build_action_node with expected_speedup_interval
-# ==============================================================================
-
-
-def test_build_action_node_with_speedup_interval():
-    """Test that expected_speedup uses 'likely' value from interval."""
-    from k_search.kernel_generators.strategy_injection import _build_action_node
-
-    strategy = {
-        "id": "S1",
-        "name": "Test",
-        "category": "tiling",
-        "impact": "high",
-        "difficulty": 2,
-        "natural_language": "Description",
-        "expected_speedup_interval": {
-            "min": 1.30,
-            "likely": 1.47,
-            "max": 1.50,
-        },
-    }
-    node = _build_action_node(0, strategy, "natural_language")
+def test_build_action_node_with_expected_vs_baseline_factor():
+    """Test that expected speedup uses entry.expected_vs_baseline_factor."""
+    node = _build_action_node(0, _entry(), "natural_language")
 
     action = node.get("action", {})
     expected_speedup = action.get("expected_vs_baseline_factor")
@@ -161,19 +96,13 @@ def test_build_action_node_with_speedup_interval():
     assert expected_speedup == 1.47
 
 
-def test_build_action_node_without_speedup_interval():
-    """Test that expected_speedup is None when interval is missing."""
-    from k_search.kernel_generators.strategy_injection import _build_action_node
-
-    strategy = {
-        "id": "S2",
-        "name": "No Interval",
-        "category": "compute",
-        "impact": "medium",
-        "difficulty": 1,
-        "natural_language": "Description",
-    }
-    node = _build_action_node(1, strategy, "natural_language")
+def test_build_action_node_without_expected_vs_baseline_factor():
+    """Test that expected_speedup is None when metadata is missing."""
+    node = _build_action_node(
+        1,
+        _entry(id="S2", expected_vs_baseline_factor=None, score_0_to_1=0.5),
+        "natural_language",
+    )
 
     action = node.get("action", {})
     expected_speedup = action.get("expected_vs_baseline_factor")
@@ -181,53 +110,21 @@ def test_build_action_node_without_speedup_interval():
     assert expected_speedup is None
 
 
-def test_build_action_node_with_structured_params_speedup():
-    """Test fallback to structured_params.expected_speedup.min when interval missing."""
-    from k_search.kernel_generators.strategy_injection import _build_action_node
+def test_build_action_node_records_strategy_ref():
+    """Test action node keeps the markdown reference, not full strategy text."""
+    node = _build_action_node(2, _entry(id="S3", markdown_ref="strategies/s3.md"), "natural_language")
 
-    strategy = {
+    action = node.get("action", {})
+
+    assert action["strategy_ref"] == {
         "id": "S3",
-        "name": "Structured",
-        "category": "tiling",
-        "impact": "medium",
-        "difficulty": 2,
-        "natural_language": "Description",
-        "structured_params": {
-            "expected_speedup": {"min": 1.5, "max": 2.5},
-        },
+        "markdown_ref": "strategies/s3.md",
     }
-    node = _build_action_node(2, strategy, "natural_language")
-
-    action = node.get("action", {})
-    expected_speedup = action.get("expected_vs_baseline_factor")
-
-    assert expected_speedup == 1.5
 
 
-def test_build_action_node_interval_overrides_structured_params():
-    """Test that expected_speedup_interval takes precedence over structured_params."""
-    from k_search.kernel_generators.strategy_injection import _build_action_node
+def test_build_action_node_rejects_non_natural_language_form():
+    """Test that old strategy forms fail fast."""
+    import pytest
 
-    strategy = {
-        "id": "S4",
-        "name": "Both",
-        "category": "tiling",
-        "impact": "high",
-        "difficulty": 2,
-        "natural_language": "Description",
-        "expected_speedup_interval": {
-            "min": 1.30,
-            "likely": 1.47,
-            "max": 1.50,
-        },
-        "structured_params": {
-            "expected_speedup": {"min": 1.5, "max": 2.5},
-        },
-    }
-    node = _build_action_node(3, strategy, "natural_language")
-
-    action = node.get("action", {})
-    expected_speedup = action.get("expected_vs_baseline_factor")
-
-    # expected_speedup_interval.likely should take precedence
-    assert expected_speedup == 1.47
+    with pytest.raises(ValueError, match="Only natural_language"):
+        _build_action_node(3, _entry(id="S4"), "dsl")

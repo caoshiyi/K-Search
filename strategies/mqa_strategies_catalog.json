@@ -1,440 +1,162 @@
 {
-  "strategy_catalog": [
+  "version": 2,
+  "strategy_form": "natural_language",
+  "strategies": [
     {
       "id": "S1",
-      "name": "Enlarged Tile Sizes",
-      "category": "tiling",
-      "impact": "high",
-      "difficulty": 2,
-      "natural_language": "Increase BLOCK_M, BLOCK_N, and BASE_K from 64 to 128. Larger tile sizes amortize loop overhead, improve L0A/L0B utilization from 25% to 50%, and reduce the number of Mmad iterations per tile. This is the most impactful single change for bandwidth-bound attention because each Mmad processes more data, reducing per-tile sync and loop overhead. However, larger tiles require more L1 buffer space for Q (128*dim*2 bytes per buffer) and KV (128*dim*2 bytes per buffer). For dim=128, Q buffer = 128*128*2 = 32KB, KV buffer = 128*128*2 = 32KB, which fits comfortably in 512KB L1. For dim=512, Q buffer = 128*512*2 = 128KB, KV buffer = 128*512*2 = 128KB, total ~384KB including P buffer, which may approach L1 limit.",
-      "structured_params": {
-        "parameters": {
-          "BLOCK_M": {"old": 64, "new": 128, "type": "uint32_t"},
-          "BLOCK_N": {"old": 64, "new": 128, "type": "uint32_t"},
-          "BASE_K": {"old": 64, "new": 128, "type": "uint32_t"}
-        },
-        "constraints": [
-          "BLOCK_M must be multiple of C0 (=16 for fp16)",
-          "BLOCK_N must be multiple of C0",
-          "BASE_K must be multiple of C0",
-          "Q buffer in L1 = BLOCK_M * dim * sizeof(QType) must fit in 512KB - KV_buffer - P_buffer",
-          "L0A/L0B dual-buffer: 2 * BLOCK_M * BASE_K * sizeof(half) = 2*128*128*2 = 64KB < 64KB limit per L0A/L0B"
-        ],
-        "expected_speedup": {"min": 1.5, "max": 2.5},
-        "affected_files": ["flash_attention_tiling.h", "flash_attention_kernel.h", "flash_attention_cube.h", "flash_attention_vec.h"]
-      },
-      "dsl": "TILE_SIZE { BLOCK_M: 128, BLOCK_N: 128, BASE_K: 128 } CONSTRAINT { L0A_buf: 2*BLOCK_M*BASE_K*2 <= 64KB, L1_Q_buf: BLOCK_M*dim*2 <= (512KB - KV_buf - P_buf), alignment: BLOCK_M % C0 == 0, BLOCK_N % C0 == 0 } IMPACT { bandwidth: 9/10, register: 6/10, compute: 7/10 } EXPECT { speedup: [1.5, 2.5] } FILES { tiling.h, kernel.h, cube.h, vec.h }",
-      "implementation_priorities": [
-        {"priority": "P0", "action": "Change tile size constants (BLOCK_M, BLOCK_N, BASE_K) from 64 to 128", "dependency": null},
-        {"priority": "P1", "action": "Adjust L1 buffer allocations for larger tile sizes", "dependency": "P0 verified"},
-        {"priority": "P2", "action": "Reduce loop iteration count and sync overhead", "dependency": "P0+P1 verified"}
+      "title": "Enlarged Tile Sizes",
+      "summary": "Increase BLOCK_M, BLOCK_N, and BASE_K from 64 to 128.",
+      "markdown_ref": "mqa_strategies/S1-enlarged-tile-sizes.md",
+      "tags": [
+        "tiling",
+        "impact-high"
       ],
-      "expected_speedup_interval": {"min": 1.30, "likely": 1.47, "max": 1.50, "rationale": "min accounts for dim=512 L1 pressure fallback; likely based on dim=128 basic case实测; max is ideal L0 utilization"}
+      "difficulty_1_to_5": 2,
+      "score_0_to_1": 0.8,
+      "expected_vs_baseline_factor": 1.47
     },
     {
       "id": "S2",
-      "name": "WorkspaceQueue Pattern",
-      "category": "pipeline",
-      "impact": "high",
-      "difficulty": 3,
-      "natural_language": "Replace raw CrossCoreSetFlag/WaitFlag with a typed WorkspaceQueue class that encapsulates workspace ring-buffer management. WorkspaceQueue provides ProducerAcquire() to get the next slot, ProducerReleaseFix() or ProducerReleaseMte3() to signal completion with the correct pipeline mode, and ConsumerAcquire() which waits with the correct PIPE_MTE2 mode. This ensures that AIC->AIV sync uses the minimal pipeline scope: Fixpipe completion signals S_READY (PIPE_FIX), DataCopy completion signals P_READY (PIPE_MTE3), and AIV consumption uses PIPE_MTE2. This eliminates the mismatch between producer pipeline (FIX for S, MTE3 for P and O) and consumer pipeline (MTE2 for all). The ring buffer slot calculation is encapsulated: slot = (head/tail % RING_SLOTS) * slotSize, eliminating manual offset tracking.",
-      "structured_params": {
-        "parameters": {
-          "RING_SLOTS": {"value": 3, "note": "PRELAUNCH + 1"},
-          "slot_calculation": {"formula": "head_%DEPTH * slotSize_", "description": "Ring-buffer slot offset"},
-          "notify_ids": {"S_READY": 0, "P_READY": 1, "O_READY": 2}
-        },
-        "sync_modes": {
-          "producer_S": "CrossCoreSetFlag<0x2, PIPE_FIX>(SIG_S_READY)",
-          "producer_P": "CrossCoreSetFlag<0x2, PIPE_MTE3>(SIG_P_READY)",
-          "producer_O": "CrossCoreSetFlag<0x2, PIPE_FIX>(SIG_O_READY)",
-          "consumer": "CrossCoreWaitFlag<0x2, PIPE_MTE2>(notifyId)"
-        },
-        "expected_speedup": {"min": 1.2, "max": 1.5},
-        "affected_files": ["workspace_queue.h", "flash_attention_cube.h", "flash_attention_vec.h", "flash_attention_kernel.h"]
-      },
-      "dsl": "WORKSPACE_QUEUE { T: QType, DEPTH: RING_SLOTS } METHOD { ProducerAcquire: ws_[head_%DEPTH*slotSize_], ProducerReleaseFix: CrossCoreSetFlag<0x2,PIPE_FIX>(notifyId_)+head_++, ProducerReleaseMte3: CrossCoreSetFlag<0x2,PIPE_MTE3>(notifyId_)+head_++, ConsumerAcquire: CrossCoreWaitFlag<0x2,PIPE_MTE2>(notifyId_)+ws_[tail_++%DEPTH*slotSize_] } SIGNALS { S_READY: 0_PIPE_FIX, P_READY: 1_PIPE_MTE3, O_READY: 2_PIPE_FIX } EXPECT { speedup: [1.2, 1.5] } FILES { workspace_queue.h, cube.h, vec.h, kernel.h }",
-      "implementation_priorities": [
-        {"priority": "P0", "action": "Add WorkspaceQueue class encapsulating workspace ring-buffer management", "dependency": null},
-        {"priority": "P1", "action": "Integrate WorkspaceQueue in Cube side (AIC)", "dependency": "P0 verified"},
-        {"priority": "P2", "action": "Integrate WorkspaceQueue in Vector side (AIV)", "dependency": "P1 verified"}
+      "title": "WorkspaceQueue Pattern",
+      "summary": "Replace raw CrossCoreSetFlag/WaitFlag with a typed WorkspaceQueue class that encapsulates workspace ring-buffer management.",
+      "markdown_ref": "mqa_strategies/S2-workspacequeue-pattern.md",
+      "tags": [
+        "pipeline",
+        "impact-high"
       ],
-      "expected_speedup_interval": {"min": 1.20, "likely": 1.35, "max": 1.50, "rationale": "min assumes basic sync fix; likely based on reference implementation; max is ideal pipeline overlap"}
+      "difficulty_1_to_5": 3,
+      "score_0_to_1": 0.8,
+      "expected_vs_baseline_factor": 1.35
     },
     {
       "id": "S3",
-      "name": "Q L1 Cache Skip",
-      "category": "memory",
-      "impact": "medium",
-      "difficulty": 2,
-      "natural_language": "Add a Q chunk caching mechanism in the Cube (AIC) side. Track qChunkStart_ (row offset) and qChunkId_ (bz*nq+qHead identifier). When LoadQ is called with the same chunkId and qRowStart, skip the GM->L1 DataCopy entirely and reuse the Q data already in L1. This eliminates redundant Q loads when the same Q tile is reused across multiple KV iterations or micro-M loops. The Q data stays resident in L1 across the entire inner KV loop, reducing GM traffic significantly. For MQA specifically, Q is loaded once per q_outer block but reused for every KV tile, so the savings is proportional to kvSeqLen/BLOCK_N.",
-      "structured_params": {
-        "parameters": {
-          "qChunkStart_": {"type": "uint32_t", "initial": "0xffffffff", "description": "Cached Q row offset"},
-          "qChunkId_": {"type": "uint32_t", "initial": "0xffffffff", "description": "Cached Q identifier = bz*nq+qHead"},
-          "qChunkRowsAlign_": {"type": "uint32_t", "description": "Cached aligned Q chunk rows"}
-        },
-        "cache_logic": {
-          "check": "if (qChunkStart_ == qRowStart && qChunkId_ == chunkId) return;",
-          "update": "qChunkStart_ = qRowStart; qChunkId_ = chunkId; qChunkRowsAlign_ = AlignUp(qChunkRows, C0);",
-          "skip_condition": "Same batch-head-tile identifier means Q is already in L1"
-        },
-        "expected_speedup": {"min": 1.05, "max": 1.15},
-        "affected_files": ["flash_attention_cube.h"]
-      },
-      "dsl": "CACHE_SKIP { target: Q, fields: [qChunkStart_, qChunkId_, qChunkRowsAlign_], init: 0xffffffff, check: qChunkStart_==qRowStart && qChunkId_==chunkId, update: qChunkStart_=qRowStart; qChunkId_=chunkId; qChunkRowsAlign_=AlignUp(qChunkRows,C0) } BENEFIT { GM_traffic_reduction: proportional to kvSeqLen/BLOCK_N per Q reuse } EXPECT { speedup: [1.05, 1.15] } FILES { cube.h }",
-      "implementation_priorities": [
-        {"priority": "P0", "action": "Add Q chunk caching mechanism with qChunkStart_ and qChunkId_ fields", "dependency": null},
-        {"priority": "P1", "action": "Implement cache skip logic in LoadQ function", "dependency": "P0 verified"}
+      "title": "Q L1 Cache Skip",
+      "summary": "Add a Q chunk caching mechanism in the Cube (AIC) side.",
+      "markdown_ref": "mqa_strategies/S3-q-l1-cache-skip.md",
+      "tags": [
+        "memory",
+        "impact-medium"
       ],
-      "expected_speedup_interval": {"min": 1.05, "likely": 1.10, "max": 1.15, "rationale": "min assumes partial KV reuse; likely based on typical MQA kvSeqLen; max is ideal full reuse"}
+      "difficulty_1_to_5": 2,
+      "score_0_to_1": 0.6,
+      "expected_vs_baseline_factor": 1.1
     },
     {
       "id": "S4",
-      "name": "Vectorized RowMuls/RowDivs",
-      "category": "compute",
-      "impact": "high",
-      "difficulty": 2,
-      "natural_language": "Replace scalar RowMulsImpl/RowDivsImpl (which use GetValue per-row loops) with vectorized RowMuls/RowDivs helper functions.\n\nImportant: RowMuls and RowDivs are NOT AscendC built-in APIs. They are user-defined __aicore__ inline functions that wrap Mul/Div with BinaryRepeatParams to achieve row-wise broadcast scaling at vector width (64 fp16/cycle) instead of scalar width (1/cycle). You must define or import these functions before calling them. Reference implementation: references/row_ops_source_reference/vector_common_row_ops.h\n\nThe scalar loops process one element per cycle while the vector unit sits idle. The vectorized helper functions take a scale source tensor and broadcast it across each row of the destination tensor, processing 64 fp16 elements per cycle. Similarly RowDivs divides each row by the corresponding element from a source tensor.\n\nThis change requires: (1) In Vec2, prepare a scale tensor (expStateUb) from softmax state cache; (2) Call RowMuls(oPrevUb, oPrevUb, expStateUb, dealRows, dim, actualDim) where the 4th argument is the number of rows, 5th is aligned dim, and 6th is actual dim; (3) Call RowDivs(oNewUb, oNewUb, sumStateUb, dealRows, dim, actualDim) for final normalization. The state tensors must be properly sized: each row's scale factor is at offset row*BRCB_NUM in the state buffer.",
-      "structured_params": {
-        "parameters": {
-          "BRCB_NUM": {"value": "32/sizeof(float)", "description": "Broadcast granularity = 8 for fp32"},
-          "stateStride": {"formula": "AlignUp(subBlockRows_ * BRCB_NUM * sizeof(float), 32) / sizeof(float)", "description": "State buffer stride per slot"},
-          "VEC2_row_ops": {
-            "RowMuls": "RowMuls(oPrevUb_, oPrevUb_, expStateUb, dealRows, dim, actualDim)",
-            "RowDivs": "RowDivs(oNewUb, oNewUb, sumStateUb, dealRows, dim, actualDim)"
-          }
-        },
-        "buffer_requirements": {
-          "maxCacheBuf_": "TBuf<VECCALC> RING_SLOTS * stateStride * sizeof(float)",
-          "sumCacheBuf_": "TBuf<VECCALC> RING_SLOTS * stateStride * sizeof(float)",
-          "expCacheBuf_": "TBuf<VECCALC> RING_SLOTS * stateStride * sizeof(float)"
-        },
-        "expected_speedup": {"min": 1.1, "max": 1.3},
-        "affected_files": ["flash_attention_vec.h"]
-      },
-      "dsl": "ROW_OPS { mode: vectorized, ops: [RowMuls, RowDivs], src: expStateUb/sumStateUb, params: {dealRows, dim, actualDim} } BROADCAST { BRCB_NUM: 32/sizeof(float), stride: AlignUp(subBlockRows_*BRCB_NUM*4,32)/4 } BUF_ALLOC { maxCacheBuf_: TBuf<VECCALC> RING_SLOTS*stride*4, sumCacheBuf_: TBuf<VECCALC> RING_SLOTS*stride*4, expCacheBuf_: TBuf<VECCALC> RING_SLOTS*stride*4 } EXPECT { speedup: [1.1, 1.3] } FILES { vec.h }",
-      "api_references": [
-        {
-          "api_name": "RowMuls",
-          "doc_path": "api_reference_docs/基础API/矢量计算/基础算术/RowMuls.md",
-          "summary": "RowMuls不是AscendC框架内置API，而是用户自定义__aicore__ inline函数。签名: RowMuls(dstUb, src0Ub, src1Ub, dealRowCount, columnCount, actualColumnCount)。底层实现: Mul(dst,src0,src1,count,repeatTimes,BinaryRepeatParams{src1BlkStride=0,src1RepStride=1})实现每行用同一BRCB_BLOCK缩放。使用前必须定义此函数（源码参考: references/row_ops_source_reference/vector_common_row_ops.h）。scale参数是LocalTensor[dealRowCount,BRCB_NUM(=8)]而非float标量。",
-          "anti_patterns": [
-            {
-              "id": "ap1",
-              "pattern": "Duplicate(scalar,dimAlign)+Mul(dst,src,buf,dimAlign) 替代 RowMuls",
-              "reason": "PIPE_V RAW冒险(Duplicate写buf后Mul立即读同一PIPE_V无PipeBarrier) + padding区域垃圾值不清零(Duplicate仅填充dim个位置, Mul操作整个dimAlign宽度) + 累积精度误差(1次额外Duplicate赋值舍入ε)",
-              "source": "round_9_failure",
-              "discovered_at": 9
-            },
-            {
-              "id": "ap2",
-              "pattern": "LocalTensor[] 下标运算符作为 float 标量参数传入 Muls",
-              "reason": "LocalTensor[] 返回子张量视图 LocalTensor<T>，不是标量 T。使用 GetValue(tensor, index) 提取标量值。",
-              "source": "round_2_failure",
-              "discovered_at": 2
-            },
-            {
-              "id": "ap3",
-              "pattern": "Brcb(dst,src,count) 只传3个参数替代 RowMuls",
-              "reason": "AscendC Brcb 需要4个参数: Brcb(dst,src,repeatTimes,dstStride)。Mulcs在CANN 9.0中不存在(应为Muls)。正确的行级广播乘法是RowMuls函数(Mul+BinaryRepeatParams)。",
-              "source": "round_1_failure",
-              "discovered_at": 1
-            },
-            {
-              "id": "ap4",
-              "pattern": "直接调用RowMuls而不先定义该函数",
-              "reason": "RowMuls不是AscendC框架内置API，是用户自定义函数。调用前必须在项目中定义此函数(参考vector_common_row_ops.h源码)，否则编译失败(undeclared)。",
-              "source": "round_1_failure_context",
-              "discovered_at": 1
-            }
-          ]
-        },
-        {
-          "api_name": "RowDivs",
-          "doc_path": "api_reference_docs/基础API/矢量计算/基础算术/RowDivs.md",
-          "summary": "RowDivs不是AscendC框架内置API，而是用户定义__aicore__ inline函数。签名: RowDivs(dstUb, src0Ub, src1Ub, dealRowCount, columnCount, actualColumnCount)。底层实现: Div(dst,src0,src1,count,repeatTimes,BinaryRepeatParams{src1BlkStride=0,src1RepStride=1})。使用前必须定义此函数（源码参考: references/row_ops_source_reference/vector_common_row_ops.h）。",
-          "anti_patterns": [
-            {
-              "id": "ap1",
-              "pattern": "直接调用RowDivs而不先定义该函数",
-              "reason": "RowDivs不是AscendC框架内置API。调用前必须定义或引入包含该函数的头文件。",
-              "source": "round_1_failure_context",
-              "discovered_at": 1
-            }
-          ]
-        },
-        {
-          "api_name": "Mul",
-          "doc_path": "api_reference_docs/基础API/矢量计算/基础算术/Mul.md",
-          "summary": "Mul(dst, src0, src1, count) 或 Mul(dst, src0, src1, mask, repeatTimes, repeatParams)。高维切分模式通过BinaryRepeatParams控制src0/src1/dst的stride，实现行级广播缩放。RowMuls底层即用此API。",
-          "anti_patterns": []
-        },
-        {
-          "api_name": "Div",
-          "doc_path": "api_reference_docs/基础API/矢量计算/基础算术/Div.md",
-          "summary": "Div(dst, src0, src1, count) 或 Div(dst, src0, src1, mask, repeatTimes, repeatParams)。高维切分模式与Mul对称。RowDivs底层即用此API。",
-          "anti_patterns": []
-        },
-        {
-          "api_name": "BinaryRepeatParams",
-          "doc_path": "api_reference_docs/其他数据类型/BinaryRepeatParams.md",
-          "summary": "BinaryRepeatParams控制双源矢量算子(Mul/Div/Add等)高维切分模式的stride参数。关键字段: src0BlkStride, src1BlkStride, dstBlkStride(block内stride), src0RepStride, src1RepStride, dstRepStride(repeat间stride)。RowMuls关键配置: src1BlkStride=0(src1连续读取), src1RepStride=1(每repeat前进1block=8个fp32)。",
-          "anti_patterns": []
-        },
-        {
-          "api_name": "GetValue",
-          "doc_path": "api_reference_docs/基础数据结构/LocalTensor/GetValue.md",
-          "summary": "GetValue(index: uint32) → PrimType. 获取LocalTensor指定索引的标量值。仅在VECIN/VECCALC/VECOUT位置支持。用于从LocalTensor提取float标量（而非[]下标运算符）。",
-          "anti_patterns": []
-        },
-        {
-          "api_name": "Duplicate",
-          "doc_path": "api_reference_docs/基础API/矢量计算/数据填充/Duplicate.md",
-          "summary": "Duplicate(dst, src, count). 广播复制：将src单个元素复制count次到dst。仅填充count个有效元素，padding区域(dimAlign-dim)保留垃圾值不清零。",
-          "anti_patterns": []
-        },
-        {
-          "api_name": "Brcb",
-          "doc_path": "api_reference_docs/基础API/矢量计算/数据填充/Brcb.md",
-          "summary": "Brcb(dst, src, repeatTimes, dstStride). 需要4参数，不可只传3个。用于行级广播复制。",
-          "anti_patterns": []
-        }
+      "title": "Vectorized RowMuls/RowDivs",
+      "summary": "Replace scalar RowMulsImpl/RowDivsImpl (which use GetValue per-row loops) with vectorized RowMuls/RowDivs helper functions.",
+      "markdown_ref": "mqa_strategies/S4-vectorized-rowmuls-rowdivs.md",
+      "tags": [
+        "compute",
+        "impact-high"
       ],
-      "implementation_priorities": [
-        {"priority": "P0", "action": "Replace scalar RowMulsImpl loops with vectorized RowMuls helper function", "dependency": null},
-        {"priority": "P1", "action": "Replace scalar RowDivsImpl loops with vectorized RowDivs helper function", "dependency": "P0 verified"}
-      ],
-      "expected_speedup_interval": {"min": 1.10, "likely": 1.20, "max": 1.30, "rationale": "min assumes partial vectorization; likely based on typical softmax row count; max is ideal full vector width"}
+      "difficulty_1_to_5": 2,
+      "score_0_to_1": 0.8,
+      "expected_vs_baseline_factor": 1.2
     },
     {
       "id": "S5",
-      "name": "VEC2 Large Chunk",
-      "category": "compute",
-      "impact": "medium",
-      "difficulty": 1,
-      "natural_language": "Increase VEC2_M_CHUNK from 8 to 64. Vec2 processes O accumulation in row chunks; larger chunks amortize loop overhead and allow RowMuls/RowDivs to operate on more rows at once, improving vector unit utilization. VEC2_M_CHUNK=64 means processing BLOCK_M rows in a single chunk when BLOCK_M=128, or in two chunks when BLOCK_M=128 with subBlockRows_=64. UB budget check: oPrevBuf needs VEC2_M_CHUNK * dimAlign * sizeof(float) = 64*128*4 = 32KB for dim=128, which fits in UB alongside other buffers (total UB ~196KB).",
-      "structured_params": {
-        "parameters": {
-          "VEC2_M_CHUNK": {"old": 8, "new": 64, "type": "uint32_t"}
-        },
-        "ub_budget": {
-          "oPrevBuf": "VEC2_M_CHUNK * dimAlign * 4 bytes",
-          "total_ub_limit": 196608,
-          "example_dim128": "64*128*4 = 32KB, fits easily"
-        },
-        "expected_speedup": {"min": 1.05, "max": 1.15},
-        "affected_files": ["flash_attention_vec.h"]
-      },
-      "dsl": "VEC2_CHUNK { VEC2_M_CHUNK: 64 } UB_CHECK { oPrevBuf: 64*dimAlign*4 <= (196KB - other_bufs) } EXPECT { speedup: [1.05, 1.15] } FILES { vec.h }",
-      "implementation_priorities": [
-        {"priority": "P0", "action": "Increase VEC2_M_CHUNK constant from 8 to 64", "dependency": null}
+      "title": "VEC2 Large Chunk",
+      "summary": "Increase VEC2_M_CHUNK from 8 to 64.",
+      "markdown_ref": "mqa_strategies/S5-vec2-large-chunk.md",
+      "tags": [
+        "compute",
+        "impact-medium"
       ],
-      "expected_speedup_interval": {"min": 1.05, "likely": 1.10, "max": 1.15, "rationale": "min assumes partial row processing; likely based on typical UB budget; max is ideal full chunk"}
+      "difficulty_1_to_5": 1,
+      "score_0_to_1": 0.6,
+      "expected_vs_baseline_factor": 1.1
     },
     {
       "id": "S6",
-      "name": "Softmax UB State Cache",
-      "category": "memory",
-      "impact": "medium",
-      "difficulty": 3,
-      "natural_language": "Cache softmax max/sum/exp states per ring slot in UB (maxCacheBuf_, sumCacheBuf_, expCacheBuf_) instead of writing them to GM workspace (wsMeta). Each slot has a stateStride of AlignUp(subBlockRows_*BRCB_NUM*4, 32)/4 float elements. In Vec1, instead of writing meta to wsMetaGm, write to maxCacheUb[slot*stateStride], sumCacheUb[slot*stateStride], expCacheUb[slot*stateStride]. In Vec2, instead of reading from wsMetaGm, read from the cached UB state. This eliminates GM round-trips for softmax state per KV tile, saving ~BLOCK_M*3*4 bytes per tile of GM traffic. The default state buffers (softmaxMaxDefaultBuf_, softmaxSumDefaultBuf_) are initialized with -inf/0 and reused for isFirst=true cases.",
-      "structured_params": {
-        "parameters": {
-          "stateStride": {"formula": "AlignUp(subBlockRows_*BRCB_NUM*4, 32)/4", "unit": "float elements"},
-          "RING_SLOTS": 3,
-          "default_state": {"max": -1073741824.0, "sum": 0.0}
-        },
-        "buffer_allocations": {
-          "maxCacheBuf_": "TBuf<VECCALC> RING_SLOTS * stateStride * 4",
-          "sumCacheBuf_": "TBuf<VECCALC> RING_SLOTS * stateStride * 4",
-          "expCacheBuf_": "TBuf<VECCALC> RING_SLOTS * stateStride * 4",
-          "softmaxMaxDefaultBuf_": "TBuf<VECCALC> SOFTMAX_STATE_BUF_SIZE (2KB)",
-          "softmaxSumDefaultBuf_": "TBuf<VECCALC> SOFTMAX_STATE_BUF_SIZE (2KB)"
-        },
-        "expected_speedup": {"min": 1.05, "max": 1.1},
-        "affected_files": ["flash_attention_vec.h"]
-      },
-      "dsl": "SOFTMAX_STATE_CACHE { location: UB, stride: AlignUp(subBlockRows_*BRCB_NUM*4,32)/4, slots: RING_SLOTS, default: {max: -1e9, sum: 0} } BUF_ALLOC { maxCacheBuf_: TBuf<VECCALC> RING_SLOTS*stride*4, sumCacheBuf_: TBuf<VECCALC> RING_SLOTS*stride*4, expCacheBuf_: TBuf<VECCALC> RING_SLOTS*stride*4 } EXPECT { speedup: [1.05, 1.1] } FILES { vec.h }",
-      "implementation_priorities": [
-        {"priority": "P0", "action": "Add maxCacheBuf_, sumCacheBuf_, expCacheBuf_ buffer allocations", "dependency": null},
-        {"priority": "P1", "action": "Modify Vec1 to write state to UB cache instead of GM workspace", "dependency": "P0 verified"},
-        {"priority": "P2", "action": "Modify Vec2 to read state from UB cache", "dependency": "P1 verified"}
+      "title": "Softmax UB State Cache",
+      "summary": "Cache softmax max/sum/exp states per ring slot in UB (maxCacheBuf_, sumCacheBuf_, expCacheBuf_) instead of writing them to GM workspace (wsMeta).",
+      "markdown_ref": "mqa_strategies/S6-softmax-ub-state-cache.md",
+      "tags": [
+        "memory",
+        "impact-medium"
       ],
-      "expected_speedup_interval": {"min": 1.05, "likely": 1.08, "max": 1.10, "rationale": "min assumes partial GM reduction; likely based on typical state size; max is ideal zero GM round-trips"}
+      "difficulty_1_to_5": 3,
+      "score_0_to_1": 0.6,
+      "expected_vs_baseline_factor": 1.08
     },
     {
       "id": "S7",
-      "name": "Sub-block Row Handling",
-      "category": "compute",
-      "impact": "low",
-      "difficulty": 2,
-      "natural_language": "Properly handle AIV sub-block processing. In MIX_AIC_1_2 mode, each Cube core has 2 Vector sub-blocks. Each sub-block processes its own rows: subBlockRows_ = BLOCK_M / subBlockNum_, rowStart_ = subBlockIdx_ * subBlockRows_. In Vec1, each subblock reads only its rows from the S workspace slot (offset = rowStart_ * BLOCK_N), processes softmax on curSubBlockRows_ rows, and writes P back to the corresponding offset. This ensures no cross-subblock data races and proper vector width utilization. The inputQue1/outputQue1 buffer sizes are based on subBlockRows_ instead of BLOCK_M, reducing UB pressure.",
-      "structured_params": {
-        "parameters": {
-          "subBlockNum_": {"source": "GetSubBlockNum()", "value": 2, "type": "uint32_t"},
-          "subBlockIdx_": {"source": "GetSubBlockIdx()", "range": "0..1", "type": "uint32_t"},
-          "subBlockRows_": {"formula": "BLOCK_M / subBlockNum_", "value": 64, "type": "uint32_t"},
-          "rowStart_": {"formula": "subBlockIdx_ * subBlockRows_", "type": "uint32_t"}
-        },
-        "ub_savings": {
-          "inputBuf": "subBlockRows_ * BLOCK_N * 4 instead of BLOCK_M * BLOCK_N * 4",
-          "outputBuf": "subBlockRows_ * BLOCK_N * 2 instead of BLOCK_M * BLOCK_N * 2"
-        },
-        "expected_speedup": {"min": 1.02, "max": 1.08},
-        "affected_files": ["flash_attention_vec.h"]
-      },
-      "dsl": "SUB_BLOCK { subBlockNum: GetSubBlockNum(), subBlockIdx: GetSubBlockIdx(), subBlockRows: BLOCK_M/subBlockNum, rowStart: subBlockIdx*subBlockRows } BUF_SIZE { inputQue: subBlockRows*BLOCK_N*4, outputQue: subBlockRows*BLOCK_N*2 } EXPECT { speedup: [1.02, 1.08] } FILES { vec.h }",
-      "implementation_priorities": [
-        {"priority": "P0", "action": "Add subBlockRows_, rowStart_ calculation logic", "dependency": null},
-        {"priority": "P1", "action": "Adjust Vec1 buffer sizes for subBlockRows_", "dependency": "P0 verified"},
-        {"priority": "P2", "action": "Adjust Vec2 buffer sizes for subBlockRows_", "dependency": "P1 verified"}
+      "title": "Sub-block Row Handling",
+      "summary": "Properly handle AIV sub-block processing.",
+      "markdown_ref": "mqa_strategies/S7-sub-block-row-handling.md",
+      "tags": [
+        "compute",
+        "impact-low"
       ],
-      "expected_speedup_interval": {"min": 1.02, "likely": 1.05, "max": 1.08, "rationale": "min assumes basic subblock; likely based on MIX_AIC_1_2 mode; max is ideal UB pressure reduction"}
+      "difficulty_1_to_5": 2,
+      "score_0_to_1": 0.3,
+      "expected_vs_baseline_factor": 1.05
     },
     {
       "id": "S8",
-      "name": "Targeted SetWaitFlag",
-      "category": "pipeline",
-      "impact": "high",
-      "difficulty": 3,
-      "natural_language": "Replace all PipeBarrier<PIPE_ALL> with targeted SetWaitFlag<HardEvent::X_Y> calls. PipeBarrier<PIPE_ALL> drains all pipeline channels (V, M, MTE1, MTE2, MTE3, FIX), destroying overlap. Targeted barriers only wait for the specific dependency needed. In Cube: use SetWaitFlag<HardEvent::M_MTE1> before loading data from L1 to L0 (depends on MTE1 completing); SetWaitFlag<HardEvent::MTE1_M> before Mmad (depends on MTE1 completing); SetWaitFlag<HardEvent::M_FIX> before Fixpipe (depends on Mmad completing); SetWaitFlag<HardEvent::FIX_MTE2> after Fixpipe (allows L0C reuse). In Vector: use SetWaitFlag<HardEvent::MTE3_MTE2> before DataCopy from GM to UB; SetWaitFlag<HardEvent::MTE2_V> before vector compute; SetWaitFlag<HardEvent::V_MTE3> before DataCopy from UB to GM; SetWaitFlag<HardEvent::MTE3_V> after GM write completion. Each targeted barrier preserves pipeline overlap for unrelated channels.",
-      "structured_params": {
-        "barrier_map": {
-          "cube": {
-            "before_LoadData_L0": "SetWaitFlag<HardEvent::M_MTE1>",
-            "before_Mmad": "SetWaitFlag<HardEvent::MTE1_M> + PipeBarrier<PIPE_M>",
-            "before_Fixpipe": "SetWaitFlag<HardEvent::M_FIX>",
-            "after_Fixpipe": "SetWaitFlag<HardEvent::FIX_MTE2>"
-          },
-          "vector": {
-            "before_DataCopy_GM_to_UB": "SetWaitFlag<HardEvent::MTE3_MTE2>",
-            "before_vector_compute": "SetWaitFlag<HardEvent::MTE2_V>",
-            "after_vector_compute": "PipeBarrier<PIPE_V>",
-            "before_DataCopy_UB_to_GM": "SetWaitFlag<HardEvent::V_MTE3>",
-            "after_GM_write": "SetWaitFlag<HardEvent::MTE3_V>"
-          }
-        },
-        "expected_speedup": {"min": 1.2, "max": 1.5},
-        "affected_files": ["flash_attention_cube.h", "flash_attention_vec.h"]
-      },
-      "dsl": "BARRIER { cube: { M_MTE1: before_LoadData_L0, MTE1_M+PIPE_M: before_Mmad, M_FIX: before_Fixpipe, FIX_MTE2: after_Fixpipe }, vector: { MTE3_MTE2: before_DataCopy_GM2UB, MTE2_V: before_vec_compute, PIPE_V: after_vec_compute, V_MTE3: before_DataCopy_UB2GM, MTE3_V: after_GM_write } } REPLACE { PipeBarrier<PIPE_ALL> -> targeted_SetWaitFlag } EXPECT { speedup: [1.2, 1.5] } FILES { cube.h, vec.h }",
-      "implementation_priorities": [
-        {"priority": "P0", "action": "Replace PipeBarrier<PIPE_ALL> in Cube with targeted SetWaitFlag", "dependency": null},
-        {"priority": "P1", "action": "Replace PipeBarrier<PIPE_ALL> in Vector with targeted SetWaitFlag", "dependency": "P0 verified"}
+      "title": "Targeted SetWaitFlag",
+      "summary": "Replace all PipeBarrier<PIPE_ALL> with targeted SetWaitFlag<HardEvent::X_Y> calls.",
+      "markdown_ref": "mqa_strategies/S8-targeted-setwaitflag.md",
+      "tags": [
+        "pipeline",
+        "impact-high"
       ],
-      "expected_speedup_interval": {"min": 1.20, "likely": 1.35, "max": 1.50, "rationale": "min assumes partial overlap; likely based on reference implementation; max is ideal full pipeline overlap"}
+      "difficulty_1_to_5": 3,
+      "score_0_to_1": 0.8,
+      "expected_vs_baseline_factor": 1.35
     },
     {
       "id": "S9",
-      "name": "oPrev Dedicated TBuf",
-      "category": "memory",
-      "impact": "low",
-      "difficulty": 1,
-      "natural_language": "Allocate a dedicated TBuf<VECCALC> oPrevBuf_ for Vec2 O accumulation instead of using a TQue slot. This avoids consuming a TQue slot while oNewUb is live, keeping peak UB within limits. The buffer size is VEC2_M_CHUNK * dimAlign * sizeof(float). In Vec2, when !isFirst, DataCopy wsAccOGm to oPrevUb_ (the dedicated TBuf), then RowMuls oPrevUb_ with expState, then Add oNewUb += oPrevUb_. This eliminates the need for double-buffering the accumulation in TQue, freeing UB space for other buffers.",
-      "structured_params": {
-        "parameters": {
-          "oPrevBuf_": {"type": "TBuf<TPosition::VECCALC>", "size": "VEC2_M_CHUNK * dimAlign * sizeof(float)"},
-          "oPrevUb_": {"type": "LocalTensor<float>", "source": "oPrevBuf_.Get<float>()"}
-        },
-        "expected_speedup": {"min": 1.02, "max": 1.05},
-        "affected_files": ["flash_attention_vec.h"]
-      },
-      "dsl": "DEDICATED_BUF { name: oPrevBuf_, type: TBuf<VECCALC>, size: VEC2_M_CHUNK*dimAlign*4, tensor: oPrevUb_ = oPrevBuf_.Get<float>() } USAGE { DataCopy(wsAccOGm->oPrevUb_), RowMuls(oPrevUb_,oPrevUb_,expState), Add(oNewUb+=oPrevUb_) } EXPECT { speedup: [1.02, 1.05] } FILES { vec.h }",
-      "implementation_priorities": [
-        {"priority": "P0", "action": "Allocate dedicated TBuf<VECCALC> oPrevBuf_", "dependency": null},
-        {"priority": "P1", "action": "Modify Vec2 to use oPrevBuf_ instead of TQue slot", "dependency": "P0 verified"}
+      "title": "oPrev Dedicated TBuf",
+      "summary": "Allocate a dedicated TBuf<VECCALC> oPrevBuf_ for Vec2 O accumulation instead of using a TQue slot.",
+      "markdown_ref": "mqa_strategies/S9-oprev-dedicated-tbuf.md",
+      "tags": [
+        "memory",
+        "impact-low"
       ],
-      "expected_speedup_interval": {"min": 1.02, "likely": 1.03, "max": 1.05, "rationale": "min assumes basic UB reduction; likely based on typical TQue pressure; max is ideal zero TQue contention"}
+      "difficulty_1_to_5": 1,
+      "score_0_to_1": 0.3,
+      "expected_vs_baseline_factor": 1.03
     },
     {
       "id": "S10",
-      "name": "Multi-level KV Outer Tiling",
-      "category": "tiling",
-      "impact": "high",
-      "difficulty": 4,
-      "natural_language": "Implement a two-level KV sequence tiling scheme with s2OuterBlocks and s2BaseSize. When kvSeqLen is large, split it into s2OuterBlocks outer blocks of size s2BaseSize. Each outer block contains microNLoops = CeilDiv(s2Rows, BLOCK_N) inner micro-tiles. The outer loop iterates over s2OuterBlocks, and the inner loop iterates over microNLoops micro-tiles within each outer block. This enables: (1) Q can be loaded once at the start of each outer block and reused across all inner micro-tiles; (2) tileBase accumulation across outer blocks enables correct Vec1/Vec2 slot indexing; (3) Better L1 reuse patterns because Q stays resident across all KV inner tiles within an outer block. The s2OuterBlocks and s2BaseSize are computed in host tiling based on kvSeqLen and available core count.",
-      "structured_params": {
-        "parameters": {
-          "s2OuterBlocks": {"type": "uint32_t", "source": "computed in host tiling from kvSeqLen and s2BaseSize"},
-          "s2BaseSize": {"type": "uint32_t", "description": "Outer KV block size in rows"},
-          "microNLoops": {"formula": "CeilDiv(s2Rows, BLOCK_N)", "type": "uint32_t"}
-        },
-        "loop_structure": {
-          "outer": "for s2OuterIdx in 0..s2OuterBlocks",
-          "inner": "for t in 0..(microNLoops + PRELAUNCH)",
-          "tileBase": "tileBase += microNLoops per outer block"
-        },
-        "q_residency": "LoadQ once per (bz, qHead, qRowStart, qRows); reuse across all inner micro-tiles",
-        "expected_speedup": {"min": 1.3, "max": 2.0},
-        "affected_files": ["flash_attention_tiling.h", "flash_attention_tiling.cpp", "flash_attention_kernel.h", "flash_attention_cube.h"]
-      },
-      "dsl": "OUTER_TILING { s2OuterBlocks: ceil(kvSeqLen/s2BaseSize), s2BaseSize: from_host_tiling } LOOP { outer: for(s2OuterIdx=0;s2OuterIdx<s2OuterBlocks), inner: for(t=0;t<microNLoops+PRELAUNCH) } Q_RESIDENCY { load_once_per_outer_block, reuse_across_inner_tiles } TILE_BASE { accumulate: tileBase+=microNLoops } EXPECT { speedup: [1.3, 2.0] } FILES { tiling.h, tiling.cpp, kernel.h, cube.h }",
-      "implementation_priorities": [
-        {"priority": "P0", "action": "Add s2OuterBlocks and s2BaseSize parameters in host tiling", "dependency": null},
-        {"priority": "P1", "action": "Implement outer loop structure in kernel", "dependency": "P0 verified"},
-        {"priority": "P2", "action": "Add Q residency optimization across inner tiles", "dependency": "P1 verified"}
+      "title": "Multi-level KV Outer Tiling",
+      "summary": "Implement a two-level KV sequence tiling scheme with s2OuterBlocks and s2BaseSize.",
+      "markdown_ref": "mqa_strategies/S10-multi-level-kv-outer-tiling.md",
+      "tags": [
+        "tiling",
+        "impact-high"
       ],
-      "expected_speedup_interval": {"min": 1.30, "likely": 1.50, "max": 2.00, "rationale": "min assumes partial Q reuse; likely based on typical kvSeqLen; max is ideal full outer block reuse"}
+      "difficulty_1_to_5": 4,
+      "score_0_to_1": 0.8,
+      "expected_vs_baseline_factor": 1.5
     },
     {
       "id": "S11",
-      "name": "Single KV L1 Buffer",
-      "category": "memory",
-      "impact": "medium",
-      "difficulty": 2,
-      "natural_language": "Use a single kvBufL1_ (TBuf<A1>) for K and a single vBufL1_ (TBuf<A1>) for V, instead of double-buffered kBufL1_0/1 and vBufL1_0/1. The WorkspaceQueue pattern with targeted sync (PIPE_FIX for S, PIPE_MTE3 for P) ensures that AIC doesn't need to overlap K/V prefetch with computation — the AIC->AIV pipeline sync is handled by the queue. Since each KV tile is loaded, consumed in MM1/MM2, and then the workspace slot is released, there's no need for double-buffering at L1 level. This saves 2*BLOCK_N*dim*sizeof(QType) bytes of L1 space (one slot per buffer type), which can be used for larger Q chunks or P buffers.",
-      "structured_params": {
-        "parameters": {
-          "kvBufL1_": {"type": "TBuf<TPosition::A1>", "size": "BLOCK_N * dim * sizeof(QType)", "description": "Single K buffer"},
-          "vBufL1_": {"type": "TBuf<TPosition::A1>", "size": "BLOCK_N * dim * sizeof(QType)", "description": "Single V buffer"}
-        },
-        "l1_savings": {
-          "per_buffer": "BLOCK_N * dim * sizeof(QType)",
-          "total": "2 * BLOCK_N * dim * sizeof(QType)",
-          "example_dim128": "2 * 128 * 128 * 2 = 64KB saved"
-        },
-        "expected_speedup": {"min": 1.05, "max": 1.15},
-        "affected_files": ["flash_attention_cube.h"]
-      },
-      "dsl": "SINGLE_BUF { kvBufL1_: TBuf<A1> BLOCK_N*dim*sizeof(QType), vBufL1_: TBuf<A1> BLOCK_N*dim*sizeof(QType) } REMOVE { kBufL1_0, kBufL1_1, vBufL1_0, vBufL1_1 } L1_SAVINGS { 2*BLOCK_N*dim*sizeof(QType) } RATIONALE { WorkspaceQueue_sync_eliminates_need_for_L1_double_buffer } EXPECT { speedup: [1.05, 1.15] } FILES { cube.h }",
-      "implementation_priorities": [
-        {"priority": "P0", "action": "Replace kBufL1_0/1 with single kvBufL1_", "dependency": null},
-        {"priority": "P1", "action": "Replace vBufL1_0/1 with single vBufL1_", "dependency": "P0 verified"}
+      "title": "Single KV L1 Buffer",
+      "summary": "Use a single kvBufL1_ (TBuf<A1>) for K and a single vBufL1_ (TBuf<A1>) for V, instead of double-buffered kBufL1_0/1 and vBufL1_0/1.",
+      "markdown_ref": "mqa_strategies/S11-single-kv-l1-buffer.md",
+      "tags": [
+        "memory",
+        "impact-medium"
       ],
-      "expected_speedup_interval": {"min": 1.05, "likely": 1.10, "max": 1.15, "rationale": "min assumes partial L1 savings; likely based on WorkspaceQueue sync; max is ideal full L1 release"}
+      "difficulty_1_to_5": 2,
+      "score_0_to_1": 0.6,
+      "expected_vs_baseline_factor": 1.1
     },
     {
       "id": "S12",
-      "name": "KV Remain Handling",
-      "category": "compute",
-      "impact": "low",
-      "difficulty": 2,
-      "natural_language": "Handle dim values that are not divisible by BASE_K with kRemain/nRemain loops. In MM1, after the main ki loop (dim/BASE_K iterations), check kRemain = dim % BASE_K. If kRemain > 0, do one extra Mmad iteration with kAligned = AlignUp(kRemain, C0) as the K dimension, setting cmatrix_init_val based on whether kTiles was 0. In MM2, similarly handle nRemain = dim % BASE_K with an extra Mmad iteration for the remaining output columns, using FixpipeNzL0cToNdGm for the non-standard N dimension. This ensures correctness for all dim values (not just multiples of BASE_K) and avoids silent precision loss from ignoring the remainder.",
-      "structured_params": {
-        "parameters": {
-          "kRemain": {"formula": "dim % BASE_K", "type": "uint32_t"},
-          "nRemain": {"formula": "dim % BASE_K", "type": "uint32_t"},
-          "kAligned": {"formula": "AlignUp(kRemain, C0)", "type": "uint32_t"}
-        },
-        "mm1_remain": {
-          "check": "kRemain > 0",
-          "Mmad_params": {"m": "BLOCK_M", "n": "kvRowsAlign", "k": "kAligned", "cmatrix_init_val": "kTiles == 0"}
-        },
-        "mm2_remain": {
-          "check": "nRemain > 0",
-          "Mmad_params": {"m": "BLOCK_M", "n": "nAligned", "k": "kvRowsAlign", "cmatrix_init_val": "true"},
-          "Fixpipe": "FixpipeNzL0cToNdGm for non-standard N"
-        },
-        "expected_speedup": {"min": 1.0, "max": 1.05},
-        "affected_files": ["flash_attention_cube.h"]
-      },
-      "dsl": "REMAIN_LOOP { MM1: { kRemain: dim%BASE_K, kAligned: AlignUp(kRemain,C0), cmatrix_init: kTiles==0 }, MM2: { nRemain: dim%BASE_K, nAligned: AlignUp(nRemain,C0), cmatrix_init: true, Fixpipe: NzL0cToNdGm } } CORRECTNESS { ensures_all_dim_values_handled } EXPECT { speedup: [1.0, 1.05] } FILES { cube.h }",
-      "implementation_priorities": [
-        {"priority": "P0", "action": "Add kRemain loop in MM1 for dim % BASE_K handling", "dependency": null},
-        {"priority": "P1", "action": "Add nRemain loop in MM2 for dim % BASE_K handling", "dependency": "P0 verified"}
+      "title": "KV Remain Handling",
+      "summary": "Handle dim values that are not divisible by BASE_K with kRemain/nRemain loops.",
+      "markdown_ref": "mqa_strategies/S12-kv-remain-handling.md",
+      "tags": [
+        "compute",
+        "impact-low"
       ],
-      "expected_speedup_interval": {"min": 1.00, "likely": 1.02, "max": 1.05, "rationale": "min assumes no speedup (correctness fix); likely based on typical dim values; max is ideal edge case optimization"}
+      "difficulty_1_to_5": 2,
+      "score_0_to_1": 0.3,
+      "expected_vs_baseline_factor": 1.02
     }
   ]
 }

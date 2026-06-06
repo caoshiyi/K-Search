@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from k_search.kernel_generators.kernel_generator import KernelGenerator
@@ -117,3 +119,50 @@ def test_ascendc_codegen_retry_refreshes_task_code_format_feedback():
     assert result["raw"] == "good full project"
     assert len(llm.prompts) == 2
     assert "FULL_PROJECT_FORMAT" in llm.prompts[1]
+
+
+def test_baseline_agentic_request_includes_explicit_run_and_task_context():
+    captured = {}
+
+    class FakeTask:
+        name = "task_name"
+        definition_name = "definition_name"
+        _ksearch_run_id = "explicit-run"
+
+        def get_agentic_definition_text(self, *, language):
+            return f"agentic spec for {language}"
+
+    class FakeAgenticRunner:
+        def run_one_shot_closed(self, *, task, request, base_solution, max_fix_rounds):
+            captured["request"] = request
+            return SimpleNamespace(
+                prompt_chars=17,
+                changed_paths=["kernel/foo.h"],
+                project_path="/tmp/project",
+            )
+
+    generator = KernelGenerator(
+        model_name="fake",
+        language="ascendc",
+        target_gpu="ascend_910b",
+        llm_provider="claude-agent",
+        llm_client=SimpleNamespace(generate=lambda prompt: ""),
+    )
+    generator._ascendc_agentic_runner = FakeAgenticRunner()
+
+    generator._generate_ascendc_solution_agentically(
+        task=FakeTask(),
+        action_text="change code",
+        trace_logs="trace",
+        perf_summary="perf",
+        round_num=2,
+        attempt_idx=3,
+        mode="action",
+        base_solution=None,
+    )
+
+    request = captured["request"]
+    assert request.run_id == "explicit-run"
+    assert request.task_name == "task_name"
+    assert request.round_num == 2
+    assert request.attempt_idx == 3

@@ -23,6 +23,7 @@ from .ascendc_agentic_codegen import (
 )
 from k_search.tasks.task_base import BuildSpec, EvalResult, Solution, SourceFile, SupportedLanguages
 from k_search.tasks.task_base import Task, code_from_solution
+from k_search.utils.paths import get_run_id
 
 # Optional Weights & Biases support
 try:
@@ -415,6 +416,16 @@ class KernelGenerator:
             definition_text = str(definition_hook(language=str(self.language)) or "").strip()
         else:
             definition_text = str(task.get_definition_text(language=str(self.language)) or "").strip()
+        run_id = str(
+            getattr(task, "_ksearch_run_id", None)
+            or getattr(self, "_ksearch_run_id", None)
+            or get_run_id()
+        )
+        task_name = str(
+            getattr(task, "name", "")
+            or getattr(task, "definition_name", "")
+            or "ascendc"
+        ).strip() or "ascendc"
         request = AscendCAgenticCodegenRequest(
             definition_text=definition_text,
             action_text=str(action_text or "").strip(),
@@ -424,20 +435,15 @@ class KernelGenerator:
             round_num=int(round_num),
             attempt_idx=int(attempt_idx),
             mode=str(mode),  # type: ignore[arg-type]
+            run_id=run_id,
+            task_name=task_name,
         )
-        if max_fix_rounds is not None:
-            result = self._agentic_runner().run_multi_turn(
-                task=task,
-                request=request,
-                base_solution=base_solution,
-                max_fix_rounds=max_fix_rounds,
-            )
-        else:
-            result = self._agentic_runner().run(
-                task=task,
-                request=request,
-                base_solution=base_solution,
-            )
+        result = self._agentic_runner().run_one_shot_closed(
+            task=task,
+            request=request,
+            base_solution=base_solution,
+            max_fix_rounds=int(max_fix_rounds or 0),
+        )
         print(
             f"[LLM] agentic ascendc result provider={self.llm_provider} model={self.model_name} "
             f"round={round_num} prompt_chars={result.prompt_chars} "

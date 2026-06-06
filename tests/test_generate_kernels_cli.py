@@ -2,7 +2,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from generate_kernels_and_eval import _build_task_from_args, _resolve_llm_config_from_args
+from generate_kernels_and_eval import (
+    _parse_strategy_form,
+    _build_task_from_args,
+    _resolve_llm_config_from_args,
+    generate_and_evaluate,
+)
 
 
 def test_resolve_llm_config_defaults_to_openai_and_reads_env_key(monkeypatch):
@@ -41,6 +46,13 @@ def test_resolve_llm_config_rejects_unknown_provider(monkeypatch):
         _resolve_llm_config_from_args(args)
 
 
+def test_parse_strategy_form_only_accepts_natural_language():
+    assert _parse_strategy_form("natural_language") == "natural_language"
+
+    with pytest.raises(Exception, match="Only natural_language strategy form is supported"):
+        _parse_strategy_form("dsl")
+
+
 def test_build_task_from_args_constructs_ascendc_task(tmp_path):
     (tmp_path / "spec.md").write_text("AscendC vector add operator.", encoding="utf-8")
     args = SimpleNamespace(
@@ -63,3 +75,50 @@ def test_build_task_from_args_constructs_ascendc_task(tmp_path):
     assert cfg["task_source"] == "ascendc"
     assert cfg["build_cmd"] == "echo build"
     assert cfg["reference_latency_ms"] == 2.0
+
+
+def test_generate_and_evaluate_sets_task_run_id_unconditionally(tmp_path, monkeypatch):
+    seen = {}
+
+    class FakeTask:
+        name = "lineage_task"
+
+        def get_config_for_logging(self):
+            return {}
+
+        def run_final_evaluation(self, *, solutions, config, dump_traces, workload_limit):
+            seen["final_eval_run_id"] = getattr(self, "_ksearch_run_id", None)
+            return SimpleNamespace()
+
+    class FakeKernelGenerator:
+        def __init__(self, **kwargs):
+            seen["generator_kwargs"] = kwargs
+
+        def generate(self, *, task, max_opt_rounds, continue_from_solution=None):
+            seen["generator_run_id"] = getattr(task, "_ksearch_run_id", None)
+            return SimpleNamespace(name="fake_solution", description="")
+
+    monkeypatch.setattr(
+        "k_search.kernel_generators.kernel_generator.KernelGenerator",
+        FakeKernelGenerator,
+    )
+
+    task = FakeTask()
+    generate_and_evaluate(
+        task,
+        model_name="fake",
+        base_url=None,
+        api_key=None,
+        language="ascendc",
+        target_gpu="ascend_910b",
+        max_opt_rounds=1,
+        save_results=False,
+        save_solutions=False,
+        llm_provider="claude-agent",
+        run_id="run-meta",
+        artifacts_dir=str(tmp_path / "artifacts"),
+    )
+
+    assert seen["generator_run_id"] == "run-meta"
+    assert seen["final_eval_run_id"] == "run-meta"
+    assert task._ksearch_run_id == "run-meta"

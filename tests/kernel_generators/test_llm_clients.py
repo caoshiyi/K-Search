@@ -902,8 +902,12 @@ def test_baseline_ascendc_agentic_failure_can_fallback_to_legacy(monkeypatch, tm
     from k_search.tasks.ascendc_task import AscendCTask, format_ascendc_project_files
 
     class FailingRunner:
-        def run(self, *, task, request, base_solution):
+        def run_one_shot_closed(self, *, task, request, base_solution, max_fix_rounds=0):
+            del max_fix_rounds
             raise RuntimeError("agentic unavailable")
+
+        def run(self, *, task, request, base_solution):
+            return self.run_one_shot_closed(task=task, request=request, base_solution=base_solution)
 
     class LegacyClient:
         def __init__(self):
@@ -952,6 +956,7 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
 
         def run(self, *, task, request, base_solution):
             self.requests.append(request)
+            attempt_no = len(self.requests)
             (tmp_path / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
             solution = task.make_solution_from_project_dir(
                 project_dir=tmp_path,
@@ -968,7 +973,7 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
                     status="passed",
                     latency_ms=1.0,
                     metrics={
-                        "score": 1.0,
+                        "score": 1.0 if attempt_no == 1 else 0.5,
                         "score_name": "inv_latency",
                         "workdir": str(tmp_path),
                     },
@@ -981,15 +986,34 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
                 changed_paths=["kernel/foo.h"],
                 diff_text="diff",
                 project_path=str(tmp_path),
-                editor_session=None,
-                worktree_session=None,
+                candidate_patch=SimpleNamespace(candidate_id=f"candidate-{attempt_no}"),
+                artifact_paths={"manifest_path": str(tmp_path / f"candidate-{attempt_no}.json")},
             )
 
         def run_multi_turn(self, *, task, request, base_solution, max_fix_rounds=0):
             return self.run(task=task, request=request, base_solution=base_solution)
 
-        def continue_fix(self, *, task, editor_session, wt_session, fix_prompt, request):
-            return self.run(task=task, request=request, base_solution=None)
+        def open_cycle(self, *, task, request, base_solution):
+            runner = self
+
+            class FakeCycle:
+                def __init__(self):
+                    self.request = request
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def run_initial(self):
+                    return runner.run(task=task, request=self.request, base_solution=base_solution)
+
+                def continue_fix(self, fix_prompt):
+                    del fix_prompt
+                    return runner.run(task=task, request=self.request, base_solution=None)
+
+            return FakeCycle()
 
         class editor_client:
             @staticmethod
@@ -1059,15 +1083,82 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
 
     solution = generator._generate_world_model_cycles_v2(
         task=task,
-        max_opt_rounds=1,
-        wm_stagnation_window=1,
+        max_opt_rounds=2,
+        wm_stagnation_window=2,
         max_dai=1,
+        run_id="wm-effective-run",
     )
 
     assert "BETA" in next(src.content for src in solution.sources if src.path == "kernel/foo.h")
-    assert len(fake_runner.requests) == 1
+    assert len(fake_runner.requests) == 2
     assert fake_runner.requests[0].action_text
     assert "<ascendc_project>" not in fake_runner.requests[0].action_text
+    assert fake_runner.requests[0].run_id == "wm-effective-run"
+    assert fake_runner.requests[0].task_name == "x"
+    assert fake_runner.requests[0].action_node_id == "n1"
+    assert fake_runner.requests[0].parent_candidate_id is None
+    assert fake_runner.requests[1].run_id == "wm-effective-run"
+    assert fake_runner.requests[1].task_name == "x"
+    assert fake_runner.requests[1].action_node_id == "n1"
+    assert fake_runner.requests[1].parent_candidate_id == "candidate-1"
+
+
+def test_world_model_narrative_logger_uses_effective_run_id(tmp_path, monkeypatch):
+    from k_search.kernel_generators.kernel_generator_world_model import (
+        WorldModelKernelGeneratorWithBaseline,
+    )
+    import k_search.kernel_generators.kernel_generator_world_model as wm_module
+
+    class StopAfterInit(Exception):
+        pass
+
+    class FakeTask:
+        name = "lineage_task"
+
+        def get_definition_text(self, language):
+            return "spec"
+
+    class FakeWorldModel:
+        def ensure_initialized(self, **kwargs):
+            return "{}"
+
+        def get(self, definition_name):
+            return "{}"
+
+    captured = {}
+
+    class FakeNarrativeLogger:
+        def __init__(self, root, *, meta):
+            captured["root"] = root
+            captured["meta"] = meta
+
+        def run_start(self):
+            captured["run_started"] = True
+
+    monkeypatch.setenv("KSEARCH_RUN_ID", "global-run")
+    monkeypatch.setattr(wm_module, "RunNarrativeLogger", FakeNarrativeLogger)
+
+    generator = WorldModelKernelGeneratorWithBaseline(
+        model_name="fake",
+        language="ascendc",
+        target_gpu="ascend_910b",
+        llm_provider="claude-agent",
+        llm_client=SimpleNamespace(generate=lambda prompt: "{}"),
+        artifacts_dir=str(tmp_path / "artifacts"),
+    )
+    generator._wm = FakeWorldModel()
+    monkeypatch.setattr(
+        generator,
+        "_generate_world_model_cycles_v2",
+        lambda **kwargs: (_ for _ in ()).throw(StopAfterInit),
+    )
+
+    with pytest.raises(StopAfterInit):
+        generator.generate(task=FakeTask(), max_opt_rounds=1, run_id="effective-run")
+
+    assert captured["meta"]["run_id"] == "effective-run"
+    assert captured["run_started"] is True
+    assert "effective-run" in str(captured["root"])
 
 
 def test_baseline_agentic_memory_writeback_only_for_new_best(tmp_path, monkeypatch):
@@ -1147,6 +1238,9 @@ def test_baseline_agentic_memory_writeback_only_for_new_best(tmp_path, monkeypat
             )
 
         def run_multi_turn(self, *, task, request, base_solution, max_fix_rounds=0):
+            return self.run(task=task, request=request, base_solution=base_solution)
+
+        def run_one_shot_closed(self, *, task, request, base_solution, max_fix_rounds=0):
             return self.run(task=task, request=request, base_solution=base_solution)
 
     task = FakeTask()

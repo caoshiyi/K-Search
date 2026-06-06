@@ -1324,6 +1324,10 @@ class WorldModelManager:
             catalog_list = load_strategy_catalog(catalog_path)
         except Exception:
             return False
+        if not catalog_list or not isinstance(catalog_list[0], dict):
+            # Markdown-backed strategy catalogs are immutable indexes; anti-pattern
+            # learning writes back to legacy dict catalogs only.
+            return False
 
         # Find which strategy the active leaf belongs to
         name = str(definition_name or "").strip()

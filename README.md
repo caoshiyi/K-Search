@@ -217,6 +217,25 @@ python generate_kernels_and_eval.py \
 
 `--ascendc-bench-cmd` must print a parseable latency such as `latency_ms=0.123` or JSON like `{"latency_ms": 0.123}`. If `--ascendc-reference-latency-ms` is provided, K-Search scores candidates by `reference_latency_ms / latency_ms`; otherwise it scores by inverse latency.
 
+To seed the world model with curated strategies, pass a v2 strategy catalog.
+The catalog stores only metadata and concise summaries; each entry references a
+markdown file with the full natural-language strategy. K-Search loads summaries
+when building action nodes and reads the selected markdown only when executing
+that action:
+
+```bash
+python generate_kernels_and_eval.py \
+  --task-source ascendc \
+  --task-path /path/to/ascendc/op_project \
+  --model-name claude-sonnet-4-6 \
+  --llm-provider claude-agent \
+  --language ascendc \
+  --world-model \
+  --strategy-file strategies/mqa_strategies_catalog.json
+```
+
+`--strategy-form` is optional and only accepts `natural_language`.
+
 ## CLI Reference
 
 | Argument | Description | Default |
@@ -249,6 +268,8 @@ python generate_kernels_and_eval.py \
 | `--ascendc-bench-cmd` | AscendC benchmark command; must print `latency_ms=<float>` or equivalent JSON | — |
 | `--ascendc-timeout-seconds` | Timeout per AscendC build/test/bench command | `600` |
 | `--ascendc-reference-latency-ms` | Optional baseline latency for speedup scoring | — |
+| `--strategy-file` | v2 strategy catalog with summary metadata and relative markdown refs | — |
+| `--strategy-form` | Strategy form; only `natural_language` is supported | `natural_language` |
 
 ### Claude Agent SDK Backend
 

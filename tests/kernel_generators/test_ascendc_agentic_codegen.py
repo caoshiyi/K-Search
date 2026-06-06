@@ -168,7 +168,9 @@ def test_prompt_builder_omits_full_project_container_and_includes_action():
     assert "IMPLEMENTATION_PLAN.md" in prompt
     assert "REVIEW_NOTES.md" in prompt
     assert "bug-fixer" in prompt
-    assert "must not be invoked" in prompt
+    assert "must not be invoked" not in prompt
+    assert "Do not invoke bug-fixer during initial_codegen." in prompt
+    assert "Invoke bug-fixer during eval_failure_repair" in prompt
 
 
 def test_prompt_builder_raises_section_aware_error_when_budget_exceeded():
@@ -257,6 +259,9 @@ def test_runner_evaluates_worktree_and_persists_project_snapshot_candidate(tmp_p
             round_num=3,
             attempt_idx=1,
             mode="action",
+            run_id="artifact-run",
+            task_name="x",
+            parent_candidate_id="parent-7",
             action_node_id="A-12",
         ),
         base_solution=None,
@@ -264,18 +269,90 @@ def test_runner_evaluates_worktree_and_persists_project_snapshot_candidate(tmp_p
 
     assert result.eval_result.status == "passed"
     assert result.eval_result.metrics["score"] == 2.0
-    assert result.eval_result.metrics["workdir"] == result.project_path
+    assert result.eval_project_path is not None
+    assert result.eval_result.metrics["workdir"] == result.eval_project_path
+    assert result.eval_result.metrics["workdir"] != result.project_path
+    assert result.evaluator_mutated_project is False
     assert "build saw edited complete worktree" in result.eval_result.log_excerpt
     assert result.candidate_patch is not None
     assert result.candidate_patch.action_node_id == "A-12"
+    assert result.candidate_patch.parent_candidate_id == "parent-7"
     assert result.project_snapshot is not None
     assert "kernel/large_header.hpp" in result.project_snapshot.manifest
     assert result.artifact_paths is not None
     manifest = json.loads(Path(result.artifact_paths["manifest_path"]).read_text(encoding="utf-8"))
     assert manifest["candidate_id"] == result.candidate_patch.candidate_id
     assert manifest["snapshot_id"] == result.project_snapshot.snapshot_id
+    assert manifest["run_id"] == "artifact-run"
+    assert manifest["task_name"] == "x"
+    assert manifest["action_node_id"] == "A-12"
+    assert manifest["parent_candidate_id"] == "parent-7"
+    assert manifest["round_num"] == 3
+    assert manifest["attempt_idx"] == 1
+    assert manifest["mode"] == "action"
     assert Path(result.artifact_paths["diff_path"]).read_text(encoding="utf-8") == result.diff_text
     assert json.loads(Path(result.artifact_paths["eval_path"]).read_text(encoding="utf-8"))["status"] == "passed"
+
+
+def test_runner_requires_explicit_run_id_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("KSEARCH_ALLOW_MISSING_AGENTIC_RUN_CONTEXT", raising=False)
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "kernel").mkdir()
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x")
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=EditingClient("alpha\nBETA\ngamma\n"))
+
+    with pytest.raises(RuntimeError, match="missing run_id"):
+        runner.run(
+            task=task,
+            request=AscendCAgenticCodegenRequest(
+                definition_text="spec",
+                action_text="change beta",
+                trace_logs="",
+                perf_summary="",
+                target_gpu="ascend_910b",
+                round_num=1,
+                attempt_idx=1,
+                mode="action",
+                task_name="x",
+            ),
+            base_solution=None,
+        )
+
+
+def test_runner_allows_missing_run_context_with_escape_hatch(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ALLOW_MISSING_AGENTIC_RUN_CONTEXT", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "fallback-run")
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "kernel").mkdir()
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=EditingClient("alpha\nBETA\ngamma\n"))
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec",
+            action_text="change beta",
+            trace_logs="",
+            perf_summary="",
+            target_gpu="ascend_910b",
+            round_num=1,
+            attempt_idx=1,
+            mode="action",
+            task_name="x",
+        ),
+        base_solution=None,
+    )
+
+    assert result.artifact_paths is not None
+    assert "/runs/fallback-run/" in result.artifact_paths["manifest_path"]
 
 
 def test_runner_fails_when_agent_makes_no_file_changes(tmp_path):
@@ -1263,24 +1340,14 @@ def test_continue_fix_uses_native_prompt_and_run_scoped_artifacts(tmp_path, monk
         target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action", run_id="native-continue",
     )
 
-    first = runner.run_multi_turn(task=task, request=first_request, base_solution=None, max_fix_rounds=0)
-    try:
+    with runner.open_cycle(task=task, request=first_request, base_solution=None) as cycle:
+        first = cycle.run_initial()
         second_request = AscendCAgenticCodegenRequest(
             definition_text="spec", action_text="continue action", trace_logs="", perf_summary="",
             target_gpu="ascend_910b", round_num=1, attempt_idx=2, mode="debug", run_id="native-continue",
         )
-        second = runner.continue_fix(
-            task=task,
-            editor_session=first.editor_session,
-            wt_session=first.worktree_session,
-            fix_prompt="raw compile fix context",
-            request=second_request,
-        )
-    finally:
-        if first.editor_session is not None:
-            client.close_session(first.editor_session)
-        if first.worktree_session is not None:
-            first.worktree_session.cleanup()
+        cycle.request = second_request
+        second = cycle.continue_fix("raw compile fix context")
 
     assert len(client.prompts) == 6
     assert [prompt.splitlines()[0] for prompt in client.prompts[:4]] == [
@@ -1380,23 +1447,19 @@ def test_run_multi_turn_uses_repair_flow_when_eval_fails(tmp_path, monkeypatch):
         base_solution=None,
         max_fix_rounds=1,
     )
-    try:
-        assert result.eval_result.status == "passed"
-        assert [prompt.splitlines()[0] for prompt in client.prompts] == [
-            "Stage 1/4: code-reader",
-            "Stage 2/4: plan",
-            "Stage 3/4: codegen",
-            "Stage 4/4: reviewer",
-            "Stage 1/2: bug-fixer",
-            "Stage 2/2: reviewer",
-        ]
-        assert "GAMMA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
-        assert "+GAMMA" in result.diff_text
-    finally:
-        if result.editor_session is not None:
-            client.close_session(result.editor_session)
-        if result.worktree_session is not None:
-            result.worktree_session.cleanup()
+    assert result.eval_result.status == "passed"
+    assert not hasattr(result, "editor_session")
+    assert not hasattr(result, "worktree_session")
+    assert [prompt.splitlines()[0] for prompt in client.prompts] == [
+        "Stage 1/4: code-reader",
+        "Stage 2/4: plan",
+        "Stage 3/4: codegen",
+        "Stage 4/4: reviewer",
+        "Stage 1/2: bug-fixer",
+        "Stage 2/2: reviewer",
+    ]
+    assert "GAMMA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
+    assert "+GAMMA" in result.diff_text
 
 
 def test_continue_fix_filters_debug_evidence_files_from_candidate_outputs(tmp_path, monkeypatch):
@@ -1433,24 +1496,14 @@ def test_continue_fix_filters_debug_evidence_files_from_candidate_outputs(tmp_pa
         target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action", run_id="native-debug-filter",
     )
 
-    first = runner.run_multi_turn(task=task, request=first_request, base_solution=None, max_fix_rounds=0)
-    try:
+    with runner.open_cycle(task=task, request=first_request, base_solution=None) as cycle:
+        first = cycle.run_initial()
         second_request = AscendCAgenticCodegenRequest(
             definition_text="spec", action_text="continue action", trace_logs="", perf_summary="",
             target_gpu="ascend_910b", round_num=1, attempt_idx=2, mode="debug", run_id="native-debug-filter",
         )
-        second = runner.continue_fix(
-            task=task,
-            editor_session=first.editor_session,
-            wt_session=first.worktree_session,
-            fix_prompt="raw compile fix context",
-            request=second_request,
-        )
-    finally:
-        if first.editor_session is not None:
-            client.close_session(first.editor_session)
-        if first.worktree_session is not None:
-            first.worktree_session.cleanup()
+        cycle.request = second_request
+        second = cycle.continue_fix("raw compile fix context")
 
     assert second.changed_paths == ["kernel/foo.h"]
     assert "debug_packet.json" not in second.diff_text

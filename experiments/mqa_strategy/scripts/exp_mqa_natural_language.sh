@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # K-Search strategy experiment: NATURAL_LANGUAGE form
 #
-# This script runs the MQA optimization using strategy injection with
-# natural_language form. All parameters are identical to the other two
-# experiment scripts EXCEPT the strategy form, ensuring controlled comparison.
+# This script runs MQA optimization with the supported v2 strategy injection
+# model: natural-language markdown referenced by a concise JSON catalog.
 #
 # Controlled variables:
 #   - Same MQA task directory
@@ -12,11 +11,8 @@
 #   - Same target GPU (Ascend910B3)
 #   - Same timeout (900s)
 #   - Same stagnation window (5)
-#   - Same strategy catalog file
+#   - Same v2 strategy catalog file
 #   - Same baseline reference
-#
-# Independent variable:
-#   - Strategy form: natural_language
 #
 set -euo pipefail
 
@@ -34,8 +30,8 @@ fi
 : "${ANTHROPIC_BASE_URL:?missing - export .env.ANTHROPIC_BASE_URL in ~/.claude/settings.json}"
 : "${BASELINE_MS:?run baseline first and export BASELINE_MS}"
 
-# --- Fixed experiment parameters (DO NOT CHANGE for controlled comparison) ---
-KSEARCH_ROOT="${KSEARCH_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+# --- Fixed experiment parameters --------------------------------------------
+KSEARCH_ROOT="${KSEARCH_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 TASK_DIR="${TASK_DIR:-/mnt/workspace/cv_agent/tile2asc/multi_query_attention}"
 MODEL_NAME="glm-5.1"
 MAX_ROUNDS=12
@@ -43,9 +39,6 @@ TARGET_GPU="Ascend910B3"
 TIMEOUT_S=900
 STAGNATION_WINDOW=5
 STRATEGY_CATALOG="${KSEARCH_ROOT}/strategies/mqa_strategies_catalog.json"
-
-# --- Independent variable: strategy form ------------------------------------
-STRATEGY_FORM="natural_language"
 
 # --- Experiment-specific output dir ------------------------------------------
 EXPERIMENT_ID="mqa_strat_nl_$(date -u +%Y%m%d_%H%M%S)"
@@ -65,7 +58,7 @@ echo "============================================"
 echo "  Task:          $(basename "$TASK_DIR")"
 echo "  Model:         $MODEL_NAME"
 echo "  Max Rounds:    $MAX_ROUNDS"
-echo "  Strategy Form: $STRATEGY_FORM"
+echo "  Strategy Form: natural_language"
 echo "  Baseline:      ${BASELINE_MS}ms"
 echo "  Artifacts Dir: $ARTIFACTS_DIR"
 echo "============================================"
@@ -86,7 +79,6 @@ python -u generate_kernels_and_eval.py \
     --world-model \
     --wm-stagnation-window "$STAGNATION_WINDOW" \
     --strategy-file "$STRATEGY_CATALOG" \
-    --strategy-form "$STRATEGY_FORM" \
     --max-opt-rounds "$MAX_ROUNDS" \
     --artifacts-dir "$ARTIFACTS_DIR" \
     --save-solutions

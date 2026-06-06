@@ -76,6 +76,38 @@ def _definition_text_for_codegen_prompt(
 class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
     """Baseline-aware generator variant that maintains and injects a persistent world model."""
 
+    def _strategy_text_for_node(self, node_obj: dict[str, Any] | None) -> str:
+        """Render full markdown strategy text for a selected action node."""
+        if not isinstance(node_obj, dict) or not self._strategy_catalog:
+            return ""
+        action = node_obj.get("action") if isinstance(node_obj.get("action"), dict) else {}
+        strategy_ref = action.get("strategy_ref") if isinstance(action.get("strategy_ref"), dict) else {}
+        ref_id = str(strategy_ref.get("id") or "").strip()
+        ref_markdown = str(strategy_ref.get("markdown_ref") or "").strip()
+        node_id = str(node_obj.get("node_id") or "").strip()
+
+        entry = None
+        for candidate in self._strategy_catalog:
+            if ref_id and candidate.id == ref_id:
+                entry = candidate
+                break
+            if ref_markdown and candidate.markdown_ref == ref_markdown:
+                entry = candidate
+                break
+        if entry is None and node_id.startswith("s"):
+            try:
+                idx = int(node_id[1:]) - 1
+            except ValueError:
+                idx = -1
+            if 0 <= idx < len(self._strategy_catalog):
+                entry = self._strategy_catalog[idx]
+        if entry is None:
+            return ""
+
+        from k_search.kernel_generators.strategy_injection import render_strategy_action_text
+
+        return render_strategy_action_text(entry=entry)
+
     def _default_world_model_path(self, *, task: Any, run_id: str | None = None, include_run: bool = True) -> Optional[Path]:
         try:
             root = get_ksearch_artifacts_dir(
@@ -154,15 +186,19 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         self._strategy_file = strategy_file
         self._strategy_form = strategy_form
 
-        # Load strategy catalog if provided
-        self._strategy_catalog: list[dict[str, Any]] | None = None
+        # Load strategy catalog if provided.
+        self._strategy_catalog: list[Any] | None = None
         if strategy_file:
             from k_search.kernel_generators.strategy_injection import load_strategy_catalog
+
+            if strategy_form not in (None, "", "natural_language"):
+                raise ValueError(
+                    "Only natural_language strategy form is supported. "
+                    "Use markdown_ref in strategy catalog."
+                )
             self._strategy_catalog = load_strategy_catalog(strategy_file)
-            if not strategy_form:
-                strategy_form = "natural_language"
-            self._strategy_form = strategy_form
-            print(f"[STRATEGY] Loaded {len(self._strategy_catalog)} strategies from {strategy_file}, form={strategy_form}")
+            self._strategy_form = "natural_language"
+            print(f"[STRATEGY] Loaded {len(self._strategy_catalog)} strategies from {strategy_file}, form=natural_language")
 
         def _llm_call(prompt: str) -> str:
             with llm_log_context(flow="world_model", phase="world_model_manager"):
@@ -221,9 +257,8 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         else:
             effective_run_id = get_run_id()
 
-        # Store run_id in task for downstream use
-        if hasattr(task, "_ksearch_run_id"):
-            task._ksearch_run_id = effective_run_id
+        # Store run_id in task for downstream artifact and telemetry lineage.
+        setattr(task, "_ksearch_run_id", effective_run_id)
 
         def _stage(msg: str) -> None:
             m = (msg or "").strip()
@@ -257,7 +292,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         # under the unified run logs dir <base>/logs/<task>/<run_id>/.
         try:
             _task_name = str(getattr(task, "name", "") or "")
-            _run_id = get_run_id()
+            _run_id = effective_run_id
             self._narrative = RunNarrativeLogger(
                 get_run_logs_dir(base_dir=self._artifacts_dir, task_name=_task_name, run_id=_run_id),
                 meta={
@@ -398,10 +433,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     build_wm_from_strategies,
                 )
                 from k_search.kernel_generators.world_model import dump_world_model_obj
-                _emit(f"[STRATEGY] Building WM from strategy catalog ({len(self._strategy_catalog)} strategies, form={self._strategy_form})")
+                _emit(f"[STRATEGY] Building WM from strategy catalog ({len(self._strategy_catalog)} strategies, form=natural_language)")
                 wm_obj = build_wm_from_strategies(
                     strategy_catalog=self._strategy_catalog,
-                    form=self._strategy_form,
                     definition_name=task.name,
                     kernel_summary=str(definition_text[:500] or ""),
                 )
@@ -469,6 +503,11 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         - cycle end: attach+refine best PASSED in this cycle; else mark action too hard
         """
         effective_run_id = str(run_id or getattr(task, "_ksearch_run_id", None) or get_run_id())
+        agentic_task_name = str(
+            getattr(task, "name", "")
+            or getattr(task, "definition_name", "")
+            or "ascendc"
+        ).strip() or "ascendc"
         get_def = getattr(task, "get_definition_text", None)
         if callable(get_def):
             definition_text = str(get_def(language=str(self.language)) or "").strip()
@@ -623,6 +662,13 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             blk = render_chosen_action_node_block(node_obj or {})
             if blk.strip():
                 chosen_action_text = blk.strip()
+                strategy_text = self._strategy_text_for_node(node_obj)
+                if strategy_text:
+                    chosen_action_text = (
+                        chosen_action_text
+                        + "\n\nReferenced strategy document:\n"
+                        + strategy_text
+                    )
                 _emit(chosen_action_text)
 
             try:
@@ -724,9 +770,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             cycle_best_manifest_path: str | None = None
             cycle_best_changed_paths: list[str] = []
             cycle_best_diff_summary: str = ""
-            # Multi-turn SDK session for agentic AscendC (cycle-level)
-            editor_session: Any = None  # ClaudeProjectEditorSession | None
-            wt_session: Any = None     # AgenticWorktreeSession | None
+            # Multi-turn SDK session/worktree owner for agentic AscendC (cycle-level).
+            agentic_cycle_cm: Any = None
+            agentic_cycle: Any = None
             # End the cycle only after this many consecutive non-improving rounds.
             no_improve_streak: int = 0
             # End the cycle if we keep failing to beat the parent/base score for too long (once we have any PASSED solution).
@@ -737,613 +783,611 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             last_eval: Optional[EvalResult] = None
             round_eval: Optional[EvalResult] = None
 
-            while True:
-                if cycle_start_round + rounds_consumed > max_opt_rounds:
-                    break
-                attempt_idx = rounds_consumed + 1
-                round_num = cycle_start_round + rounds_consumed
-                print(f"\n=== Optimization Round {round_num}/{max_opt_rounds} ===")
-                _emit(
-                    f"[CYCLE] action_node_id={chosen_leaf} attempt={attempt_idx} "
-                    f"parent_is_root={'yes' if parent_is_root else 'no'} "
-                    f"base_code={'yes' if bool(str(base_raw_code or '').strip()) else 'no'}"
-                )
-
-                _stage(
-                    f"codegen: attempt {attempt_idx} (round {round_num}) "
-                    f"no_improve_streak={no_improve_streak}/{stagnation_window} "
-                    f"no_improve_over_base={no_improve_over_base_streak}/{stagnation_window}"
-                )
-                if not chosen_action_text:
-                    raise RuntimeError(
-                        "World-model generator expected a chosen action, but chosen_action_text is empty. "
-                        f"(round={round_num} attempt={attempt_idx})"
+            try:
+                while True:
+                    if cycle_start_round + rounds_consumed > max_opt_rounds:
+                        break
+                    attempt_idx = rounds_consumed + 1
+                    round_num = cycle_start_round + rounds_consumed
+                    print(f"\n=== Optimization Round {round_num}/{max_opt_rounds} ===")
+                    _emit(
+                        f"[CYCLE] action_node_id={chosen_leaf} attempt={attempt_idx} "
+                        f"parent_is_root={'yes' if parent_is_root else 'no'} "
+                        f"base_code={'yes' if bool(str(base_raw_code or '').strip()) else 'no'}"
                     )
-                # --- Agentic AscendC codegen branch ---
-                if self._should_use_ascendc_agentic_codegen(task):
-                    from k_search.kernel_generators.ascendc_agentic_codegen import _build_fix_prompt
-                    trace_excerpt = str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or "")
-                    perf_lines: list[str] = []
-                    if last_eval is not None:
-                        perf_lines.extend(last_eval.perf_summary_lines(prefix="last_attempt"))
-                    if base_eval is not None:
-                        perf_lines.extend(base_eval.perf_summary_lines(prefix="base"))
-                    perf_summary = "\n".join(perf_lines).strip()
 
-                    if attempt_idx == 1:
-                        agentic_mode = "action"
-                        agentic_action = str(chosen_action_text or "")
-                        base_solution_for_agentic = None
-                        if isinstance(base_raw_code, str) and base_raw_code.strip():
-                            try:
-                                base_solution_for_agentic = task.solution_from_raw_code_for_agentic(
-                                    raw_code=base_raw_code,
-                                    round_num=round_num,
-                                    model_name=str(self.model_name),
-                                    target_gpu=str(self.target_gpu),
-                                    language=str(self.language),
-                                )
-                            except Exception:
-                                base_solution_for_agentic = None
-                    else:
-                        agentic_mode = "debug" if cycle_best_solution is None else "improve"
-                        agentic_action = (
-                            str(chosen_action_text or "")
-                            + "\n\nContinue the same action. If the previous attempt failed, fix it first. "
-                            "If it passed, improve latency without broadening scope."
-                        )
-                        base_solution_for_agentic = last_solution or cycle_best_solution
-
-                    definition_hook = getattr(task, "get_agentic_definition_text", None)
-                    if callable(definition_hook):
-                        agentic_definition = str(definition_hook(language=str(self.language)) or "")
-                    else:
-                        agentic_definition = _definition_text_for_codegen_prompt(
-                            task,
-                            language=str(self.language),
-                            has_explicit_base_code=False,
-                        )
-                    request = AscendCAgenticCodegenRequest(
-                        definition_text=agentic_definition,
-                        action_text=agentic_action,
-                        trace_logs=trace_excerpt,
-                        perf_summary=perf_summary,
-                        target_gpu=str(self.target_gpu),
-                        round_num=int(round_num),
-                        attempt_idx=int(attempt_idx),
-                        mode=agentic_mode,  # type: ignore[arg-type]
-                        action_node_id=str(chosen_leaf) if chosen_leaf else None,
+                    _stage(
+                        f"codegen: attempt {attempt_idx} (round {round_num}) "
+                        f"no_improve_streak={no_improve_streak}/{stagnation_window} "
+                        f"no_improve_over_base={no_improve_over_base_streak}/{stagnation_window}"
                     )
-                    try:
+                    if not chosen_action_text:
+                        raise RuntimeError(
+                            "World-model generator expected a chosen action, but chosen_action_text is empty. "
+                            f"(round={round_num} attempt={attempt_idx})"
+                        )
+                    # --- Agentic AscendC codegen branch ---
+                    if self._should_use_ascendc_agentic_codegen(task):
+                        from k_search.kernel_generators.ascendc_agentic_codegen import _build_fix_prompt
+                        trace_excerpt = str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or "")
+                        perf_lines: list[str] = []
+                        if last_eval is not None:
+                            perf_lines.extend(last_eval.perf_summary_lines(prefix="last_attempt"))
+                        if base_eval is not None:
+                            perf_lines.extend(base_eval.perf_summary_lines(prefix="base"))
+                        perf_summary = "\n".join(perf_lines).strip()
+
                         if attempt_idx == 1:
-                            # Attempt 1: open a new multi-turn session
-                            result = self._agentic_runner().run_multi_turn(
-                                task=task,
-                                request=request,
-                                base_solution=base_solution_for_agentic,
-                                max_fix_rounds=0,  # fix loop managed by cycle
-                            )
-                            editor_session = result.editor_session
-                            wt_session = result.worktree_session
+                            agentic_mode = "action"
+                            agentic_action = str(chosen_action_text or "")
+                            base_solution_for_agentic = None
+                            if isinstance(base_raw_code, str) and base_raw_code.strip():
+                                try:
+                                    base_solution_for_agentic = task.solution_from_raw_code_for_agentic(
+                                        raw_code=base_raw_code,
+                                        round_num=round_num,
+                                        model_name=str(self.model_name),
+                                        target_gpu=str(self.target_gpu),
+                                        language=str(self.language),
+                                    )
+                                except Exception:
+                                    base_solution_for_agentic = None
                         else:
-                            # Attempt 2+: continue in the same session with a fix prompt
-                            if editor_session is None or wt_session is None:
-                                # No existing session (first attempt failed to produce one);
-                                # fall back to a fresh session.
-                                result = self._agentic_runner().run_multi_turn(
+                            agentic_mode = "debug" if cycle_best_solution is None else "improve"
+                            agentic_action = (
+                                str(chosen_action_text or "")
+                                + "\n\nContinue the same action. If the previous attempt failed, fix it first. "
+                                "If it passed, improve latency without broadening scope."
+                            )
+                            base_solution_for_agentic = last_solution or cycle_best_solution
+
+                        definition_hook = getattr(task, "get_agentic_definition_text", None)
+                        if callable(definition_hook):
+                            agentic_definition = str(definition_hook(language=str(self.language)) or "")
+                        else:
+                            agentic_definition = _definition_text_for_codegen_prompt(
+                                task,
+                                language=str(self.language),
+                                has_explicit_base_code=False,
+                            )
+                        request = AscendCAgenticCodegenRequest(
+                            definition_text=agentic_definition,
+                            action_text=agentic_action,
+                            trace_logs=trace_excerpt,
+                            perf_summary=perf_summary,
+                            target_gpu=str(self.target_gpu),
+                            round_num=int(round_num),
+                            attempt_idx=int(attempt_idx),
+                            mode=agentic_mode,  # type: ignore[arg-type]
+                            run_id=effective_run_id,
+                            task_name=agentic_task_name,
+                            parent_candidate_id=cycle_best_candidate_id,
+                            action_node_id=str(chosen_leaf) if chosen_leaf else None,
+                        )
+                        try:
+                            if attempt_idx == 1:
+                                # Attempt 1: open a new multi-turn cycle.
+                                agentic_cycle_cm = self._agentic_runner().open_cycle(
                                     task=task,
                                     request=request,
                                     base_solution=base_solution_for_agentic,
-                                    max_fix_rounds=0,
                                 )
-                                editor_session = result.editor_session
-                                wt_session = result.worktree_session
+                                agentic_cycle = agentic_cycle_cm.__enter__()
+                                result = agentic_cycle.run_initial()
                             else:
-                                fix_base = _build_fix_prompt(
-                                    eval_result=last_eval,
-                                    fix_round=attempt_idx - 1,
+                                # Attempt 2+: continue in the same session with a fix prompt
+                                if agentic_cycle is None:
+                                    # No existing session (first attempt failed to produce one);
+                                    # fall back to a fresh session.
+                                    agentic_cycle_cm = self._agentic_runner().open_cycle(
+                                        task=task,
+                                        request=request,
+                                        base_solution=base_solution_for_agentic,
+                                    )
+                                    agentic_cycle = agentic_cycle_cm.__enter__()
+                                    result = agentic_cycle.run_initial()
+                                else:
+                                    fix_base = _build_fix_prompt(
+                                        eval_result=last_eval,
+                                        fix_round=attempt_idx - 1,
+                                    )
+                                    fix_prompt = (
+                                        f"Original action intent: {agentic_action}\n\n"
+                                        f"{fix_base}\n\n"
+                                        f"Continue the same action. Fix the failure first, then improve."
+                                    )
+                                    agentic_cycle.request = request
+                                    result = agentic_cycle.continue_fix(fix_prompt)
+                        except LLMProviderFatalError as exc:
+                            _emit(f"[ERROR] fatal LLM provider error during agentic codegen: {exc}")
+                            if agentic_cycle_cm is not None:
+                                agentic_cycle_cm.__exit__(type(exc), exc, exc.__traceback__)
+                                agentic_cycle_cm = None
+                                agentic_cycle = None
+                            raise
+                        except (TimeoutError, ValueError, RuntimeError) as exc:
+                            if agentic_cycle_cm is not None:
+                                agentic_cycle_cm.__exit__(type(exc), exc, exc.__traceback__)
+                                agentic_cycle_cm = None
+                                agentic_cycle = None
+                            if self._allow_ascendc_agentic_legacy_fallback():
+                                _emit(
+                                    f"[WARN] agentic codegen failed for action_node_id={chosen_leaf} "
+                                    f"round={round_num}; falling back to legacy prompt path: "
+                                    f"{type(exc).__name__}: {exc}"
                                 )
-                                fix_prompt = (
-                                    f"Original action intent: {agentic_action}\n\n"
-                                    f"{fix_base}\n\n"
-                                    f"Continue the same action. Fix the failure first, then improve."
+                            else:
+                                msg = (
+                                    f"agentic codegen failed for action_node_id={chosen_leaf} "
+                                    f"round={round_num}: {type(exc).__name__}: {exc}"
                                 )
-                                result = self._agentic_runner().continue_fix(
-                                    task=task,
-                                    editor_session=editor_session,
-                                    wt_session=wt_session,
-                                    fix_prompt=fix_prompt,
-                                    request=request,
+                                _emit(f"[WARN] {msg}")
+                                round_eval = EvalResult(
+                                    status="codegen_failed",
+                                    log_excerpt=msg,
+                                    metrics={"score_name": "codegen", "score": -1.0},
                                 )
-                    except LLMProviderFatalError as exc:
-                        _emit(f"[ERROR] fatal LLM provider error during agentic codegen: {exc}")
-                        # Close session on fatal error
-                        if editor_session is not None and not editor_session._closed:
-                            self._agentic_runner().editor_client.close_session(editor_session)
-                            editor_session = None
-                        raise
-                    except (TimeoutError, ValueError, RuntimeError) as exc:
-                        # Close session on error
-                        if editor_session is not None and not editor_session._closed:
-                            self._agentic_runner().editor_client.close_session(editor_session)
-                            editor_session = None
-                        if wt_session is not None:
-                            wt_session.cleanup()
-                            wt_session = None
-                        if self._allow_ascendc_agentic_legacy_fallback():
-                            _emit(
-                                f"[WARN] agentic codegen failed for action_node_id={chosen_leaf} "
-                                f"round={round_num}; falling back to legacy prompt path: "
-                                f"{type(exc).__name__}: {exc}"
-                            )
+                                last_eval = round_eval
+                                rounds_consumed = max(rounds_consumed, attempt_idx)
+                                break
                         else:
-                            msg = (
-                                f"agentic codegen failed for action_node_id={chosen_leaf} "
-                                f"round={round_num}: {type(exc).__name__}: {exc}"
+                            solution = result.solution
+                            current_code, current_raw_code = code_from_solution(self.language, solution)
+                            last_solution = solution
+                            current_wm_code = _wm_guardrail(_code_for_wm_from_raw(current_raw_code))
+                            _emit(
+                                f"[LLM] agentic ascendc result round={round_num} "
+                                f"prompt_chars={result.prompt_chars} "
+                                f"changed_files={','.join(result.changed_paths)} "
+                                f"project_path={result.project_path}"
                             )
-                            _emit(f"[WARN] {msg}")
-                            round_eval = EvalResult(
-                                status="codegen_failed",
-                                log_excerpt=msg,
-                                metrics={"score_name": "codegen", "score": -1.0},
-                            )
+                            _stage(f"use agentic worktree eval (round {round_num})")
+                            round_eval = result.eval_result
+                            all_passed = bool(getattr(round_eval, "is_passed", lambda: False)())
+                            round_score = float(getattr(round_eval, "score", lambda: -1.0)())
                             last_eval = round_eval
-                            rounds_consumed = max(rounds_consumed, attempt_idx)
-                            break
-                    else:
-                        solution = result.solution
-                        current_code, current_raw_code = code_from_solution(self.language, solution)
-                        last_solution = solution
-                        current_wm_code = _wm_guardrail(_code_for_wm_from_raw(current_raw_code))
-                        _emit(
-                            f"[LLM] agentic ascendc result round={round_num} "
-                            f"prompt_chars={result.prompt_chars} "
-                            f"changed_files={','.join(result.changed_paths)} "
-                            f"project_path={result.project_path}"
-                        )
-                        _stage(f"use agentic worktree eval (round {round_num})")
-                        round_eval = result.eval_result
-                        all_passed = bool(getattr(round_eval, "is_passed", lambda: False)())
-                        round_score = float(getattr(round_eval, "score", lambda: -1.0)())
-                        last_eval = round_eval
-                        try:
-                            _nar = getattr(self, "_narrative", None)
-                            if _nar is not None:
-                                _details = []
-                                if isinstance(result.artifact_paths, dict):
-                                    for _k in ("transcript_path", "prompt_path", "manifest_path"):
-                                        _v = result.artifact_paths.get(_k)
-                                        if _v:
-                                            _details.append(str(_v))
-                                _nar.llm_codegen(
-                                    round_num=round_num,
-                                    attempt=attempt_idx,
-                                    mode=f"agentic/{agentic_mode}",
-                                    changed_paths=result.changed_paths,
-                                    diff=str(result.diff_text or ""),
-                                    detail_paths=_details,
+                            try:
+                                _nar = getattr(self, "_narrative", None)
+                                if _nar is not None:
+                                    _details = []
+                                    if isinstance(result.artifact_paths, dict):
+                                        for _k in ("transcript_path", "prompt_path", "manifest_path"):
+                                            _v = result.artifact_paths.get(_k)
+                                            if _v:
+                                                _details.append(str(_v))
+                                    _nar.llm_codegen(
+                                        round_num=round_num,
+                                        attempt=attempt_idx,
+                                        mode=f"agentic/{agentic_mode}",
+                                        changed_paths=result.changed_paths,
+                                        diff=str(result.diff_text or ""),
+                                        detail_paths=_details,
+                                    )
+                                    _nar.eval_result(round_num=round_num, eval_result=round_eval)
+                            except Exception:
+                                pass
+                            if all_passed and round_score > best_score:
+                                best_score = float(round_score)
+                                best_eval = round_eval
+                                best_solution = solution
+                                from k_search.kernel_generators.memory import save_code_map_if_adopted, save_knowledge_if_adopted
+                                save_code_map_if_adopted(
+                                    task=task,
+                                    code_map_text=getattr(result, "code_map_text", None),
+                                    adopted=True,
                                 )
-                                _nar.eval_result(round_num=round_num, eval_result=round_eval)
-                        except Exception:
-                            pass
-                        if all_passed and round_score > best_score:
-                            best_score = float(round_score)
-                            best_eval = round_eval
-                            best_solution = solution
-                            from k_search.kernel_generators.memory import save_code_map_if_adopted, save_knowledge_if_adopted
-                            save_code_map_if_adopted(
-                                task=task,
-                                code_map_text=getattr(result, "code_map_text", None),
-                                adopted=True,
-                            )
-                            save_knowledge_if_adopted(
-                                task=task,
-                                knowledge_text=getattr(result, "knowledge_text", None),
-                                adopted=True,
-                            )
-                        if all_passed:
-                            if round_score > cycle_best_score:
-                                cycle_best_score = float(round_score)
-                                cycle_best_eval = round_eval
-                                cycle_best_solution = solution
-                                cycle_best_raw = str(current_raw_code or "")
-                                cycle_best_wm_code = str(current_wm_code or "")
-                                cycle_best_round = int(round_num)
-                                cycle_best_candidate_id = (
-                                    result.candidate_patch.candidate_id
-                                    if result.candidate_patch is not None
-                                    else None
+                                save_knowledge_if_adopted(
+                                    task=task,
+                                    knowledge_text=getattr(result, "knowledge_text", None),
+                                    adopted=True,
                                 )
-                                cycle_best_manifest_path = (
-                                    (result.artifact_paths or {}).get("manifest_path")
-                                    if isinstance(result.artifact_paths, dict)
-                                    else None
-                                )
-                                cycle_best_changed_paths = list(result.changed_paths or [])
-                                cycle_best_diff_summary = str(result.diff_text or "")[:4000]
-                                no_improve_streak = 0
+                            if all_passed:
+                                if round_score > cycle_best_score:
+                                    cycle_best_score = float(round_score)
+                                    cycle_best_eval = round_eval
+                                    cycle_best_solution = solution
+                                    cycle_best_raw = str(current_raw_code or "")
+                                    cycle_best_wm_code = str(current_wm_code or "")
+                                    cycle_best_round = int(round_num)
+                                    cycle_best_candidate_id = (
+                                        result.candidate_patch.candidate_id
+                                        if result.candidate_patch is not None
+                                        else None
+                                    )
+                                    cycle_best_manifest_path = (
+                                        (result.artifact_paths or {}).get("manifest_path")
+                                        if isinstance(result.artifact_paths, dict)
+                                        else None
+                                    )
+                                    cycle_best_changed_paths = list(result.changed_paths or [])
+                                    cycle_best_diff_summary = str(result.diff_text or "")[:4000]
+                                    no_improve_streak = 0
+                                else:
+                                    no_improve_streak += 1
                             else:
                                 no_improve_streak += 1
+                            if cycle_best_solution is not None and base_score > 0:
+                                if cycle_best_score > base_score:
+                                    no_improve_over_base_streak = 0
+                                else:
+                                    no_improve_over_base_streak += 1
+                            rounds_consumed += 1
+                            if no_improve_streak >= stagnation_window or no_improve_over_base_streak >= stagnation_window:
+                                break
+                            continue
+                    elif attempt_idx == 1:
+                        # If the action's parent has an attached solution (including root when continuing),
+                        # start from that base_code; otherwise fall back to spec+action.
+                        if isinstance(base_raw_code, str) and base_raw_code.strip():
+                            codegen_definition_text = _definition_text_for_codegen_prompt(
+                                task,
+                                language=str(self.language),
+                                has_explicit_base_code=True,
+                            )
+                            prompt = get_generate_code_from_action_prompt_from_text(
+                                self.language,
+                                definition_text=codegen_definition_text,
+                                base_code=base_raw_code,
+                                action_text=chosen_action_text,
+                                code_format=_code_format_text(),
+                                target_gpu=self.target_gpu,
+                            )
+                        else:
+                            codegen_definition_text = _definition_text_for_codegen_prompt(
+                                task,
+                                language=str(self.language),
+                                has_explicit_base_code=False,
+                            )
+                            prompt = get_generate_code_from_spec_with_action_prompt_from_text(
+                                self.language,
+                                definition_text=codegen_definition_text,
+                                action_text=chosen_action_text,
+                                code_format=_code_format_text(),
+                                target_gpu=self.target_gpu,
+                            )
+                    else:
+                        if parent_is_root or not base_raw_code:
+                            has_passed_in_cycle = cycle_best_solution is not None
+                            # Reference base shown in prompts: prefer whichever is better by score (base_score vs cycle_best_score).
+                            # If parent is root (no base score), fall back to cycle_best if present.
+                            base_for_debug = "(no base code; start from spec)"
+                            if isinstance(base_raw_code, str) and base_raw_code.strip():
+                                base_for_debug = base_raw_code
+                            if (
+                                isinstance(cycle_best_raw, str)
+                                and cycle_best_raw.strip()
+                                and (base_score <= 0 or cycle_best_score > base_score)
+                            ):
+                                base_for_debug = cycle_best_raw
+
+                            # Perf summary should match the code we include as `base_code` in the prompt.
+                            base_perf_eval: Optional[EvalResult] = None
+                            if isinstance(base_for_debug, str) and base_for_debug.strip():
+                                if base_for_debug == cycle_best_raw and cycle_best_eval is not None:
+                                    base_perf_eval = cycle_best_eval
+                                elif base_for_debug == base_raw_code and base_eval is not None:
+                                    base_perf_eval = base_eval
+
+                            perf_summary_lines: list[str] = []
+                            if last_eval is not None:
+                                perf_summary_lines.extend(last_eval.perf_summary_lines(prefix="last_attempt"))
+                            if base_perf_eval is not None:
+                                perf_summary_lines.extend(base_perf_eval.perf_summary_lines(prefix="base"))
+                            perf_summary = "\n".join(perf_summary_lines).strip()
+                            current_code_for_prompt = _code_for_codegen_prompt_from_raw(current_raw_code)
+                            codegen_definition_text = _definition_text_for_codegen_prompt(
+                                task,
+                                language=str(self.language),
+                                has_explicit_base_code=bool(
+                                    str(base_for_debug or "").strip()
+                                    and not str(base_for_debug).startswith("(no base code")
+                                ),
+                            )
+                            if not has_passed_in_cycle:
+                                prompt = get_debug_and_improve_from_spec_prompt_from_text(
+                                    self.language,
+                                    definition_text=codegen_definition_text,
+                                    trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
+                                    current_code=current_code_for_prompt,
+                                    action_text=str(chosen_action_text or ""),
+                                    code_format=_code_format_text(),
+                                    debug_round=min(attempt_idx, max_dai),
+                                    max_rounds=max_dai,
+                                    target_gpu=self.target_gpu,
+                                    perf_summary=perf_summary,
+                                    base_code=base_for_debug,
+                                )
+                            else:
+                                prompt = get_improve_from_spec_prompt_from_text(
+                                    self.language,
+                                    definition_text=codegen_definition_text,
+                                    trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
+                                    current_code=current_code_for_prompt,
+                                    code_format=_code_format_text(),
+                                    debug_round=min(attempt_idx, max_dai),
+                                    max_rounds=max_dai,
+                                    target_gpu=self.target_gpu,
+                                    perf_summary=perf_summary,
+                                    base_code=base_for_debug,
+                                )
+                        else:
+                            has_passed_in_cycle = cycle_best_solution is not None
+                            # Reference base shown in prompts: prefer whichever is better by score (base_score vs cycle_best_score).
+                            base_for_debug = base_raw_code
+                            if (
+                                isinstance(cycle_best_raw, str)
+                                and cycle_best_raw.strip()
+                                and (base_score <= 0 or cycle_best_score > base_score)
+                            ):
+                                base_for_debug = cycle_best_raw
+
+                            base_perf_eval: Optional[EvalResult] = None
+                            if isinstance(base_for_debug, str) and base_for_debug.strip():
+                                if base_for_debug == cycle_best_raw and cycle_best_eval is not None:
+                                    base_perf_eval = cycle_best_eval
+                                elif base_for_debug == base_raw_code and base_eval is not None:
+                                    base_perf_eval = base_eval
+
+                            perf_summary_lines: list[str] = []
+                            if last_eval is not None:
+                                perf_summary_lines.extend(last_eval.perf_summary_lines(prefix="last_attempt"))
+                            if base_perf_eval is not None:
+                                perf_summary_lines.extend(base_perf_eval.perf_summary_lines(prefix="base"))
+                            perf_summary = "\n".join(perf_summary_lines).strip()
+                            current_code_for_prompt = _code_for_codegen_prompt_from_raw(current_raw_code)
+                            codegen_definition_text = _definition_text_for_codegen_prompt(
+                                task,
+                                language=str(self.language),
+                                has_explicit_base_code=bool(str(base_for_debug or "").strip()),
+                            )
+                            if not has_passed_in_cycle:
+                                prompt = get_debug_generated_code_prompt_from_text(
+                                    self.language,
+                                    definition_text=codegen_definition_text,
+                                    trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
+                                    base_code=base_for_debug,
+                                    buggy_code=current_code_for_prompt,
+                                    action_text=str(chosen_action_text or ""),
+                                    code_format=_code_format_text(),
+                                    debug_round=min(attempt_idx, max_dai),
+                                    max_rounds=max_dai,
+                                    target_gpu=self.target_gpu,
+                                    perf_summary=perf_summary,
+                                )
+                            else:
+                                prompt = get_improve_generated_code_prompt_from_text(
+                                    self.language,
+                                    definition_text=codegen_definition_text,
+                                    trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
+                                    base_code=base_for_debug,
+                                    current_code=current_code_for_prompt,
+                                    code_format=_code_format_text(),
+                                    debug_round=min(attempt_idx, max_dai),
+                                    max_rounds=max_dai,
+                                    target_gpu=self.target_gpu,
+                                    perf_summary=perf_summary,
+                                )
+
+                    prompt = prompt + "\n\n" + render_world_model_section(self._wm.get(task.name), max_chars=self._world_model_max_chars)
+                    prompt = _append_baseline_hint(prompt)
+
+                    try:
+                        with llm_log_context(
+                            operator=str(getattr(task, "name", "") or ""),
+                            flow="world_model",
+                            round_index=round_num,
+                            stage=("action_codegen" if attempt_idx == 1 else "debug_codegen"),
+                            action_node_id=str(chosen_leaf or ""),
+                            debug_attempt=attempt_idx,
+                            max_debug_attempts=max_dai,
+                            max_rounds=max_opt_rounds,
+                            language=str(self.language),
+                            target_gpu=str(self.target_gpu),
+                        ):
+                            code_result = self._generate_code_from_prompt(prompt, task=task)
+                    except LLMProviderFatalError as exc:
+                        _emit(f"[ERROR] fatal LLM provider error during codegen: {exc}")
+                        raise
+                    except (TimeoutError, ValueError, RuntimeError) as exc:
+                        msg = (
+                            f"codegen failed after retries for action_node_id={chosen_leaf} "
+                            f"round={round_num}: {type(exc).__name__}: {exc}"
+                        )
+                        _emit(f"[WARN] {msg}")
+                        round_eval = EvalResult(
+                            status="codegen_failed",
+                            log_excerpt=msg,
+                            metrics={"score_name": "codegen", "score": -1.0},
+                        )
+                        last_eval = round_eval
+                        rounds_consumed = max(rounds_consumed, attempt_idx)
+                        break
+                    current_code = code_result["cleaned"]
+                    current_raw_code = code_result["raw"]
+                    _emit_kernel_cu(current_code)
+                    current_wm_code = (
+                        (current_code.get("kernel.cu") if isinstance(current_code, dict) else None)
+                        if (self.language or "").lower() == "cuda"
+                        else None
+                    )
+                    if not isinstance(current_wm_code, str) or not current_wm_code.strip():
+                        current_wm_code = _code_for_wm_from_raw(current_raw_code)
+                    current_wm_code = _wm_guardrail(str(current_wm_code or ""))
+
+                    _stage(f"create Solution object from current code (round {round_num})")
+                    solution = self._create_solution_from_code(
+                        cleaned_code=current_code,
+                        raw_code=current_raw_code,
+                        task=task,
+                        round_num=int(round_num),
+                    )
+                    last_solution = solution
+                    _stage(f"evaluate solution (round {round_num})")
+                    round_eval = task.run_benchmark(
+                        solution=solution,
+                        dump_traces=False,
+                        round_num=int(round_num),
+                    )
+                    try:
+                        _nar = getattr(self, "_narrative", None)
+                        if _nar is not None:
+                            _nar.llm_codegen(
+                                round_num=round_num,
+                                attempt=attempt_idx,
+                                mode=("action" if attempt_idx == 1 else "debug/improve"),
+                                prompt=prompt,
+                                response=str(current_raw_code or ""),
+                            )
+                            _nar.eval_result(round_num=round_num, eval_result=round_eval)
+                    except Exception:
+                        pass
+
+                    all_passed = bool(getattr(round_eval, "is_passed", lambda: False)())
+                    round_score = float(getattr(round_eval, "score", lambda: -1.0)())
+
+                    # Save as "last attempt" for the next debug prompt
+                    last_eval = round_eval
+
+                    # If all workloads passed in this round, log a W&B artifact containing the generated code
+                    # (and a WM snapshot) for traceability.
+                    if all_passed and wandb is not None and getattr(wandb, "run", None) is not None:
+                        try:
+                            import tempfile
+
+                            art_name = f"r{round_num}_code"
+                            artifact = wandb.Artifact(
+                                name=art_name,
+                                type="generated-code",
+                                metadata={
+                                    "definition": task.name,
+                                    "round": int(round_num),
+                                    "solution": solution.name,
+                                    "language": self.language,
+                                    "target_gpu": self.target_gpu,
+                                    "wm_enabled": True,
+                                },
+                            )
+                            with tempfile.TemporaryDirectory() as tmpdir:
+                                tmpdir_p = Path(tmpdir)
+                                # Cleaned code files
+                                if isinstance(current_code, dict):
+                                    for filename, content in current_code.items():
+                                        p = tmpdir_p / filename
+                                        p.parent.mkdir(parents=True, exist_ok=True)
+                                        p.write_text(str(content or ""))
+                                        artifact.add_file(str(p), name=f"clean/{filename}")
+                                else:
+                                    p = tmpdir_p / "main.py"
+                                    p.parent.mkdir(parents=True, exist_ok=True)
+                                    p.write_text(str(current_code or ""))
+                                    artifact.add_file(str(p), name="clean/main.py")
+
+                                # Raw code (as generated from the LLM before cleaning)
+                                raw_path = tmpdir_p / "raw_code.txt"
+                                raw_path.write_text(str(current_raw_code) if current_raw_code is not None else "")
+                                artifact.add_file(str(raw_path), name="raw/raw_code.txt")
+
+                                # World model snapshot (best-effort)
+                                wm_path = tmpdir_p / "world_model.json"
+                                wm_path.write_text(str(self._wm.get(task.name) or ""))
+                                artifact.add_file(str(wm_path), name="wm/world_model.json")
+
+                                # Round-level eval summary (best-effort)
+                                summary_path = tmpdir_p / "round_summary.txt"
+                                summary_path.write_text(
+                                    (
+                                        f"status={getattr(round_eval, 'status', None)}\n"
+                                        f"score_name={round_eval.metrics.get('score_name')}\n"
+                                        f"score_value={round_eval.metrics.get('score')}\n"
+                                        f"mean_vs_baseline_factor={getattr(round_eval, 'mean_vs_baseline_factor', None)}\n"
+                                        f"speedup_factor={getattr(round_eval, 'speedup_factor', None)}\n"
+                                        f"latency_ms={getattr(round_eval, 'latency_ms', None)}\n"
+                                    )
+                                )
+                                artifact.add_file(str(summary_path), name="eval/round_summary.txt")
+
+                            wandb.log_artifact(artifact)
+                        except Exception:
+                            pass
+
+                    if all_passed and round_score > best_score:
+                        best_score = float(round_score)
+                        best_eval = round_eval
+                        best_solution = solution
+
+                    if all_passed:
+                        er = round_eval
+                        score = float(getattr(er, "score", lambda: -1.0)())
+                        if score > cycle_best_score:
+                            cycle_best_score = float(score)
+                            cycle_best_eval = er
+                            cycle_best_solution = solution
+                            cycle_best_raw = str(current_raw_code or "")
+                            cycle_best_wm_code = str(current_wm_code or "")
+                            cycle_best_round = int(round_num)
+                            no_improve_streak = 0
                         else:
                             no_improve_streak += 1
-                        if cycle_best_solution is not None and base_score > 0:
-                            if cycle_best_score > base_score:
-                                no_improve_over_base_streak = 0
-                            else:
-                                no_improve_over_base_streak += 1
-                        rounds_consumed += 1
-                        if no_improve_streak >= stagnation_window or no_improve_over_base_streak >= stagnation_window:
-                            break
-                        continue
-                elif attempt_idx == 1:
-                    # If the action's parent has an attached solution (including root when continuing),
-                    # start from that base_code; otherwise fall back to spec+action.
-                    if isinstance(base_raw_code, str) and base_raw_code.strip():
-                        codegen_definition_text = _definition_text_for_codegen_prompt(
-                            task,
-                            language=str(self.language),
-                            has_explicit_base_code=True,
-                        )
-                        prompt = get_generate_code_from_action_prompt_from_text(
-                            self.language,
-                            definition_text=codegen_definition_text,
-                            base_code=base_raw_code,
-                            action_text=chosen_action_text,
-                            code_format=_code_format_text(),
-                            target_gpu=self.target_gpu,
-                        )
                     else:
-                        codegen_definition_text = _definition_text_for_codegen_prompt(
-                            task,
-                            language=str(self.language),
-                            has_explicit_base_code=False,
-                        )
-                        prompt = get_generate_code_from_spec_with_action_prompt_from_text(
-                            self.language,
-                            definition_text=codegen_definition_text,
-                            action_text=chosen_action_text,
-                            code_format=_code_format_text(),
-                            target_gpu=self.target_gpu,
-                        )
-                else:
-                    if parent_is_root or not base_raw_code:
-                        has_passed_in_cycle = cycle_best_solution is not None
-                        # Reference base shown in prompts: prefer whichever is better by score (base_score vs cycle_best_score).
-                        # If parent is root (no base score), fall back to cycle_best if present.
-                        base_for_debug = "(no base code; start from spec)"
-                        if isinstance(base_raw_code, str) and base_raw_code.strip():
-                            base_for_debug = base_raw_code
-                        if (
-                            isinstance(cycle_best_raw, str)
-                            and cycle_best_raw.strip()
-                            and (base_score <= 0 or cycle_best_score > base_score)
-                        ):
-                            base_for_debug = cycle_best_raw
-
-                        # Perf summary should match the code we include as `base_code` in the prompt.
-                        base_perf_eval: Optional[EvalResult] = None
-                        if isinstance(base_for_debug, str) and base_for_debug.strip():
-                            if base_for_debug == cycle_best_raw and cycle_best_eval is not None:
-                                base_perf_eval = cycle_best_eval
-                            elif base_for_debug == base_raw_code and base_eval is not None:
-                                base_perf_eval = base_eval
-
-                        perf_summary_lines: list[str] = []
-                        if last_eval is not None:
-                            perf_summary_lines.extend(last_eval.perf_summary_lines(prefix="last_attempt"))
-                        if base_perf_eval is not None:
-                            perf_summary_lines.extend(base_perf_eval.perf_summary_lines(prefix="base"))
-                        perf_summary = "\n".join(perf_summary_lines).strip()
-                        current_code_for_prompt = _code_for_codegen_prompt_from_raw(current_raw_code)
-                        codegen_definition_text = _definition_text_for_codegen_prompt(
-                            task,
-                            language=str(self.language),
-                            has_explicit_base_code=bool(
-                                str(base_for_debug or "").strip()
-                                and not str(base_for_debug).startswith("(no base code")
-                            ),
-                        )
-                        if not has_passed_in_cycle:
-                            prompt = get_debug_and_improve_from_spec_prompt_from_text(
-                                self.language,
-                                definition_text=codegen_definition_text,
-                                trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
-                                current_code=current_code_for_prompt,
-                                action_text=str(chosen_action_text or ""),
-                                code_format=_code_format_text(),
-                                debug_round=min(attempt_idx, max_dai),
-                                max_rounds=max_dai,
-                                target_gpu=self.target_gpu,
-                                perf_summary=perf_summary,
-                                base_code=base_for_debug,
-                            )
-                        else:
-                            prompt = get_improve_from_spec_prompt_from_text(
-                                self.language,
-                                definition_text=codegen_definition_text,
-                                trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
-                                current_code=current_code_for_prompt,
-                                code_format=_code_format_text(),
-                                debug_round=min(attempt_idx, max_dai),
-                                max_rounds=max_dai,
-                                target_gpu=self.target_gpu,
-                                perf_summary=perf_summary,
-                                base_code=base_for_debug,
-                            )
-                    else:
-                        has_passed_in_cycle = cycle_best_solution is not None
-                        # Reference base shown in prompts: prefer whichever is better by score (base_score vs cycle_best_score).
-                        base_for_debug = base_raw_code
-                        if (
-                            isinstance(cycle_best_raw, str)
-                            and cycle_best_raw.strip()
-                            and (base_score <= 0 or cycle_best_score > base_score)
-                        ):
-                            base_for_debug = cycle_best_raw
-
-                        base_perf_eval: Optional[EvalResult] = None
-                        if isinstance(base_for_debug, str) and base_for_debug.strip():
-                            if base_for_debug == cycle_best_raw and cycle_best_eval is not None:
-                                base_perf_eval = cycle_best_eval
-                            elif base_for_debug == base_raw_code and base_eval is not None:
-                                base_perf_eval = base_eval
-
-                        perf_summary_lines: list[str] = []
-                        if last_eval is not None:
-                            perf_summary_lines.extend(last_eval.perf_summary_lines(prefix="last_attempt"))
-                        if base_perf_eval is not None:
-                            perf_summary_lines.extend(base_perf_eval.perf_summary_lines(prefix="base"))
-                        perf_summary = "\n".join(perf_summary_lines).strip()
-                        current_code_for_prompt = _code_for_codegen_prompt_from_raw(current_raw_code)
-                        codegen_definition_text = _definition_text_for_codegen_prompt(
-                            task,
-                            language=str(self.language),
-                            has_explicit_base_code=bool(str(base_for_debug or "").strip()),
-                        )
-                        if not has_passed_in_cycle:
-                            prompt = get_debug_generated_code_prompt_from_text(
-                                self.language,
-                                definition_text=codegen_definition_text,
-                                trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
-                                base_code=base_for_debug,
-                                buggy_code=current_code_for_prompt,
-                                action_text=str(chosen_action_text or ""),
-                                code_format=_code_format_text(),
-                                debug_round=min(attempt_idx, max_dai),
-                                max_rounds=max_dai,
-                                target_gpu=self.target_gpu,
-                                perf_summary=perf_summary,
-                            )
-                        else:
-                            prompt = get_improve_generated_code_prompt_from_text(
-                                self.language,
-                                definition_text=codegen_definition_text,
-                                trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
-                                base_code=base_for_debug,
-                                current_code=current_code_for_prompt,
-                                code_format=_code_format_text(),
-                                debug_round=min(attempt_idx, max_dai),
-                                max_rounds=max_dai,
-                                target_gpu=self.target_gpu,
-                                perf_summary=perf_summary,
-                            )
-
-                prompt = prompt + "\n\n" + render_world_model_section(self._wm.get(task.name), max_chars=self._world_model_max_chars)
-                prompt = _append_baseline_hint(prompt)
-
-                try:
-                    with llm_log_context(
-                        operator=str(getattr(task, "name", "") or ""),
-                        flow="world_model",
-                        round_index=round_num,
-                        stage=("action_codegen" if attempt_idx == 1 else "debug_codegen"),
-                        action_node_id=str(chosen_leaf or ""),
-                        debug_attempt=attempt_idx,
-                        max_debug_attempts=max_dai,
-                        max_rounds=max_opt_rounds,
-                        language=str(self.language),
-                        target_gpu=str(self.target_gpu),
-                    ):
-                        code_result = self._generate_code_from_prompt(prompt, task=task)
-                except LLMProviderFatalError as exc:
-                    _emit(f"[ERROR] fatal LLM provider error during codegen: {exc}")
-                    raise
-                except (TimeoutError, ValueError, RuntimeError) as exc:
-                    msg = (
-                        f"codegen failed after retries for action_node_id={chosen_leaf} "
-                        f"round={round_num}: {type(exc).__name__}: {exc}"
-                    )
-                    _emit(f"[WARN] {msg}")
-                    round_eval = EvalResult(
-                        status="codegen_failed",
-                        log_excerpt=msg,
-                        metrics={"score_name": "codegen", "score": -1.0},
-                    )
-                    last_eval = round_eval
-                    rounds_consumed = max(rounds_consumed, attempt_idx)
-                    break
-                current_code = code_result["cleaned"]
-                current_raw_code = code_result["raw"]
-                _emit_kernel_cu(current_code)
-                current_wm_code = (
-                    (current_code.get("kernel.cu") if isinstance(current_code, dict) else None)
-                    if (self.language or "").lower() == "cuda"
-                    else None
-                )
-                if not isinstance(current_wm_code, str) or not current_wm_code.strip():
-                    current_wm_code = _code_for_wm_from_raw(current_raw_code)
-                current_wm_code = _wm_guardrail(str(current_wm_code or ""))
-
-                _stage(f"create Solution object from current code (round {round_num})")
-                solution = self._create_solution_from_code(
-                    cleaned_code=current_code,
-                    raw_code=current_raw_code,
-                    task=task,
-                    round_num=int(round_num),
-                )
-                last_solution = solution
-                _stage(f"evaluate solution (round {round_num})")
-                round_eval = task.run_benchmark(
-                    solution=solution,
-                    dump_traces=False,
-                    round_num=int(round_num),
-                )
-                try:
-                    _nar = getattr(self, "_narrative", None)
-                    if _nar is not None:
-                        _nar.llm_codegen(
-                            round_num=round_num,
-                            attempt=attempt_idx,
-                            mode=("action" if attempt_idx == 1 else "debug/improve"),
-                            prompt=prompt,
-                            response=str(current_raw_code or ""),
-                        )
-                        _nar.eval_result(round_num=round_num, eval_result=round_eval)
-                except Exception:
-                    pass
-
-                all_passed = bool(getattr(round_eval, "is_passed", lambda: False)())
-                round_score = float(getattr(round_eval, "score", lambda: -1.0)())
-
-                # Save as "last attempt" for the next debug prompt
-                last_eval = round_eval
-
-                # If all workloads passed in this round, log a W&B artifact containing the generated code
-                # (and a WM snapshot) for traceability.
-                if all_passed and wandb is not None and getattr(wandb, "run", None) is not None:
-                    try:
-                        import tempfile
-
-                        art_name = f"r{round_num}_code"
-                        artifact = wandb.Artifact(
-                            name=art_name,
-                            type="generated-code",
-                            metadata={
-                                "definition": task.name,
-                                "round": int(round_num),
-                                "solution": solution.name,
-                                "language": self.language,
-                                "target_gpu": self.target_gpu,
-                                "wm_enabled": True,
-                            },
-                        )
-                        with tempfile.TemporaryDirectory() as tmpdir:
-                            tmpdir_p = Path(tmpdir)
-                            # Cleaned code files
-                            if isinstance(current_code, dict):
-                                for filename, content in current_code.items():
-                                    p = tmpdir_p / filename
-                                    p.parent.mkdir(parents=True, exist_ok=True)
-                                    p.write_text(str(content or ""))
-                                    artifact.add_file(str(p), name=f"clean/{filename}")
-                            else:
-                                p = tmpdir_p / "main.py"
-                                p.parent.mkdir(parents=True, exist_ok=True)
-                                p.write_text(str(current_code or ""))
-                                artifact.add_file(str(p), name="clean/main.py")
-
-                            # Raw code (as generated from the LLM before cleaning)
-                            raw_path = tmpdir_p / "raw_code.txt"
-                            raw_path.write_text(str(current_raw_code) if current_raw_code is not None else "")
-                            artifact.add_file(str(raw_path), name="raw/raw_code.txt")
-
-                            # World model snapshot (best-effort)
-                            wm_path = tmpdir_p / "world_model.json"
-                            wm_path.write_text(str(self._wm.get(task.name) or ""))
-                            artifact.add_file(str(wm_path), name="wm/world_model.json")
-
-                            # Round-level eval summary (best-effort)
-                            summary_path = tmpdir_p / "round_summary.txt"
-                            summary_path.write_text(
-                                (
-                                    f"status={getattr(round_eval, 'status', None)}\n"
-                                    f"score_name={round_eval.metrics.get('score_name')}\n"
-                                    f"score_value={round_eval.metrics.get('score')}\n"
-                                    f"mean_vs_baseline_factor={getattr(round_eval, 'mean_vs_baseline_factor', None)}\n"
-                                    f"speedup_factor={getattr(round_eval, 'speedup_factor', None)}\n"
-                                    f"latency_ms={getattr(round_eval, 'latency_ms', None)}\n"
-                                )
-                            )
-                            artifact.add_file(str(summary_path), name="eval/round_summary.txt")
-
-                        wandb.log_artifact(artifact)
-                    except Exception:
-                        pass
-
-                if all_passed and round_score > best_score:
-                    best_score = float(round_score)
-                    best_eval = round_eval
-                    best_solution = solution
-
-                if all_passed:
-                    er = round_eval
-                    score = float(getattr(er, "score", lambda: -1.0)())
-                    if score > cycle_best_score:
-                        cycle_best_score = float(score)
-                        cycle_best_eval = er
-                        cycle_best_solution = solution
-                        cycle_best_raw = str(current_raw_code or "")
-                        cycle_best_wm_code = str(current_wm_code or "")
-                        cycle_best_round = int(round_num)
-                        no_improve_streak = 0
-                    else:
+                        # Failed round (or missing perf): count as no improvement for stagnation purposes.
                         no_improve_streak += 1
-                else:
-                    # Failed round (or missing perf): count as no improvement for stagnation purposes.
-                    no_improve_streak += 1
 
-                # "Can't beat base" streak: only meaningful after we have at least one PASSED solution in this cycle,
-                # and only when the parent/base has a meaningful score.
-                if cycle_best_solution is not None and base_score > 0:
-                    if cycle_best_score > base_score:
-                        no_improve_over_base_streak = 0
-                    else:
-                        no_improve_over_base_streak += 1
+                    # "Can't beat base" streak: only meaningful after we have at least one PASSED solution in this cycle,
+                    # and only when the parent/base has a meaningful score.
+                    if cycle_best_solution is not None and base_score > 0:
+                        if cycle_best_score > base_score:
+                            no_improve_over_base_streak = 0
+                        else:
+                            no_improve_over_base_streak += 1
 
-                if wandb is not None and getattr(wandb, "run", None) is not None:
-                    try:
-                        # Log current round score as well (helps debug regressions / oscillations).
-                        round_sn = None
+                    if wandb is not None and getattr(wandb, "run", None) is not None:
                         try:
-                            round_sn = (
-                                round_eval.metrics.get("score_name")
-                                if isinstance(getattr(round_eval, "metrics", None), dict)
-                                else None
-                            )
-                        except Exception:
+                            # Log current round score as well (helps debug regressions / oscillations).
                             round_sn = None
-                        round_key = (
-                            f"{task.name}/generate/{round_sn}"
-                            if isinstance(round_sn, str) and round_sn
-                            else f"{task.name}/generate/round_score"
-                        )
-                        wandb.log(
-                            {round_key: (float(round_score) if (all_passed and round_score > 0) else None)},
-                            step=round_num,
-                        )
+                            try:
+                                round_sn = (
+                                    round_eval.metrics.get("score_name")
+                                    if isinstance(getattr(round_eval, "metrics", None), dict)
+                                    else None
+                                )
+                            except Exception:
+                                round_sn = None
+                            round_key = (
+                                f"{task.name}/generate/{round_sn}"
+                                if isinstance(round_sn, str) and round_sn
+                                else f"{task.name}/generate/round_score"
+                            )
+                            wandb.log(
+                                {round_key: (float(round_score) if (all_passed and round_score > 0) else None)},
+                                step=round_num,
+                            )
 
-                        # Log best-so-far score (single scalar). Before we have any PASSED solution,
-                        # `best_eval` is None, so we log None under a stable key.
-                        key = (
-                            f"{task.name}/generate/best_{best_eval.metrics['score_name']}"
-                            if best_eval is not None
-                            else f"{task.name}/generate/best_score"
-                        )
-                        wandb.log({key: (float(best_score) if best_eval is not None else None)}, step=round_num)
-                    except Exception:
-                        pass
+                            # Log best-so-far score (single scalar). Before we have any PASSED solution,
+                            # `best_eval` is None, so we log None under a stable key.
+                            key = (
+                                f"{task.name}/generate/best_{best_eval.metrics['score_name']}"
+                                if best_eval is not None
+                                else f"{task.name}/generate/best_score"
+                            )
+                            wandb.log({key: (float(best_score) if best_eval is not None else None)}, step=round_num)
+                        except Exception:
+                            pass
 
-                rounds_consumed += 1
-                if no_improve_streak >= stagnation_window or no_improve_over_base_streak >= stagnation_window:
-                    break
+                    rounds_consumed += 1
+                    if no_improve_streak >= stagnation_window or no_improve_over_base_streak >= stagnation_window:
+                        break
 
-            # Close any open multi-turn SDK session at cycle end
-            if editor_session is not None and not editor_session._closed:
-                self._agentic_runner().editor_client.close_session(editor_session)
-                editor_session = None
-            if wt_session is not None:
-                wt_session.cleanup()
-                wt_session = None
+                # Close any open multi-turn agentic cycle at cycle end.
+                if agentic_cycle_cm is not None:
+                    agentic_cycle_cm.__exit__(None, None, None)
+                    agentic_cycle_cm = None
+                    agentic_cycle = None
+
+            finally:
+                if agentic_cycle_cm is not None:
+                    agentic_cycle_cm.__exit__(None, None, None)
+                    agentic_cycle_cm = None
+                    agentic_cycle = None
 
             if cycle_best_solution is not None and cycle_best_eval is not None:
                 _stage(f"cycle end: attach+refine best PASSED (round {cycle_best_round}, score={cycle_best_score:.3f})")

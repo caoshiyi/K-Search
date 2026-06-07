@@ -51,6 +51,50 @@ def test_prompt_uses_context_paths_not_full_strategy_or_raw_log():
     assert "/tmp/" not in prompt
 
 
+def test_prompt_includes_selected_strategy_dependency_status_without_blocked_nodes():
+    paths = WorktreeContextPaths(
+        strategy_md=".ksearch/context/STRATEGY.md",
+        strategy_summary_md=".ksearch/context/STRATEGY_SUMMARY.md",
+        eval_summary_json=".ksearch/context/EVAL_SUMMARY.json",
+        eval_log_md=".ksearch/context/EVAL_LOG.md",
+        manifest_json=".ksearch/context/CONTEXT_MANIFEST.json",
+    )
+    request = AscendCAgenticCodegenRequest(
+        definition_text="spec",
+        action_text="Selected executable strategy.",
+        trace_logs="",
+        perf_summary="",
+        target_gpu="ascend_910b",
+        round_num=2,
+        attempt_idx=1,
+        mode="action",
+        context_paths=paths,
+        strategy_summary="Soft pipeline after two-level tiling.",
+        strategy_context={
+            "strategy_id": "fa_multibuffer_soft_pipeline",
+            "requires": ["fa_qkv_two_level_l1_reuse"],
+            "dependencies_satisfied": True,
+            "parent_strategy_lineage": ["fa_qkv_two_level_l1_reuse"],
+            "parent_solution_id": "round_0001_attempt_0001",
+        },
+        blocked_strategy_nodes=[
+            {
+                "node_id": "s2c1",
+                "reason": "strategy_file_required_but_missing",
+            }
+        ],
+    )
+
+    prompt = AscendCAgenticPromptBuilder(max_chars=20_000).build(request)
+
+    assert "Dependency check:" in prompt
+    assert "- strategy_id: fa_multibuffer_soft_pipeline" in prompt
+    assert "- requires: fa_qkv_two_level_l1_reuse" in prompt
+    assert "- dependency_status: satisfied" in prompt
+    assert "s2c1" not in prompt
+    assert "strategy_file_required_but_missing" not in prompt
+
+
 def test_ksearch_context_not_in_changed_paths_or_candidate_diff():
     changed = _candidate_changed_paths(
         [

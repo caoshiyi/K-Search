@@ -20,6 +20,10 @@ STRATEGY_FORMS = ("natural_language",)
 INLINE_STRATEGY_COMPAT_ENV = "KSEARCH_ALLOW_INLINE_STRATEGY"
 
 
+class StrategyCatalogError(ValueError):
+    pass
+
+
 @dataclass(frozen=True)
 class StrategyCatalogEntry:
     id: str
@@ -31,6 +35,9 @@ class StrategyCatalogEntry:
     difficulty_1_to_5: int = 3
     score_0_to_1: float = 0.5
     expected_vs_baseline_factor: float | None = None
+    requires: tuple[str, ...] = ()
+    allow_reexecute: bool = False
+    expected_speedup: dict[str, Any] | None = None
     inline_natural_language: str | None = None
 
 
@@ -71,6 +78,44 @@ def _coerce_optional_float(raw: dict[str, Any], key: str, strategy_id: str) -> f
     return float(value)
 
 
+def _coerce_requires(raw: dict[str, Any], strategy_id: str) -> tuple[str, ...]:
+    value = raw.get("requires", ())
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        raise StrategyCatalogError(f"strategy {strategy_id} field requires must be a list of strategy ids")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise StrategyCatalogError(
+                f"strategy {strategy_id} field requires must be a list of strategy ids"
+            )
+        result.append(item.strip())
+    return tuple(result)
+
+
+def _coerce_bool(raw: dict[str, Any], key: str, strategy_id: str, default: bool = False) -> bool:
+    value = raw.get(key, default)
+    if isinstance(value, bool):
+        return bool(value)
+    raise StrategyCatalogError(f"strategy {strategy_id} field {key} must be boolean")
+
+
+def _coerce_expected_speedup(raw: dict[str, Any], strategy_id: str) -> dict[str, Any] | None:
+    value = raw.get("expected_speedup")
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise StrategyCatalogError(f"strategy {strategy_id} field expected_speedup must be an object")
+    out = dict(value)
+    factor = out.get("factor")
+    if factor is not None and (isinstance(factor, bool) or not isinstance(factor, (int, float))):
+        raise StrategyCatalogError(f"strategy {strategy_id} field expected_speedup.factor must be numeric")
+    return out
+
+
 def _coerce_score(raw: dict[str, Any], strategy_id: str) -> float:
     value = raw.get("score_0_to_1", 0.5)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -108,6 +153,35 @@ def _coerce_tags(raw: dict[str, Any], strategy_id: str) -> tuple[str, ...]:
     if not result and isinstance(raw.get("category"), str) and raw["category"].strip():
         result.append(raw["category"].strip())
     return tuple(result)
+
+
+def _validate_strategy_dependencies(entries: list[StrategyCatalogEntry]) -> None:
+    by_id = {entry.id: entry for entry in entries}
+    for entry in entries:
+        for req in entry.requires:
+            if req == entry.id:
+                raise StrategyCatalogError(f"strategy {entry.id} cannot require itself")
+            if req not in by_id:
+                raise StrategyCatalogError(f"strategy {entry.id} requires unknown strategy id: {req}")
+
+    graph = {entry.id: list(entry.requires) for entry in entries}
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def dfs(node: str, stack: list[str]) -> None:
+        if node in visiting:
+            cycle = " -> ".join(stack + [node])
+            raise StrategyCatalogError(f"strategy dependency cycle detected: {cycle}")
+        if node in visited:
+            return
+        visiting.add(node)
+        for dep in graph.get(node, []):
+            dfs(dep, stack + [node])
+        visiting.remove(node)
+        visited.add(node)
+
+    for node in graph:
+        dfs(node, [])
 
 
 def load_strategy_catalog(strategy_file: str | Path) -> list[StrategyCatalogEntry]:
@@ -218,10 +292,14 @@ def load_strategy_catalog(strategy_file: str | Path) -> list[StrategyCatalogEntr
                     "expected_vs_baseline_factor",
                     sid,
                 ),
+                requires=_coerce_requires(raw, sid),
+                allow_reexecute=_coerce_bool(raw, "allow_reexecute", sid, default=False),
+                expected_speedup=_coerce_expected_speedup(raw, sid),
                 inline_natural_language=inline_for_entry,
             )
         )
 
+    _validate_strategy_dependencies(entries)
     return entries
 
 
@@ -253,6 +331,7 @@ def render_strategy_action_text(
         f"Strategy summary: {entry.summary}\n"
         f"Strategy tags: {', '.join(entry.tags) if entry.tags else '(none)'}\n"
         f"Strategy difficulty: {entry.difficulty_1_to_5}/5\n\n"
+        f"Strategy requires: {', '.join(entry.requires) if entry.requires else '(none)'}\n\n"
         "Full natural-language strategy markdown:\n"
         f"{full_text}"
     )
@@ -495,6 +574,8 @@ def _build_action_node(
             "score_0_to_1": strategy.score_0_to_1,
             "difficulty_1_to_5": strategy.difficulty_1_to_5,
             "expected_vs_baseline_factor": strategy.expected_vs_baseline_factor,
+            "requires": list(strategy.requires),
+            "allow_reexecute": bool(strategy.allow_reexecute),
             "strategy_ref": {
                 "id": sid,
                 "markdown_ref": strategy.markdown_ref,

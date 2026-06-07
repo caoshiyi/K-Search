@@ -57,6 +57,7 @@ def materialize_worktree_context(
     strategy_summary: str,
     eval_summary: dict[str, Any],
     eval_log: str,
+    strategy_context: dict[str, Any] | None = None,
 ) -> WorktreeContextPaths:
     root = Path(project_dir).expanduser().resolve()
     context_dir = root / CONTEXT_ROOT
@@ -88,5 +89,7 @@ def materialize_worktree_context(
         "eval_summary_json": paths.eval_summary_json,
         "eval_log_md": paths.eval_log_md,
     }
+    if strategy_context:
+        manifest["strategy"] = dict(strategy_context)
     manifest_json.write_text(_json_dumps(manifest), encoding="utf-8")
     return paths

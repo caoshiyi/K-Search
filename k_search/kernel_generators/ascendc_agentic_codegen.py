@@ -76,6 +76,7 @@ class AscendCAgenticCodegenRequest:
     eval_summary: dict[str, Any] | None = None
     eval_log: str | None = None
     context_paths: WorktreeContextPaths | None = None
+    strategy_context: dict[str, Any] | None = None
     blocked_strategy_nodes: list[dict[str, Any]] | None = None
 
 
@@ -135,6 +136,39 @@ def _extract_bounded_strategy_summary(action_text: str, *, limit: int = 1200) ->
     if len(summary) > limit:
         summary = summary[: max(0, limit - 24)].rstrip() + "\n[summary truncated]"
     return summary
+
+
+def _render_strategy_dependency_status(strategy_context: dict[str, Any] | None) -> str:
+    if not isinstance(strategy_context, dict) or not strategy_context:
+        return ""
+    strategy_id = str(strategy_context.get("strategy_id") or "").strip()
+    requires = strategy_context.get("requires") or []
+    if isinstance(requires, str):
+        requires_list = [requires]
+    elif isinstance(requires, (list, tuple)):
+        requires_list = [str(item).strip() for item in requires if str(item).strip()]
+    else:
+        requires_list = []
+    satisfied = bool(strategy_context.get("dependencies_satisfied", False))
+    parent_solution_id = str(strategy_context.get("parent_solution_id") or "").strip()
+    parent_lineage = strategy_context.get("parent_strategy_lineage") or []
+    if isinstance(parent_lineage, str):
+        parent_lineage_list = [parent_lineage]
+    elif isinstance(parent_lineage, (list, tuple)):
+        parent_lineage_list = [str(item).strip() for item in parent_lineage if str(item).strip()]
+    else:
+        parent_lineage_list = []
+    lines = [
+        "Dependency check:",
+        f"- strategy_id: {strategy_id or '(unknown)'}",
+        f"- requires: {', '.join(requires_list) if requires_list else '(none)'}",
+        f"- dependency_status: {'satisfied' if satisfied else 'unsatisfied'}",
+    ]
+    if parent_lineage_list:
+        lines.append(f"- parent_strategy_lineage: {', '.join(parent_lineage_list)}")
+    if parent_solution_id:
+        lines.append(f"- parent_solution_id: {parent_solution_id}")
+    return "\n".join(lines)
 
 
 def _render_eval_summary_for_prompt(eval_summary: dict[str, Any] | None, *, max_chars: int = 1800) -> str:
@@ -816,6 +850,8 @@ class AscendCAgenticPromptBuilder:
                 "- Do not invoke subagents outside the active stage's configured flow."
             )
         if context_paths is not None:
+            dependency_status = _render_strategy_dependency_status(request.strategy_context)
+            dependency_block = f"{dependency_status}\n\n" if dependency_status else ""
             context_block = (
                 "K-Search context files, relative to the candidate project root:\n"
                 f"- Strategy document: {context_paths.strategy_md}\n"
@@ -832,6 +868,7 @@ class AscendCAgenticPromptBuilder:
                 "- Do not use absolute paths.\n\n"
                 "Strategy summary:\n"
                 f"{strategy_summary or '(none)'}\n\n"
+                f"{dependency_block}"
                 "Evaluation summary:\n"
                 f"{rendered_eval_summary or '(none)'}\n"
             )
@@ -1049,6 +1086,7 @@ class AscendCAgenticCycle:
             strategy_summary=strategy_summary,
             eval_summary=eval_summary,
             eval_log=eval_log,
+            strategy_context=request.strategy_context,
         )
         request = replace(
             request,
@@ -1290,6 +1328,29 @@ class AscendCAgenticCycle:
                 "mode": self.request.mode,
                 "artifact_mode": mode,
                 "target_gpu": self.request.target_gpu,
+                "strategy": dict(self.request.strategy_context or {}),
+                "strategy_id": (
+                    (self.request.strategy_context or {}).get("strategy_id")
+                    if isinstance(self.request.strategy_context, dict)
+                    else None
+                ),
+                "strategy_requires": (
+                    list((self.request.strategy_context or {}).get("requires") or [])
+                    if isinstance(self.request.strategy_context, dict)
+                    else []
+                ),
+                "parent_solution_id": (
+                    (self.request.strategy_context or {}).get("parent_solution_id")
+                    if isinstance(self.request.strategy_context, dict)
+                    else None
+                ),
+                "parent_strategy_lineage": (
+                    list((self.request.strategy_context or {}).get("parent_strategy_lineage") or [])
+                    if isinstance(self.request.strategy_context, dict)
+                    else []
+                ),
+                "adopted": False,
+                "adoption_reason": "not_selected_as_parent",
                 "project_path": str(self.wt_session.project_dir),
                 "eval_project_path": eval_project_path,
                 "evaluator_mutated_project": False,

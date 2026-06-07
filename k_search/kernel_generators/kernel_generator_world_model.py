@@ -7,6 +7,7 @@ and only override prompt construction to inject the persistent world model JSON.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Optional
 
@@ -86,6 +87,243 @@ def resolve_strategy_catalog_entry(
     if entry is None or not str(entry.markdown_ref or "").strip():
         return None
     return entry
+
+
+def _node_solution_id(node: dict[str, Any]) -> str | None:
+    sr = node.get("solution_ref")
+    if not isinstance(sr, dict):
+        return None
+    sid = sr.get("solution_id")
+    return str(sid).strip() if isinstance(sid, str) and sid.strip() else None
+
+
+def _strategy_requires(entry: StrategyCatalogEntry) -> tuple[str, ...]:
+    raw = getattr(entry, "requires", ())
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        return (raw,)
+    if isinstance(raw, (list, tuple)):
+        return tuple(str(item).strip() for item in raw if str(item).strip())
+    return ()
+
+
+def _strategy_allow_reexecute(entry: StrategyCatalogEntry) -> bool:
+    return bool(getattr(entry, "allow_reexecute", False))
+
+
+def _action_is_closed_for_strategy_selection(node: dict[str, Any]) -> bool:
+    action = node.get("action") if isinstance(node.get("action"), dict) else {}
+    for status in (node.get("status"), action.get("status"), action.get("state")):
+        if str(status or "").strip().lower() in {
+            "too_hard",
+            "blocked",
+            "closed",
+            "deferred",
+            "skipped",
+        }:
+            return True
+    return bool(node.get("too_hard") is True or action.get("too_hard") is True)
+
+
+def _open_frontier_action_nodes(world_model_obj: dict[str, Any]) -> list[dict[str, Any]]:
+    dt = world_model_obj.get("decision_tree")
+    if not isinstance(dt, dict):
+        return []
+    nodes = dt.get("nodes")
+    if not isinstance(nodes, list):
+        return []
+    root_id = str(dt.get("root_id", "") or "root")
+    by_id = {
+        str(node["node_id"]): node
+        for node in nodes
+        if isinstance(node, dict) and node.get("node_id")
+    }
+    frontier: list[dict[str, Any]] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        if _node_solution_id(node) is not None:
+            continue
+        action = node.get("action")
+        if not isinstance(action, dict) or not str(action.get("title") or "").strip():
+            continue
+        if _action_is_closed_for_strategy_selection(node):
+            continue
+        parent_id = node.get("parent_id")
+        if parent_id is None:
+            continue
+        parent_id_s = str(parent_id)
+        if parent_id_s != root_id:
+            parent = by_id.get(parent_id_s)
+            if not isinstance(parent, dict) or _node_solution_id(parent) is None:
+                continue
+        frontier.append(node)
+    return frontier
+
+
+def _adopted_strategy_ids_from_world_model(
+    world_model_obj: dict[str, Any],
+    strategy_catalog: list[StrategyCatalogEntry],
+) -> list[str]:
+    dt = world_model_obj.get("decision_tree")
+    nodes = dt.get("nodes") if isinstance(dt, dict) else None
+    if not isinstance(nodes, list):
+        return []
+    adopted: list[str] = []
+    seen: set[str] = set()
+    for node in nodes:
+        if not isinstance(node, dict) or _node_solution_id(node) is None:
+            continue
+        entry = resolve_strategy_catalog_entry(node, strategy_catalog)
+        if entry is None or entry.id in seen:
+            continue
+        seen.add(entry.id)
+        adopted.append(entry.id)
+    return adopted
+
+
+def _strategy_lineage_from_world_model(
+    world_model_obj: dict[str, Any],
+    strategy_catalog: list[StrategyCatalogEntry],
+) -> list[dict[str, Any]]:
+    dt = world_model_obj.get("decision_tree")
+    nodes = dt.get("nodes") if isinstance(dt, dict) else None
+    if not isinstance(nodes, list):
+        return []
+    lineage: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        sid = _node_solution_id(node)
+        if sid is None:
+            continue
+        entry = resolve_strategy_catalog_entry(node, strategy_catalog)
+        if entry is None or entry.id in seen:
+            continue
+        sr = node.get("solution_ref") if isinstance(node.get("solution_ref"), dict) else {}
+        ev = sr.get("eval") if isinstance(sr.get("eval"), dict) else {}
+        seen.add(entry.id)
+        lineage.append(
+            {
+                "strategy_id": entry.id,
+                "action_node_id": str(node.get("node_id") or ""),
+                "solution_id": sid,
+                "candidate_id": sr.get("candidate_id"),
+                "candidate_manifest_path": sr.get("candidate_manifest_path"),
+                "adopted_round": sr.get("round_index"),
+                "eval_status": ev.get("status"),
+                "mean_latency_us": ev.get("latency_us"),
+                "latency_ms": ev.get("latency_ms"),
+            }
+        )
+    return lineage
+
+
+def _adopted_strategy_node_ids_from_world_model(
+    world_model_obj: dict[str, Any],
+    strategy_catalog: list[StrategyCatalogEntry],
+) -> dict[str, str]:
+    dt = world_model_obj.get("decision_tree")
+    nodes = dt.get("nodes") if isinstance(dt, dict) else None
+    if not isinstance(nodes, list):
+        return {}
+    out: dict[str, str] = {}
+    for node in nodes:
+        if not isinstance(node, dict) or _node_solution_id(node) is None:
+            continue
+        node_id = str(node.get("node_id") or "").strip()
+        if not node_id:
+            continue
+        entry = resolve_strategy_catalog_entry(node, strategy_catalog)
+        if entry is not None and entry.id not in out:
+            out[entry.id] = node_id
+    return out
+
+
+def _score_0_to_1(node: dict[str, Any]) -> float:
+    action = node.get("action") if isinstance(node.get("action"), dict) else {}
+    try:
+        score = float(action.get("score_0_to_1", 0.0))
+    except Exception:
+        score = 0.0
+    return max(0.0, min(1.0, score))
+
+
+def _difficulty_1_to_5(node: dict[str, Any]) -> int:
+    action = node.get("action") if isinstance(node.get("action"), dict) else {}
+    raw = action.get("difficulty_1_to_5", None)
+    if raw is None:
+        raw = action.get("difficulty_0_to_3", None)
+        try:
+            raw = int(raw) + 1 if raw is not None else 3
+        except Exception:
+            raw = 3
+    try:
+        value = int(raw)
+    except Exception:
+        value = 3
+    return max(1, min(5, value))
+
+
+def _rating_0_to_1(node: dict[str, Any]) -> float:
+    try:
+        return float(node.get("overall_rating_0_to_10", 0.0)) / 10.0
+    except Exception:
+        return 0.0
+
+
+def _max_allowed_strategy_difficulty(
+    *,
+    world_model_obj: dict[str, Any],
+    selection_policy: WorldModelSelectionPolicy,
+) -> int:
+    best_vs_base = -1.0
+    dt = world_model_obj.get("decision_tree")
+    nodes = dt.get("nodes") if isinstance(dt, dict) else None
+    if isinstance(nodes, list):
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            sr = node.get("solution_ref")
+            ev = sr.get("eval") if isinstance(sr, dict) and isinstance(sr.get("eval"), dict) else None
+            if not isinstance(ev, dict) or str(ev.get("status", "") or "").strip().lower() != "passed":
+                continue
+            try:
+                best_vs_base = max(best_vs_base, float(ev.get("mean_vs_baseline_factor")))
+            except Exception:
+                pass
+    max_allowed = int(getattr(selection_policy, "max_difficulty_1_to_5", 3) or 3)
+    try:
+        if best_vs_base >= float(getattr(selection_policy, "relax_difficulty_if_best_vs_base_ge", 0.9) or 0.9):
+            max_allowed = int(getattr(selection_policy, "relaxed_max_difficulty_1_to_5", 4) or 4)
+    except Exception:
+        pass
+    return max(1, min(5, max_allowed))
+
+
+def _sort_executable_strategy_nodes(
+    executable: list[tuple[dict[str, Any], StrategyCatalogEntry]],
+    *,
+    world_model_obj: dict[str, Any],
+    selection_policy: WorldModelSelectionPolicy,
+) -> list[tuple[dict[str, Any], StrategyCatalogEntry]]:
+    max_allowed = _max_allowed_strategy_difficulty(
+        world_model_obj=world_model_obj,
+        selection_policy=selection_policy,
+    )
+    filtered = [item for item in executable if _difficulty_1_to_5(item[0]) <= max_allowed]
+    effective = filtered if filtered else list(executable)
+    effective.sort(
+        key=lambda item: (
+            -_score_0_to_1(item[0]),
+            _difficulty_1_to_5(item[0]),
+            -_rating_0_to_1(item[0]),
+            str(item[0].get("node_id") or ""),
+        )
+    )
+    return effective
 
 
 def _definition_text_for_codegen_prompt(
@@ -170,36 +408,368 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         if dumped:
             self._wm.set(definition_name, dumped)
 
+    def _annotate_strategy_action_node_block(
+        self,
+        *,
+        definition_name: str,
+        node_id: str,
+        reason: str,
+        policy: str,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        wm_json = self._wm.get(definition_name)
+        obj = load_world_model_obj(wm_json or "")
+        if obj is None:
+            return
+        dt = obj.get("decision_tree")
+        nodes = dt.get("nodes") if isinstance(dt, dict) else None
+        if not isinstance(nodes, list):
+            return
+        for node in nodes:
+            if not isinstance(node, dict) or str(node.get("node_id") or "") != str(node_id):
+                continue
+            action = node.get("action") if isinstance(node.get("action"), dict) else {}
+            action["blocked_reason"] = reason
+            action["blocked_policy"] = policy
+            if detail:
+                action["blocked_detail"] = dict(detail)
+            node["action"] = action
+            node["blocked_reason"] = reason
+            node["blocked_policy"] = policy
+            if detail:
+                node["blocked_detail"] = dict(detail)
+            node["notes"] = (
+                f"Temporarily blocked by K-Search policy: {reason}; policy={policy}."
+            )
+            break
+        dumped = dump_world_model_obj(obj)
+        if dumped:
+            self._wm.set(definition_name, dumped)
+
+    def _persist_strategy_state_artifact(
+        self,
+        *,
+        task: Any | None,
+        run_id: str | None,
+        world_model_obj: dict[str, Any],
+        blocked_actions: list[dict[str, Any]] | None = None,
+    ) -> None:
+        if task is None or self._strategy_catalog is None:
+            return
+        try:
+            root = get_ksearch_artifacts_dir(
+                base_dir=self._artifacts_dir,
+                task_name=str(getattr(task, "name", "") or ""),
+                run_id=run_id,
+            )
+            state_path = root / "world_model" / "strategy_state.json"
+            adopted = _adopted_strategy_ids_from_world_model(world_model_obj, self._strategy_catalog)
+            lineage = _strategy_lineage_from_world_model(world_model_obj, self._strategy_catalog)
+            current_parent_solution_id = None
+            dt = world_model_obj.get("decision_tree")
+            active = str(dt.get("active_leaf_id") or "") if isinstance(dt, dict) else ""
+            nodes = dt.get("nodes") if isinstance(dt, dict) else None
+            if active and isinstance(nodes, list):
+                for node in nodes:
+                    if isinstance(node, dict) and str(node.get("node_id") or "") == active:
+                        current_parent_solution_id = _node_solution_id(node)
+                        break
+            payload = {
+                "schema_version": 1,
+                "current_parent_solution_id": current_parent_solution_id,
+                "adopted_strategy_ids": adopted,
+                "strategy_lineage": lineage,
+                "blocked_actions": list(blocked_actions or []),
+            }
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _persist_blocked_actions_artifact(
+        self,
+        *,
+        task: Any | None,
+        run_id: str | None,
+        round_index: int | None,
+        blocked_actions: list[dict[str, Any]],
+        no_executable: bool = False,
+    ) -> None:
+        if task is None or not blocked_actions:
+            return
+        try:
+            root = get_ksearch_artifacts_dir(
+                base_dir=self._artifacts_dir,
+                task_name=str(getattr(task, "name", "") or ""),
+                run_id=run_id,
+            )
+            path = root / "world_model" / "blocked_actions.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as f:
+                for item in blocked_actions:
+                    payload = {
+                        "round": round_index,
+                        "action_node_id": item.get("node_id"),
+                        "strategy_id": item.get("strategy_id"),
+                        "reason": item.get("reason"),
+                        "policy": item.get("policy", "hard_strategy_dependency_gating"),
+                    }
+                    if "missing" in item:
+                        payload["missing"] = list(item.get("missing") or [])
+                    f.write(json.dumps(payload, sort_keys=True) + "\n")
+                if no_executable:
+                    counts: dict[str, int] = {}
+                    for item in blocked_actions:
+                        reason = str(item.get("reason") or "unknown")
+                        counts[reason] = counts.get(reason, 0) + 1
+                    f.write(
+                        json.dumps(
+                            {
+                                "event": "no_executable_strategy_node",
+                                "round": round_index,
+                                "blocked_count": len(blocked_actions),
+                                "blocked_reasons": counts,
+                            },
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    )
+        except Exception:
+            pass
+
+    def _strategy_context_for_node(
+        self,
+        *,
+        definition_name: str,
+        node_obj: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(node_obj, dict) or self._strategy_catalog is None:
+            return None
+        entry = resolve_strategy_catalog_entry(node_obj, self._strategy_catalog)
+        if entry is None:
+            return None
+        wm_obj = load_world_model_obj(self._wm.get(definition_name) or "")
+        adopted = (
+            _adopted_strategy_ids_from_world_model(wm_obj, self._strategy_catalog)
+            if isinstance(wm_obj, dict)
+            else []
+        )
+        adopted_set = set(adopted)
+        requires = list(_strategy_requires(entry))
+        parent_id = str(node_obj.get("parent_id") or "")
+        parent_solution_id = None
+        if parent_id:
+            try:
+                sr = self._wm.get_solution_ref_for_node(definition_name=definition_name, node_id=parent_id)
+                parent_solution_id = sr.get("solution_id") if isinstance(sr, dict) else None
+            except Exception:
+                parent_solution_id = None
+        return {
+            "strategy_id": entry.id,
+            "strategy_markdown_ref": entry.markdown_ref,
+            "requires": requires,
+            "dependencies_satisfied": all(req in adopted_set for req in requires),
+            "parent_strategy_lineage": adopted,
+            "parent_solution_id": parent_solution_id,
+            "action_node_id": str(node_obj.get("node_id") or ""),
+        }
+
+    def _mark_candidate_manifest_adopted(
+        self,
+        *,
+        manifest_path: str | None,
+        adoption_reason: str,
+    ) -> None:
+        if not manifest_path:
+            return
+        try:
+            p = Path(manifest_path)
+            if not p.is_file():
+                return
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return
+            data["adopted"] = True
+            data["adoption_reason"] = adoption_reason
+            p.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _ensure_selected_strategy_parent_lineage(
+        self,
+        *,
+        definition_name: str,
+        selected_node_id: str,
+        selected_strategy: StrategyCatalogEntry,
+    ) -> None:
+        requires = _strategy_requires(selected_strategy)
+        if not requires:
+            return
+        wm_obj = load_world_model_obj(self._wm.get(definition_name) or "")
+        if wm_obj is None:
+            return
+        dt = wm_obj.get("decision_tree")
+        nodes = dt.get("nodes") if isinstance(dt, dict) else None
+        if not isinstance(nodes, list):
+            return
+        adopted_node_ids = _adopted_strategy_node_ids_from_world_model(
+            wm_obj,
+            self._strategy_catalog or [],
+        )
+        target_parent_id = adopted_node_ids.get(requires[-1])
+        if not target_parent_id or target_parent_id == selected_node_id:
+            return
+        by_id = {
+            str(node.get("node_id") or ""): node
+            for node in nodes
+            if isinstance(node, dict) and node.get("node_id")
+        }
+        selected = by_id.get(selected_node_id)
+        target_parent = by_id.get(target_parent_id)
+        if not isinstance(selected, dict) or not isinstance(target_parent, dict):
+            return
+        if str(selected.get("parent_id") or "") == target_parent_id:
+            return
+
+        old_parent_id = str(selected.get("parent_id") or "")
+        old_parent = by_id.get(old_parent_id)
+        if isinstance(old_parent, dict) and isinstance(old_parent.get("children"), list):
+            old_parent["children"] = [
+                child_id for child_id in old_parent["children"] if str(child_id) != selected_node_id
+            ]
+        selected["parent_id"] = target_parent_id
+        children = target_parent.get("children")
+        if not isinstance(children, list):
+            children = []
+        if selected_node_id not in [str(child_id) for child_id in children]:
+            children.append(selected_node_id)
+        target_parent["children"] = children
+        selected["parent_strategy_lineage"] = list(
+            _adopted_strategy_ids_from_world_model(wm_obj, self._strategy_catalog or [])
+        )
+        selected["parent_lineage_repaired_by"] = "hard_strategy_dependency_gating"
+        dumped = dump_world_model_obj(wm_obj)
+        if dumped:
+            self._wm.set(definition_name, dumped)
+
     def _choose_executable_strategy_action_node_id(
         self,
         *,
         definition_name: str,
+        task: Any | None = None,
+        run_id: str | None = None,
+        round_index: int | None = None,
     ) -> tuple[str | None, list[dict[str, Any]]]:
         blocked: list[dict[str, Any]] = []
-        policy = "only_catalog_backed_strategy_nodes_are_executable"
         if self._strategy_catalog is None:
             return self._wm.choose_next_action_node_id(definition_name=definition_name), blocked
+        wm_json = self._wm.get(definition_name)
+        wm_obj = load_world_model_obj(wm_json or "")
+        if wm_obj is None:
+            return None, blocked
 
-        while True:
-            chosen = self._wm.choose_next_action_node_id(definition_name=definition_name)
-            if not chosen:
-                return None, blocked
-            node_obj = self._wm.get_node_obj(definition_name=definition_name, node_id=chosen)
-            entry = resolve_strategy_catalog_entry(node_obj or {}, self._strategy_catalog)
-            if entry is not None:
-                return chosen, blocked
-            item = {
-                "node_id": str(chosen),
-                "reason": "strategy_file_required_but_missing",
-                "policy": policy,
-            }
-            blocked.append(item)
-            self._block_strategy_action_node(
+        adopted_strategy_ids = set(
+            _adopted_strategy_ids_from_world_model(wm_obj, self._strategy_catalog)
+        )
+        executable: list[tuple[dict[str, Any], StrategyCatalogEntry]] = []
+        hard_policy = "hard_strategy_dependency_gating"
+        file_policy = "only_catalog_backed_strategy_nodes_are_executable"
+
+        for node in _open_frontier_action_nodes(wm_obj):
+            node_id = str(node.get("node_id") or "")
+            entry = resolve_strategy_catalog_entry(node, self._strategy_catalog)
+            if entry is None:
+                item = {
+                    "node_id": node_id,
+                    "reason": "strategy_file_required_but_missing",
+                    "policy": file_policy,
+                }
+                blocked.append(item)
+                self._block_strategy_action_node(
+                    definition_name=definition_name,
+                    node_id=node_id,
+                    reason=item["reason"],
+                    policy=item["policy"],
+                )
+                continue
+
+            if entry.id in adopted_strategy_ids and not _strategy_allow_reexecute(entry):
+                item = {
+                    "node_id": node_id,
+                    "strategy_id": entry.id,
+                    "reason": "strategy_already_adopted",
+                    "policy": hard_policy,
+                }
+                blocked.append(item)
+                self._block_strategy_action_node(
+                    definition_name=definition_name,
+                    node_id=node_id,
+                    reason=item["reason"],
+                    policy=item["policy"],
+                )
+                continue
+
+            missing = [req for req in _strategy_requires(entry) if req not in adopted_strategy_ids]
+            if missing:
+                item = {
+                    "node_id": node_id,
+                    "strategy_id": entry.id,
+                    "reason": "missing_prerequisites",
+                    "missing": missing,
+                    "policy": hard_policy,
+                }
+                blocked.append(item)
+                self._annotate_strategy_action_node_block(
+                    definition_name=definition_name,
+                    node_id=node_id,
+                    reason=item["reason"],
+                    policy=item["policy"],
+                    detail={"missing": missing},
+                )
+                continue
+
+            executable.append((node, entry))
+
+        wm_obj_after_blocks = load_world_model_obj(self._wm.get(definition_name) or "") or wm_obj
+        self._persist_blocked_actions_artifact(
+            task=task,
+            run_id=run_id,
+            round_index=round_index,
+            blocked_actions=blocked,
+            no_executable=not executable,
+        )
+        self._persist_strategy_state_artifact(
+            task=task,
+            run_id=run_id,
+            world_model_obj=wm_obj_after_blocks,
+            blocked_actions=blocked,
+        )
+        if not executable:
+            raise NoExecutableStrategyNodeError(blocked)
+
+        policy = getattr(getattr(self._wm, "_cfg", None), "selection_policy", None) or WorldModelSelectionPolicy()
+        selected = _sort_executable_strategy_nodes(
+            executable,
+            world_model_obj=wm_obj_after_blocks,
+            selection_policy=policy,
+        )[0]
+        selected_node, selected_strategy = selected
+        selected_id = str(selected_node.get("node_id") or "").strip()
+        if selected_id:
+            self._ensure_selected_strategy_parent_lineage(
                 definition_name=definition_name,
-                node_id=str(chosen),
-                reason=item["reason"],
-                policy=policy,
+                selected_node_id=selected_id,
+                selected_strategy=selected_strategy,
             )
+            wm_obj_after_parent = load_world_model_obj(self._wm.get(definition_name) or "")
+            if isinstance(wm_obj_after_parent, dict):
+                self._persist_strategy_state_artifact(
+                    task=task,
+                    run_id=run_id,
+                    world_model_obj=wm_obj_after_parent,
+                    blocked_actions=blocked,
+                )
+        return selected_id or None, blocked
 
     def _default_world_model_path(self, *, task: Any, run_id: str | None = None, include_run: bool = True) -> Optional[Path]:
         try:
@@ -746,9 +1316,16 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 if self._strategy_catalog is not None:
                     chosen_leaf, blocked_strategy_nodes = self._choose_executable_strategy_action_node_id(
                         definition_name=task.name,
+                        task=task,
+                        run_id=effective_run_id,
+                        round_index=cycle_start_round,
                     )
                 else:
                     chosen_leaf = self._wm.choose_next_action_node_id(definition_name=task.name)
+            except NoExecutableStrategyNodeError as exc:
+                blocked_strategy_nodes = list(exc.blocked or [])
+                _emit("[WARN] No executable strategy-backed open action nodes found; stopping.")
+                chosen_leaf = None
             except Exception:
                 chosen_leaf = None
             if not chosen_leaf:
@@ -789,6 +1366,10 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
 
             parent_id = str((node_obj or {}).get("parent_id") or "root")
             parent_is_root = parent_id == "root"
+            selected_strategy_context = self._strategy_context_for_node(
+                definition_name=task.name,
+                node_obj=node_obj,
+            )
             base_raw_code = ""
             base_score: float = -1.0  # comparable to cycle_best_score (task-defined score)
             base_eval: Optional[EvalResult] = None
@@ -970,6 +1551,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 if str(blk or "").strip()
                                 else str(chosen_action_text or "").strip()
                             ),
+                            strategy_context=selected_strategy_context,
                             blocked_strategy_nodes=blocked_strategy_nodes,
                         )
                         try:
@@ -1518,8 +2100,19 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         changed_paths=cycle_best_changed_paths,
                         diff_summary=cycle_best_diff_summary,
                     )
+                    self._mark_candidate_manifest_adopted(
+                        manifest_path=cycle_best_manifest_path,
+                        adoption_reason="selected_as_current_parent",
+                    )
                     _emit(render_world_model_status(self._wm.get(task.name)))
                     self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
+                    wm_after_attach = load_world_model_obj(self._wm.get(task.name) or "")
+                    if isinstance(wm_after_attach, dict):
+                        self._persist_strategy_state_artifact(
+                            task=task,
+                            run_id=effective_run_id,
+                            world_model_obj=wm_after_attach,
+                        )
 
                 with llm_log_context(
                     operator=str(getattr(task, "name", "") or ""),

@@ -34,6 +34,33 @@ def test_context_files_are_materialized_with_relative_paths(tmp_path):
     assert manifest["strategy_md"] == ctx.strategy_md
 
 
+def test_context_manifest_records_strategy_dependency_audit(tmp_path):
+    ctx = materialize_worktree_context(
+        project_dir=tmp_path,
+        strategy_markdown="# Strategy\n\nFull body.",
+        strategy_summary="Short bounded summary.",
+        eval_summary={"schema_version": 1, "eval_context_status": "no_prior_eval"},
+        eval_log="# Evaluation Log\n\nNo prior eval.",
+        strategy_context={
+            "strategy_id": "fa_multibuffer_soft_pipeline",
+            "requires": ["fa_qkv_two_level_l1_reuse"],
+            "dependencies_satisfied": True,
+            "parent_strategy_lineage": ["fa_qkv_two_level_l1_reuse"],
+            "parent_solution_id": "round_0001_attempt_0001",
+        },
+    )
+
+    manifest = json.loads((tmp_path / ctx.manifest_json).read_text(encoding="utf-8"))
+
+    assert manifest["strategy"] == {
+        "strategy_id": "fa_multibuffer_soft_pipeline",
+        "requires": ["fa_qkv_two_level_l1_reuse"],
+        "dependencies_satisfied": True,
+        "parent_strategy_lineage": ["fa_qkv_two_level_l1_reuse"],
+        "parent_solution_id": "round_0001_attempt_0001",
+    }
+
+
 def test_to_worktree_relative_path_rejects_escaped_paths(tmp_path):
     inside = tmp_path / ".ksearch" / "context" / "STRATEGY.md"
     inside.parent.mkdir(parents=True)

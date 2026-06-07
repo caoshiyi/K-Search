@@ -48,6 +48,8 @@ def _write_catalog(
         "difficulty_1_to_5": 3,
         "score_0_to_1": 0.7,
         "expected_vs_baseline_factor": 1.05,
+        "requires": [],
+        "allow_reexecute": False,
     }
     if entry_overrides:
         entry.update(entry_overrides)
@@ -81,6 +83,59 @@ class TestStrategyCatalogLoading:
         assert entry.difficulty_1_to_5 == 3
         assert entry.score_0_to_1 == 0.7
         assert entry.expected_vs_baseline_factor == 1.05
+        assert entry.requires == ()
+        assert entry.allow_reexecute is False
+
+    def test_catalog_loads_strategy_dependencies(self, tmp_path):
+        catalog_path = _write_catalog(tmp_path)
+        strategy_dir = tmp_path / "strategies"
+        (strategy_dir / "pipeline.md").write_text("# Pipeline\n", encoding="utf-8")
+        data = json.loads(catalog_path.read_text(encoding="utf-8"))
+        data["strategies"].append(
+            {
+                "id": "soft_pipeline",
+                "title": "Soft pipeline",
+                "summary": "Pipeline after UB reuse.",
+                "markdown_ref": "strategies/pipeline.md",
+                "requires": ["ub_reuse"],
+                "allow_reexecute": True,
+            }
+        )
+        catalog_path.write_text(json.dumps(data), encoding="utf-8")
+
+        entries = load_strategy_catalog(catalog_path)
+
+        pipeline = next(entry for entry in entries if entry.id == "soft_pipeline")
+        assert pipeline.requires == ("ub_reuse",)
+        assert pipeline.allow_reexecute is True
+
+    def test_unknown_strategy_dependency_rejected(self, tmp_path):
+        catalog_path = _write_catalog(
+            tmp_path,
+            entry_overrides={"requires": ["missing_strategy"]},
+        )
+
+        with pytest.raises(ValueError, match="requires unknown strategy id: missing_strategy"):
+            load_strategy_catalog(catalog_path)
+
+    def test_strategy_dependency_cycle_rejected(self, tmp_path):
+        catalog_path = _write_catalog(tmp_path, entry_overrides={"requires": ["soft_pipeline"]})
+        strategy_dir = tmp_path / "strategies"
+        (strategy_dir / "pipeline.md").write_text("# Pipeline\n", encoding="utf-8")
+        data = json.loads(catalog_path.read_text(encoding="utf-8"))
+        data["strategies"].append(
+            {
+                "id": "soft_pipeline",
+                "title": "Soft pipeline",
+                "summary": "Pipeline after UB reuse.",
+                "markdown_ref": "strategies/pipeline.md",
+                "requires": ["ub_reuse"],
+            }
+        )
+        catalog_path.write_text(json.dumps(data), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="strategy dependency cycle detected"):
+            load_strategy_catalog(catalog_path)
 
     def test_absolute_markdown_ref_rejected(self, tmp_path):
         absolute = str((tmp_path / "strategies" / "ub_reuse.md").resolve())

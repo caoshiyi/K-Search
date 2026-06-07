@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import logging
 import re
@@ -33,6 +34,12 @@ from k_search.kernel_generators.subagent_orchestration import (
     run_configured_subagent_flow,
     supports_configured_subagent_flow,
 )
+from k_search.kernel_generators.eval_context import build_eval_context_for_llm
+from k_search.kernel_generators.worktree_context import (
+    WorktreeContextPaths,
+    assert_no_absolute_paths_for_llm,
+    materialize_worktree_context,
+)
 from k_search.tasks.task_base import EvalResult, Solution
 from k_search.telemetry.context import TelemetryContext
 from k_search.telemetry.recorder import build_file_recorder
@@ -63,6 +70,13 @@ class AscendCAgenticCodegenRequest:
     task_name: str | None = None  # New: task_name for artifacts directory
     parent_candidate_id: str | None = None
     action_node_id: str | None = None
+    eval_result: EvalResult | None = None
+    strategy_markdown: str | None = None
+    strategy_summary: str | None = None
+    eval_summary: dict[str, Any] | None = None
+    eval_log: str | None = None
+    context_paths: WorktreeContextPaths | None = None
+    blocked_strategy_nodes: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -101,6 +115,48 @@ def _truncate(text: str, limit: int) -> str:
     if len(s) <= limit:
         return s
     return s[: max(0, limit - 40)].rstrip() + "\n[truncated for agentic prompt budget]"
+
+
+def _extract_bounded_strategy_summary(action_text: str, *, limit: int = 1200) -> str:
+    text = str(action_text or "").strip()
+    if not text:
+        return ""
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == "Full natural-language strategy markdown:":
+            break
+        if stripped.startswith("Full natural-language strategy markdown:"):
+            break
+        if stripped == "Referenced strategy document:":
+            break
+        lines.append(line)
+    summary = "\n".join(lines).strip() or text[:limit].strip()
+    if len(summary) > limit:
+        summary = summary[: max(0, limit - 24)].rstrip() + "\n[summary truncated]"
+    return summary
+
+
+def _render_eval_summary_for_prompt(eval_summary: dict[str, Any] | None, *, max_chars: int = 1800) -> str:
+    if not isinstance(eval_summary, dict):
+        return "(none)"
+    payload: dict[str, Any] = {}
+    for key in (
+        "eval_context_status",
+        "has_prior_candidate_eval",
+        "has_eval_log",
+        "compile_passed",
+        "correctness_passed",
+        "performance_available",
+        "diagnostic_kind",
+        "baseline",
+        "performance",
+        "message_for_llm",
+    ):
+        if key in eval_summary:
+            payload[key] = eval_summary[key]
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return _truncate(text, max_chars)
 
 
 def _build_fix_prompt(eval_result: EvalResult, fix_round: int, max_chars: int = 6000) -> str:
@@ -217,6 +273,43 @@ def _is_native_handoff_path(path: str) -> bool:
 
 def _candidate_changed_paths(paths: list[str]) -> list[str]:
     return [path for path in paths if not _is_native_handoff_path(path)]
+
+
+def _path_from_diff_header(line: str) -> str | None:
+    text = str(line or "")
+    if text.startswith("diff --git "):
+        parts = text.split()
+        if len(parts) >= 4:
+            path = parts[3]
+            return path[2:] if path.startswith("b/") else path
+    if text.startswith("+++ b/"):
+        return text[len("+++ b/") :].strip()
+    return None
+
+
+def _candidate_diff_text(diff_text: str) -> str:
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in str(diff_text or "").splitlines():
+        starts_block = line.startswith("diff --git ") or line.startswith("--- /dev/null")
+        if starts_block and current:
+            blocks.append(current)
+            current = []
+        current.append(line)
+    if current:
+        blocks.append(current)
+
+    kept: list[str] = []
+    for block in blocks:
+        path = None
+        for line in block[:6]:
+            candidate = _path_from_diff_header(line)
+            if candidate:
+                path = candidate
+        if path and is_native_runtime_path(path):
+            continue
+        kept.extend(block)
+    return "\n".join(kept)
 
 
 def _markdown_field_candidate(line: str) -> str:
@@ -697,6 +790,12 @@ class AscendCAgenticPromptBuilder:
             "perf_summary": _truncate(request.perf_summary, 2500),
             "trace_logs": _truncate(request.trace_logs, 4000),
         }
+        context_paths = request.context_paths
+        strategy_summary = _truncate(
+            request.strategy_summary or _extract_bounded_strategy_summary(request.action_text),
+            1200,
+        )
+        rendered_eval_summary = _render_eval_summary_for_prompt(request.eval_summary)
         code_map_status = "yes" if has_code_map else "no"
         code_map_instruction = (
             "CODE_MAP.md already exists: yes. Read it first and instruct designer/codegen/reviewer to read it before acting. "
@@ -716,6 +815,33 @@ class AscendCAgenticPromptBuilder:
                 "- Invoke exactly the subagent requested by the active stage.\n"
                 "- Do not invoke subagents outside the active stage's configured flow."
             )
+        if context_paths is not None:
+            context_block = (
+                "K-Search context files, relative to the candidate project root:\n"
+                f"- Strategy document: {context_paths.strategy_md}\n"
+                f"- Strategy summary: {context_paths.strategy_summary_md}\n"
+                f"- Evaluation summary: {context_paths.eval_summary_json}\n"
+                f"- Evaluation log: {context_paths.eval_log_md}\n"
+                f"- Context manifest: {context_paths.manifest_json}\n\n"
+                "Required reads before design/code edits:\n"
+                f"- Read {context_paths.strategy_md}.\n"
+                f"- Read {context_paths.eval_summary_json}.\n"
+                f"- Read {context_paths.eval_log_md} only if EVAL_SUMMARY.json has has_eval_log=true.\n"
+                "- Do not inspect raw evaluation logs.\n"
+                "- Do not paste these files into final messages.\n"
+                "- Do not use absolute paths.\n\n"
+                "Strategy summary:\n"
+                f"{strategy_summary or '(none)'}\n\n"
+                "Evaluation summary:\n"
+                f"{rendered_eval_summary or '(none)'}\n"
+            )
+            action_block = context_block
+            perf_block = "(see .ksearch/context/EVAL_SUMMARY.json)"
+            trace_block = "(see .ksearch/context/EVAL_LOG.md only when has_eval_log=true)"
+        else:
+            action_block = sections["action"]
+            perf_block = sections["perf_summary"] or "(none)"
+            trace_block = sections["trace_logs"] or "(none)"
         prompt = (
             "You are the main K-Search AscendC orchestration agent working inside a candidate project directory.\n"
             "IMPORTANT: You must ONLY edit files inside the current project directory (CWD). Do NOT use absolute paths from external directories.\n"
@@ -742,14 +868,18 @@ class AscendCAgenticPromptBuilder:
             "Task specification:\n"
             f"{sections['definition']}\n\n"
             "Chosen strategy/action/debug intent:\n"
-            f"{sections['action']}\n\n"
+            f"{action_block}\n\n"
             "Performance summary:\n"
-            f"{sections['perf_summary'] or '(none)'}\n\n"
-            "Recent failure or trace excerpt:\n"
-            f"{sections['trace_logs'] or '(none)'}\n"
+            f"{perf_block}\n\n"
+            "Evaluation diagnostic context:\n"
+            f"{trace_block}\n"
         )
         # 不变量:送达 LLM 的文本不得携带物理路径(worktree 或原始任务目录),统一抹成语义占位符。
         prompt = sanitize_worktree_paths(prompt, task_path=task_path)
+        if context_paths is not None:
+            assert_no_absolute_paths_for_llm(prompt)
+            assert_no_absolute_paths_for_llm(strategy_summary)
+            assert_no_absolute_paths_for_llm(rendered_eval_summary)
         if len(prompt) > self.max_chars:
             sizes = ", ".join(f"{name}={len(value)}" for name, value in sorted(sections.items()))
             raise ValueError(
@@ -868,6 +998,7 @@ class AscendCAgenticCycle:
         task_path = getattr(self.task, "task_path", None)
         if task_path is not None:
             prompt = prompt.replace(str(Path(task_path).expanduser().resolve()), "<PROJECT_ROOT>")
+        assert_no_absolute_paths_for_llm(prompt)
         return prompt
 
     def _telemetry_context(self, *, stage: str, extra: dict[str, Any] | None = None) -> TelemetryContext:
@@ -896,6 +1027,37 @@ class AscendCAgenticCycle:
         )
 
     def _build_prompt(self, request: AscendCAgenticCodegenRequest, *, has_code_map: bool) -> str:
+        assert self.wt_session is not None
+        if request.eval_summary is None or request.eval_log is None:
+            eval_summary, eval_log = build_eval_context_for_llm(
+                eval_result=request.eval_result,
+                task=self.task,
+            )
+        else:
+            eval_summary = dict(request.eval_summary)
+            eval_log = str(request.eval_log)
+        strategy_markdown = str(request.strategy_markdown or request.action_text or "").strip()
+        strategy_summary = str(
+            request.strategy_summary or _extract_bounded_strategy_summary(request.action_text)
+        ).strip()
+        assert_no_absolute_paths_for_llm(strategy_markdown)
+        assert_no_absolute_paths_for_llm(strategy_summary)
+        assert_no_absolute_paths_for_llm(eval_log)
+        paths = materialize_worktree_context(
+            project_dir=self.wt_session.project_dir,
+            strategy_markdown=strategy_markdown,
+            strategy_summary=strategy_summary,
+            eval_summary=eval_summary,
+            eval_log=eval_log,
+        )
+        request = replace(
+            request,
+            strategy_markdown=strategy_markdown,
+            strategy_summary=strategy_summary,
+            eval_summary=eval_summary,
+            eval_log=eval_log,
+            context_paths=paths,
+        )
         flow_policy_text = _render_flow_policy(
             initial_flow=self.runner.subagent_flow,
             repair_flow=self.runner.repair_subagent_flow,
@@ -1015,6 +1177,7 @@ class AscendCAgenticCycle:
         for fix_round in range(1, max(0, int(max_fix_rounds or 0)) + 1):
             if result.eval_result.is_passed():
                 break
+            self.request = replace(self.request, eval_result=result.eval_result)
             result = self.continue_fix(_build_repair_prompt(result.eval_result, fix_round))
         return result
 
@@ -1057,7 +1220,7 @@ class AscendCAgenticCycle:
                 "Rejecting this attempt instead of importing external task_path changes."
             )
 
-        diff_text = self.wt_session.project_diff_text()
+        diff_text = _candidate_diff_text(self.wt_session.project_diff_text())
         eval_result, eval_project_path = self._run_eval()
         self.curator_context.update(getattr(eval_result, "_ksearch_debug_evidence", {}) or {})
         knowledge_text = _run_curator_after_eval(
@@ -1120,6 +1283,7 @@ class AscendCAgenticCycle:
                 "run_id": run_id,
                 "task_name": task_name,
                 "action_node_id": self.request.action_node_id,
+                "blocked_strategy_nodes": list(self.request.blocked_strategy_nodes or []),
                 "parent_candidate_id": self.request.parent_candidate_id,
                 "round_num": self.request.round_num,
                 "attempt_idx": self.request.attempt_idx,

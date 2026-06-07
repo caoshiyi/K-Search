@@ -7,6 +7,7 @@ and only override prompt construction to inject the persistent world model JSON.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 from pathlib import Path
@@ -25,6 +26,7 @@ from k_search.kernel_generators.world_model_prompts import (
     get_improve_generated_code_prompt_from_text,
 )
 from k_search.kernel_generators.world_model_manager import WorldModelConfig, WorldModelManager, WorldModelSelectionPolicy
+from k_search.kernel_generators.strategy_injection import StrategyCatalogEntry
 from k_search.tasks.task_base import EvalResult
 from k_search.kernel_generators.world_model import (
     Prediction,
@@ -38,6 +40,52 @@ from k_search.kernel_generators.world_model import (
 from k_search.utils.solution_db import SolutionDB
 from k_search.utils.paths import get_ksearch_artifacts_dir, get_run_id, get_run_logs_dir
 from k_search.telemetry.narrative import RunNarrativeLogger
+
+
+class MissingStrategyFileError(RuntimeError):
+    pass
+
+
+class NoExecutableStrategyNodeError(RuntimeError):
+    def __init__(self, blocked: list[dict[str, Any]]) -> None:
+        super().__init__("no executable strategy-backed world-model action nodes")
+        self.blocked = list(blocked or [])
+
+
+def resolve_strategy_catalog_entry(
+    node: dict[str, Any],
+    strategy_catalog: list[StrategyCatalogEntry],
+) -> StrategyCatalogEntry | None:
+    """Resolve a world-model node to a markdown-backed catalog strategy.
+
+    Child or title-only nodes are intentionally not inferred from parents.
+    The only legacy fallback is pure sN -> catalog[N-1].
+    """
+    if not isinstance(node, dict) or not strategy_catalog:
+        return None
+    action = node.get("action") if isinstance(node.get("action"), dict) else {}
+    strategy_ref = action.get("strategy_ref") if isinstance(action.get("strategy_ref"), dict) else {}
+    ref_id = str(strategy_ref.get("id") or "").strip()
+    ref_markdown = str(strategy_ref.get("markdown_ref") or "").strip()
+    node_id = str(node.get("node_id") or "").strip()
+
+    entry: StrategyCatalogEntry | None = None
+    for candidate in strategy_catalog:
+        if ref_id and candidate.id == ref_id:
+            entry = candidate
+            break
+        if ref_markdown and candidate.markdown_ref == ref_markdown:
+            entry = candidate
+            break
+
+    if entry is None and re.fullmatch(r"s\d+", node_id):
+        idx = int(node_id[1:]) - 1
+        if 0 <= idx < len(strategy_catalog):
+            entry = strategy_catalog[idx]
+
+    if entry is None or not str(entry.markdown_ref or "").strip():
+        return None
+    return entry
 
 
 def _definition_text_for_codegen_prompt(
@@ -80,33 +128,78 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         """Render full markdown strategy text for a selected action node."""
         if not isinstance(node_obj, dict) or not self._strategy_catalog:
             return ""
-        action = node_obj.get("action") if isinstance(node_obj.get("action"), dict) else {}
-        strategy_ref = action.get("strategy_ref") if isinstance(action.get("strategy_ref"), dict) else {}
-        ref_id = str(strategy_ref.get("id") or "").strip()
-        ref_markdown = str(strategy_ref.get("markdown_ref") or "").strip()
-        node_id = str(node_obj.get("node_id") or "").strip()
-
-        entry = None
-        for candidate in self._strategy_catalog:
-            if ref_id and candidate.id == ref_id:
-                entry = candidate
-                break
-            if ref_markdown and candidate.markdown_ref == ref_markdown:
-                entry = candidate
-                break
-        if entry is None and node_id.startswith("s"):
-            try:
-                idx = int(node_id[1:]) - 1
-            except ValueError:
-                idx = -1
-            if 0 <= idx < len(self._strategy_catalog):
-                entry = self._strategy_catalog[idx]
+        entry = resolve_strategy_catalog_entry(node_obj, self._strategy_catalog)
         if entry is None:
             return ""
 
         from k_search.kernel_generators.strategy_injection import render_strategy_action_text
 
         return render_strategy_action_text(entry=entry)
+
+    def _block_strategy_action_node(
+        self,
+        *,
+        definition_name: str,
+        node_id: str,
+        reason: str,
+        policy: str,
+    ) -> None:
+        wm_json = self._wm.get(definition_name)
+        obj = load_world_model_obj(wm_json or "")
+        if obj is None:
+            return
+        dt = obj.get("decision_tree")
+        nodes = dt.get("nodes") if isinstance(dt, dict) else None
+        if not isinstance(nodes, list):
+            return
+        for node in nodes:
+            if not isinstance(node, dict) or str(node.get("node_id") or "") != str(node_id):
+                continue
+            action = node.get("action") if isinstance(node.get("action"), dict) else {}
+            action["status"] = "blocked"
+            action["blocked_reason"] = reason
+            action["blocked_policy"] = policy
+            node["action"] = action
+            node["blocked_reason"] = reason
+            node["blocked_policy"] = policy
+            node["notes"] = (
+                f"Blocked by K-Search policy: {reason}; policy={policy}."
+            )
+            break
+        dumped = dump_world_model_obj(obj)
+        if dumped:
+            self._wm.set(definition_name, dumped)
+
+    def _choose_executable_strategy_action_node_id(
+        self,
+        *,
+        definition_name: str,
+    ) -> tuple[str | None, list[dict[str, Any]]]:
+        blocked: list[dict[str, Any]] = []
+        policy = "only_catalog_backed_strategy_nodes_are_executable"
+        if self._strategy_catalog is None:
+            return self._wm.choose_next_action_node_id(definition_name=definition_name), blocked
+
+        while True:
+            chosen = self._wm.choose_next_action_node_id(definition_name=definition_name)
+            if not chosen:
+                return None, blocked
+            node_obj = self._wm.get_node_obj(definition_name=definition_name, node_id=chosen)
+            entry = resolve_strategy_catalog_entry(node_obj or {}, self._strategy_catalog)
+            if entry is not None:
+                return chosen, blocked
+            item = {
+                "node_id": str(chosen),
+                "reason": "strategy_file_required_but_missing",
+                "policy": policy,
+            }
+            blocked.append(item)
+            self._block_strategy_action_node(
+                definition_name=definition_name,
+                node_id=str(chosen),
+                reason=item["reason"],
+                policy=policy,
+            )
 
     def _default_world_model_path(self, *, task: Any, run_id: str | None = None, include_run: bool = True) -> Optional[Path]:
         try:
@@ -648,8 +741,14 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             _emit(render_world_model_status(wm_json))
             _emit(render_open_action_nodes_block(wm_json, max_items=8))
 
+            blocked_strategy_nodes: list[dict[str, Any]] = []
             try:
-                chosen_leaf = self._wm.choose_next_action_node_id(definition_name=task.name)
+                if self._strategy_catalog is not None:
+                    chosen_leaf, blocked_strategy_nodes = self._choose_executable_strategy_action_node_id(
+                        definition_name=task.name,
+                    )
+                else:
+                    chosen_leaf = self._wm.choose_next_action_node_id(definition_name=task.name)
             except Exception:
                 chosen_leaf = None
             if not chosen_leaf:
@@ -659,6 +758,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             self._wm.set_active_leaf_id(definition_name=task.name, node_id=chosen_leaf)
             node_obj = self._wm.get_node_obj(definition_name=task.name, node_id=chosen_leaf)
             chosen_action_text = None
+            strategy_text = ""
             blk = render_chosen_action_node_block(node_obj or {})
             if blk.strip():
                 chosen_action_text = blk.strip()
@@ -863,6 +963,14 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             task_name=agentic_task_name,
                             parent_candidate_id=cycle_best_candidate_id,
                             action_node_id=str(chosen_leaf) if chosen_leaf else None,
+                            eval_result=last_eval,
+                            strategy_markdown=str(strategy_text or chosen_action_text or ""),
+                            strategy_summary=(
+                                str(blk or "").strip()
+                                if str(blk or "").strip()
+                                else str(chosen_action_text or "").strip()
+                            ),
+                            blocked_strategy_nodes=blocked_strategy_nodes,
                         )
                         try:
                             if attempt_idx == 1:

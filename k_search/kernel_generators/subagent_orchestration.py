@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from k_search.kernel_generators.claude_agent_project_editor import ClaudeProjectEditResult
+from k_search.kernel_generators.worktree_context import assert_no_absolute_paths_for_llm
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +193,9 @@ def render_subagent_stage_prompt(
     ]
     if stage.include_base_prompt:
         parts.extend(["", "Base attempt context:", str(base_prompt or "").strip()])
-    return "\n".join(part for part in parts if part is not None).strip()
+    prompt = "\n".join(part for part in parts if part is not None).strip()
+    assert_no_absolute_paths_for_llm(prompt)
+    return prompt
 
 
 def _validate_stage_agent_is_in_flow(flow: SubagentFlowConfig, stage: SubagentStageConfig) -> None:

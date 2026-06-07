@@ -15,7 +15,11 @@
       ],
       "difficulty_1_to_5": 3,
       "score_0_to_1": 0.85,
-      "expected_vs_baseline_factor": 1.49
+      "expected_speedup": {
+        "factor": 1.49,
+        "relative_to": "original_baseline",
+        "source": "strategy_catalog"
+      }
     },
     {
       "id": "fa_multibuffer_soft_pipeline",
@@ -30,7 +34,17 @@
       ],
       "difficulty_1_to_5": 4,
       "score_0_to_1": 0.9,
-      "expected_vs_baseline_factor": 1.63
+      "requires": [
+        "fa_qkv_two_level_l1_reuse"
+      ],
+      "expected_speedup": {
+        "factor": 1.63,
+        "relative_to": "parent_strategy",
+        "parent_strategy_id": "fa_qkv_two_level_l1_reuse",
+        "parent_latency_us": 1590.0,
+        "target_latency_us": 977.0,
+        "source": "strategy_catalog"
+      }
     }
   ]
 }

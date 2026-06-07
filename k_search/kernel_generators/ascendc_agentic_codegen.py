@@ -10,17 +10,25 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from k_search.kernel_generators.agentic_candidate_artifacts import write_agentic_candidate_artifacts
+from k_search.kernel_generators.agentic_candidate_artifacts import (
+    get_agentic_candidate_artifact_dir,
+    write_agentic_candidate_artifacts,
+)
 from k_search.kernel_generators.agentic_worktree import create_agentic_worktree
 from k_search.kernel_generators.candidate_patch import CandidatePatch
 from k_search.kernel_generators.claude_assets import materialize_claude_project_assets
 from k_search.kernel_generators.memory import CODE_MAP, KNOWLEDGE, MemoryStore
+from k_search.kernel_generators.code_map_lineage import (
+    CodeMapReuseContext,
+    evaluate_code_map_reuse,
+)
 from k_search.kernel_generators.claude_agent_project_editor import (
     ClaudeAgentProjectEditorClient,
     ClaudeProjectEditResult,
     ClaudeProjectEditorSession,
 )
 from k_search.kernel_generators.project_snapshot import ProjectSnapshot, create_project_snapshot
+from k_search.kernel_generators.stage_prompt_artifacts import StagePromptSink
 from k_search.kernel_generators.runtime_artifacts import (
     NATIVE_DEBUG_EVIDENCE_FILES,
     NATIVE_HANDOFF_FILES,
@@ -248,29 +256,18 @@ def _build_repair_prompt(eval_result: EvalResult, fix_round: int, max_chars: int
     return _wrap_repair_prompt(_build_fix_prompt(eval_result, fix_round=fix_round, max_chars=max_chars))
 
 
-def _render_flow_policy(*, initial_flow: SubagentFlowConfig, repair_flow: SubagentFlowConfig) -> str:
-    def names(flow: SubagentFlowConfig) -> str:
-        return ", ".join(stage.agent for stage in flow.stages)
-
-    initial_agents = {stage.agent for stage in initial_flow.stages}
-    repair_agents = {stage.agent for stage in repair_flow.stages}
-    lines = [
-        "Subagent usage policy:",
-        f"- Flow names: initial_codegen={initial_flow.name}; eval_failure_repair={repair_flow.name}.",
-        f"- Initial codegen flow agents: {names(initial_flow)}.",
-        f"- Eval-failure repair flow agents: {names(repair_flow)}.",
-    ]
-    if "bug-fixer" not in initial_agents:
-        lines.append("- Do not invoke bug-fixer during initial_codegen.")
-    if "bug-fixer" in repair_agents:
-        lines.append("- Invoke bug-fixer during eval_failure_repair when the active repair stage requests it.")
-    lines.extend(
-        [
-            "- Invoke exactly the subagent requested by the active stage.",
-            "- Do not invoke subagents outside the active stage's configured flow.",
-        ]
-    )
-    return "\n".join(lines) + "\n"
+def _render_legacy_single_agent_prompt(base_prompt: str, flow: SubagentFlowConfig | None) -> str:
+    if flow is None:
+        return str(base_prompt or "")
+    stage_names = " -> ".join(stage.agent for stage in flow.stages)
+    return (
+        "Legacy single-agent compatibility mode is explicitly enabled by "
+        "KSEARCH_ALLOW_LEGACY_SINGLE_AGENT_FLOW.\n"
+        f"Required native subagent flow: {stage_names}.\n"
+        "If CODE_MAP.md is missing, Use the code-reader subagent to create CODE_MAP.md before detailed design.\n"
+        "Run these responsibilities yourself in order and write all required handoff files.\n\n"
+        f"{str(base_prompt or '').strip()}"
+    ).strip()
 
 
 def _edit_project_with_optional_telemetry(
@@ -289,6 +286,10 @@ def _edit_project_with_optional_telemetry(
             flow=subagent_flow,
             telemetry_recorder=telemetry_recorder,
         )
+    if subagent_flow is not None:
+        if not _env_truthy("KSEARCH_ALLOW_LEGACY_SINGLE_AGENT_FLOW"):
+            raise RuntimeError("Configured subagent flow is required in native subagent mode")
+        prompt = _render_legacy_single_agent_prompt(prompt, subagent_flow)
     try:
         return editor_client.edit_project(
             project_dir=project_dir,
@@ -672,10 +673,30 @@ def _materialize_native_assets_baseline(wt_session: Any) -> None:
     wt_session.commit_all("ksearch native claude assets baseline")
 
 
-def _materialize_existing_code_map(store: MemoryStore | None, project_dir: Path) -> bool:
+def _code_map_reuse_context_for_request(request: AscendCAgenticCodegenRequest) -> CodeMapReuseContext:
+    strategy_context = request.strategy_context if isinstance(request.strategy_context, dict) else {}
+    parent_solution_id = str(strategy_context.get("parent_solution_id") or "").strip() or None
+    parent_branch_id = (
+        str(strategy_context.get("parent_branch_id") or strategy_context.get("parent_action_node_id") or "").strip()
+        or None
+    )
+    return CodeMapReuseContext(
+        mode="action",
+        parent_solution_id=parent_solution_id,
+        parent_branch_id=parent_branch_id,
+        branch_id=str(strategy_context.get("action_node_id") or request.action_node_id or "").strip() or None,
+    )
+
+
+def _materialize_existing_code_map(
+    store: MemoryStore | None,
+    project_dir: Path,
+    *,
+    reuse_context: CodeMapReuseContext | None = None,
+) -> bool:
     if store is None:
         return False
-    return store.materialize(CODE_MAP, project_dir)
+    return store.materialize(CODE_MAP, project_dir, code_map_reuse_context=reuse_context)
 
 
 def _materialize_existing_knowledge(store: MemoryStore | None, project_dir: Path) -> bool:
@@ -816,7 +837,6 @@ class AscendCAgenticPromptBuilder:
         *,
         has_code_map: bool = False,
         task_path: str | None = None,
-        flow_policy_text: str | None = None,
     ) -> str:
         sections = {
             "definition": _truncate(request.definition_text, 5000),
@@ -832,23 +852,11 @@ class AscendCAgenticPromptBuilder:
         rendered_eval_summary = _render_eval_summary_for_prompt(request.eval_summary)
         code_map_status = "yes" if has_code_map else "no"
         code_map_instruction = (
-            "CODE_MAP.md already exists: yes. Read it first and instruct designer/codegen/reviewer to read it before acting. "
+            "CODE_MAP.md already exists: yes. Read it first in current stages that need project structure. "
             "After editing code, update the affected sections of CODE_MAP.md to keep it accurate.\n"
             if has_code_map
-            else "CODE_MAP.md already exists: no. Use the code-reader subagent to create CODE_MAP.md before detailed design.\n"
+            else "CODE_MAP.md already exists: no. The configured stage prompt will create CODE_MAP.md when needed.\n"
         )
-        flow_policy = str(flow_policy_text or "").strip()
-        if not flow_policy:
-            flow_policy = (
-                "Subagent usage policy:\n"
-                "- Flow names: initial_codegen=initial_codegen; eval_failure_repair=eval_failure_repair.\n"
-                "- Initial codegen flow agents: code-reader, designer, codegen, reviewer.\n"
-                "- Eval-failure repair flow agents: bug-fixer, reviewer.\n"
-                "- Do not invoke bug-fixer during initial_codegen.\n"
-                "- Invoke bug-fixer during eval_failure_repair when the active repair stage requests it.\n"
-                "- Invoke exactly the subagent requested by the active stage.\n"
-                "- Do not invoke subagents outside the active stage's configured flow."
-            )
         if context_paths is not None:
             dependency_status = _render_strategy_dependency_status(request.strategy_context)
             dependency_block = f"{dependency_status}\n\n" if dependency_status else ""
@@ -889,15 +897,9 @@ class AscendCAgenticPromptBuilder:
             f"CODE_MAP.md already exists: {code_map_status}\n\n"
             "Available tools: Read/Grep/Glob/Edit/Write, Skill, and Agent. Bash is disabled.\n"
             "Use the ascendc-codegen and ascendc-api-reference skills when relevant.\n"
-            "Required native subagent flow: code-reader -> designer -> codegen -> reviewer.\n"
-            f"{flow_policy}\n"
             + code_map_instruction
-            + "The designer subagent must write ASCENDC_DESIGN.md as the detailed design.\n"
-            "The codegen subagent must write IMPLEMENTATION_EXECUTION_PLAN.md before source edits and IMPLEMENTATION_HANDOFF.md after source edits.\n"
-            "The codegen subagent may write IMPLEMENTATION_DEVIATIONS.md when design and real source constraints diverge.\n"
-            "The reviewer subagent must write REVIEW_NOTES.md.\n"
-            "CODE_MAP.md, ASCENDC_DESIGN.md, IMPLEMENTATION_EXECUTION_PLAN.md, IMPLEMENTATION_HANDOFF.md, optional IMPLEMENTATION_DEVIATIONS.md, and REVIEW_NOTES.md are the trusted cross-subagent handoffs.\n"
-            "Every subagent final message must be short and contain only status, files_written, and next.\n"
+            + "Runtime handoff files include CODE_MAP.md, ASCENDC_DESIGN.md, IMPLEMENTATION_EXECUTION_PLAN.md, IMPLEMENTATION_HANDOFF.md, optional IMPLEMENTATION_DEVIATIONS.md, and REVIEW_NOTES.md.\n"
+            "Agent final messages must be short and contain only status, files_written, and next.\n"
             "Do not paste CODE_MAP.md, ASCENDC_DESIGN.md, IMPLEMENTATION_EXECUTION_PLAN.md, IMPLEMENTATION_HANDOFF.md, IMPLEMENTATION_DEVIATIONS.md, REVIEW_NOTES.md, or source files into final messages.\n"
             + "Do not read or modify .git, build directories, caches, generated logs, or large artifacts.\n"
             "Preserve operator semantics, public entry points, host tiling contract, correctness harness behavior, and build layout.\n"
@@ -949,6 +951,8 @@ class AscendCAgenticCycle:
         self.curator_context: dict[str, str] = {}
         self.last_handoff_texts: dict[str, str] = {}
         self.last_edit_result: ClaudeProjectEditResult | None = None
+        self.code_map_reuse_manifest: dict[str, Any] = {"reused": False, "reason": "not_checked"}
+        self.last_stage_prompt_records: list[dict[str, Any]] = []
         self._closed = False
         self._initial_has_run = False
 
@@ -985,7 +989,19 @@ class AscendCAgenticCycle:
                 "off",
             }
             self.store = MemoryStore.for_task(self.task) if code_map_enabled else None
-            self.has_code_map = _materialize_existing_code_map(self.store, self.wt_session.project_dir)
+            reuse_context = _code_map_reuse_context_for_request(self.request)
+            meta = self.store.load_meta(CODE_MAP) if self.store is not None else None
+            decision = evaluate_code_map_reuse(meta, reuse_context) if self.store is not None else None
+            self.code_map_reuse_manifest = (
+                decision.to_manifest()
+                if decision is not None
+                else {"reused": False, "reason": "code_map_disabled"}
+            )
+            self.has_code_map = _materialize_existing_code_map(
+                self.store,
+                self.wt_session.project_dir,
+                reuse_context=reuse_context,
+            )
             _materialize_existing_knowledge(self.store, self.wt_session.project_dir)
 
             if supports_configured_subagent_flow(self.runner.editor_client):
@@ -1055,6 +1071,17 @@ class AscendCAgenticCycle:
             extra=extra,
         )
 
+    def _stage_prompt_sink(self) -> StagePromptSink:
+        return StagePromptSink(
+            get_agentic_candidate_artifact_dir(
+                artifacts_dir=getattr(self.task, "artifacts_dir", None),
+                task_name=self.task_name,
+                run_id=self.run_id,
+                round_num=self.request.round_num,
+                attempt_idx=self.request.attempt_idx,
+            )
+        )
+
     def _curator_telemetry_context(self) -> TelemetryContext:
         return _build_curator_telemetry_context(
             task=self.task,
@@ -1096,15 +1123,10 @@ class AscendCAgenticCycle:
             eval_log=eval_log,
             context_paths=paths,
         )
-        flow_policy_text = _render_flow_policy(
-            initial_flow=self.runner.subagent_flow,
-            repair_flow=self.runner.repair_subagent_flow,
-        )
         prompt = self.runner.prompt_builder.build(
             request,
             has_code_map=has_code_map,
             task_path=self._task_path_text(),
-            flow_policy_text=flow_policy_text,
         )
         return self._sanitize_prompt(prompt)
 
@@ -1114,6 +1136,7 @@ class AscendCAgenticCycle:
         prompt: str,
         flow: SubagentFlowConfig,
         telemetry_recorder: Any,
+        stage_prompt_sink: StagePromptSink,
     ) -> ClaudeProjectEditResult:
         assert self.wt_session is not None
         if supports_configured_subagent_flow(self.runner.editor_client):
@@ -1125,13 +1148,15 @@ class AscendCAgenticCycle:
                 telemetry_recorder=telemetry_recorder,
                 session=self.editor_session,
                 close_session_on_exit=False,
+                stage_prompt_sink=stage_prompt_sink,
+                prompt_hygiene_known_paths=[getattr(self.task, "task_path", "")],
             )
         return _edit_project_with_optional_telemetry(
             self.runner.editor_client,
             project_dir=self.wt_session.project_dir,
             prompt=prompt,
             telemetry_recorder=telemetry_recorder,
-            subagent_flow=None,
+            subagent_flow=flow,
         )
 
     def run_initial(self) -> AscendCAgenticCodegenResult:
@@ -1144,14 +1169,17 @@ class AscendCAgenticCycle:
             context=self._telemetry_context(stage=self.request.mode),
             prompt=prompt,
         )
+        stage_prompt_sink = self._stage_prompt_sink()
         try:
             edit_result = self._run_flow(
                 prompt=prompt,
                 flow=self.runner.subagent_flow,
                 telemetry_recorder=telemetry_recorder,
+                stage_prompt_sink=stage_prompt_sink,
             )
         finally:
             telemetry_recorder.close()
+        self.last_stage_prompt_records = stage_prompt_sink.records
         return self._finalize_attempt_result(
             edit_result=edit_result,
             prompt=prompt,
@@ -1190,14 +1218,17 @@ class AscendCAgenticCycle:
             context=self._telemetry_context(stage="fix"),
             prompt=prompt,
         )
+        stage_prompt_sink = self._stage_prompt_sink()
         try:
             edit_result = self._run_flow(
                 prompt=prompt,
                 flow=self.runner.repair_subagent_flow,
                 telemetry_recorder=telemetry_recorder,
+                stage_prompt_sink=stage_prompt_sink,
             )
         finally:
             telemetry_recorder.close()
+        self.last_stage_prompt_records = stage_prompt_sink.records
         return self._finalize_attempt_result(
             edit_result=edit_result,
             prompt=prompt,
@@ -1317,6 +1348,7 @@ class AscendCAgenticCycle:
             action_node_id=self.request.action_node_id,
             model_name=self.runner.model_name,
             handoff_files=handoff_texts,
+            stage_prompt_records=self.last_stage_prompt_records,
             metadata={
                 "run_id": run_id,
                 "task_name": task_name,
@@ -1351,6 +1383,7 @@ class AscendCAgenticCycle:
                 ),
                 "adopted": False,
                 "adoption_reason": "not_selected_as_parent",
+                "code_map_reuse": dict(self.code_map_reuse_manifest),
                 "project_path": str(self.wt_session.project_dir),
                 "eval_project_path": eval_project_path,
                 "evaluator_mutated_project": False,

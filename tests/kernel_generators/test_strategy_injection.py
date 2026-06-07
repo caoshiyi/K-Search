@@ -277,7 +277,12 @@ class TestWorldModelStrategySeeding:
         assert node["action"]["description"] == "Cache reused tiles in UB to reduce GM traffic."
         assert node["action"]["score_0_to_1"] == 0.7
         assert node["action"]["difficulty_1_to_5"] == 3
-        assert node["action"]["expected_vs_baseline_factor"] == 1.05
+        assert node["action"]["expected_speedup"] == {
+            "factor": 1.05,
+            "relative_to": "unspecified_legacy",
+            "source": "legacy_expected_vs_baseline_factor",
+        }
+        assert "expected_vs_baseline_factor" not in node["action"]
         assert "Implementation checklist" not in json.dumps(node)
 
     def test_chosen_action_prompt_includes_referenced_markdown(self, tmp_path):

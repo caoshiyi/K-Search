@@ -69,6 +69,11 @@ def _entry(**overrides):
         difficulty_1_to_5=2,
         score_0_to_1=0.8,
         expected_vs_baseline_factor=1.47,
+        expected_speedup={
+            "factor": 1.47,
+            "relative_to": "original_baseline",
+            "source": "strategy_catalog",
+        },
     )
     return StrategyCatalogEntry(
         id=overrides.get("id", entry.id),
@@ -83,29 +88,35 @@ def _entry(**overrides):
             "expected_vs_baseline_factor",
             entry.expected_vs_baseline_factor,
         ),
+        expected_speedup=overrides.get("expected_speedup", entry.expected_speedup),
     )
 
 
-def test_build_action_node_with_expected_vs_baseline_factor():
-    """Test that expected speedup uses entry.expected_vs_baseline_factor."""
+def test_build_action_node_with_expected_speedup_schema():
+    """Test that expected speedup uses explicit baseline semantics."""
     node = _build_action_node(0, _entry(), "natural_language")
 
     action = node.get("action", {})
-    expected_speedup = action.get("expected_vs_baseline_factor")
+    expected_speedup = action.get("expected_speedup")
 
-    assert expected_speedup == 1.47
+    assert expected_speedup == {
+        "factor": 1.47,
+        "relative_to": "original_baseline",
+        "source": "strategy_catalog",
+    }
+    assert "expected_vs_baseline_factor" not in action
 
 
-def test_build_action_node_without_expected_vs_baseline_factor():
+def test_build_action_node_without_expected_speedup():
     """Test that expected_speedup is None when metadata is missing."""
     node = _build_action_node(
         1,
-        _entry(id="S2", expected_vs_baseline_factor=None, score_0_to_1=0.5),
+        _entry(id="S2", expected_vs_baseline_factor=None, expected_speedup=None, score_0_to_1=0.5),
         "natural_language",
     )
 
     action = node.get("action", {})
-    expected_speedup = action.get("expected_vs_baseline_factor")
+    expected_speedup = action.get("expected_speedup")
 
     assert expected_speedup is None
 

@@ -109,6 +109,7 @@ def test_can_use_tool_rewrites_omitted_grep_path_to_project_root(tmp_path):
 def test_runner_fails_without_syncing_external_task_path_when_no_files_changed(tmp_path, monkeypatch):
     import k_search.kernel_generators.ascendc_agentic_codegen as codegen
 
+    monkeypatch.setenv("KSEARCH_ALLOW_LEGACY_SINGLE_AGENT_FLOW", "1")
     task_dir = tmp_path / "task"
     task_dir.mkdir()
     (task_dir / "kernel.cpp").write_text("original\n", encoding="utf-8")
@@ -199,6 +200,7 @@ def test_agentic_changed_paths_allowlist(tmp_path):
 
 def test_eval_copy_mutation_does_not_pollute_candidate_solution(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    monkeypatch.setenv("KSEARCH_ALLOW_LEGACY_SINGLE_AGENT_FLOW", "1")
     task_dir = tmp_path / "task"
     task_dir.mkdir()
     (task_dir / "kernel.cpp").write_text("original\n", encoding="utf-8")

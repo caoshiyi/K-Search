@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from k_search.kernel_generators.baseline_model import normalize_expected_speedup
 from k_search.tasks.task_base import EvalResult
 
 BASE_DIMENSIONS: tuple[str, ...] = (
@@ -112,7 +113,7 @@ WORLD_MODEL_JSON_SCHEMA_GUIDE = {
                     "description": "",
                     "difficulty_1_to_5": 3,
                     "score_0_to_1": 0.0,
-                    "expected_vs_baseline_factor": None,
+                    "expected_speedup": None,
                     "rationale": "",
                 },
             }
@@ -499,6 +500,10 @@ def compact_world_model_json_for_prompt(world_model_json: str, *, max_chars: int
             sr = n.get("solution_ref") if isinstance(n.get("solution_ref"), dict) else {}
             ev = sr.get("eval") if isinstance(sr.get("eval"), dict) else {}
             act = n.get("action") if isinstance(n.get("action"), dict) else {}
+            try:
+                expected_speedup = normalize_expected_speedup(act)
+            except Exception:
+                expected_speedup = None
             return {
                 "node_id": n.get("node_id"),
                 "parent_id": n.get("parent_id"),
@@ -517,7 +522,7 @@ def compact_world_model_json_for_prompt(world_model_json: str, *, max_chars: int
                     "title": str(act.get("title", "") or "").strip(),
                     "difficulty_1_to_5": act.get("difficulty_1_to_5", act.get("difficulty_0_to_3", 3)),
                     "score_0_to_1": act.get("score_0_to_1", 0.0),
-                    "expected_vs_baseline_factor": act.get("expected_vs_baseline_factor", None),
+                    "expected_speedup": expected_speedup,
                 },
             }
 
@@ -661,10 +666,9 @@ def render_chosen_action_node_block(node: dict) -> str:
     desc = str(act.get("description") or "").strip()
     diff = act.get("difficulty_1_to_5", act.get("difficulty_0_to_3", None))
     try:
-        vb = act.get("expected_vs_baseline_factor", None)
-        vb_s = "?" if vb is None else f"{float(vb):.2f}x"
+        expected_speedup = normalize_expected_speedup(act)
     except Exception:
-        vb_s = "?"
+        expected_speedup = None
     why = str(act.get("rationale") or "").strip()
 
     lines: list[str] = []
@@ -677,8 +681,11 @@ def render_chosen_action_node_block(node: dict) -> str:
         lines.append(f"- difficulty_1_to_5: {int(diff)}")
     if desc:
         lines.append(f"- description: {desc}")
-    if vb_s != "?":
-        lines.append(f"- expected_vs_baseline_factor: {vb_s}")
+    if expected_speedup:
+        lines.append(
+            "- expected_speedup: "
+            + json.dumps(expected_speedup, ensure_ascii=False, sort_keys=True)
+        )
     if why:
         lines.append(f"- rationale: {why}")
     return "\n\n" + "\n".join(lines).strip() + "\n"
@@ -1054,7 +1061,7 @@ def build_decision_tree_edit_prompt(
         "    - next bet: 1-2 sentences on what to try next and why\n"
         "- You MUST update existing nodes via update_node according to the evidence:\n"
         "  - overall_rating_0_to_10 and confidence_0_to_1\n"
-        "  - and node.action.score_0_to_1 (and expected_vs_baseline_factor if a baseline exists)\n"
+        "  - and node.action.score_0_to_1 (and expected_speedup if a baseline relationship is known)\n"
         "  - and node.action.difficulty_1_to_5 for the relevant OPEN action nodes (especially the chosen/active one)\n"
         "  - and impacts.{memory_bandwidth,register_pressure,compute_intensity_and_hw_fit}.rating_0_to_10/risk/notes for the relevant nodes\n"
         "- CRITICAL: do NOT leave placeholders at 0/0.0. If a value is uncertain, pick a reasonable prior (e.g., rating 4-6, confidence 0.3-0.6).\n"
@@ -1063,7 +1070,7 @@ def build_decision_tree_edit_prompt(
         "    or impacts.*.rating_0_to_10 for the chosen/active node (and any directly implicated siblings/parents).\n"
         "- If FOLLOW_THROUGH is no, you MUST downgrade the chosen/active node's overall_rating/confidence/score to reflect misalignment.\n"
         "  (Optionally, if you still believe the original intent is good, preserve it as a separate OPEN action node, but keep new nodes <=3.)\n"
-        "- If prediction.expected_vs_baseline_factor exists and eval_result.mean_vs_baseline_factor exists and they differ materially,\n"
+        "- If prediction.expected_speedup.factor exists and the matching eval_result speedup differs materially,\n"
         "  add a PERF_GAP block to notes with expected vs observed and the hypothesized reason.\n\n"
         "Task:\n"
         "- Propose a SMALL set of edits (update, insert, delete) to improve the tree given the new evidence.\n"
@@ -1219,7 +1226,7 @@ def _normalize_world_model_obj(obj: dict[str, Any]) -> dict[str, Any]:
             "description": "",
             "difficulty_1_to_5": 3,
             "score_0_to_1": 0.0,
-            "expected_vs_baseline_factor": None,
+            "expected_speedup": None,
             "rationale": "",
         }
         if isinstance(act, dict):
@@ -1255,11 +1262,10 @@ def _normalize_world_model_obj(obj: dict[str, Any]) -> dict[str, Any]:
             if s01 > 1.0:
                 s01 = 1.0
             act_norm["score_0_to_1"] = s01
-            evb = act.get("expected_vs_baseline_factor", None)
             try:
-                act_norm["expected_vs_baseline_factor"] = float(evb) if evb is not None else None
+                act_norm["expected_speedup"] = normalize_expected_speedup(act)
             except Exception:
-                act_norm["expected_vs_baseline_factor"] = None
+                act_norm["expected_speedup"] = None
             act_norm["rationale"] = str(act.get("rationale", "") or "").strip()
             for key in (
                 "status",
@@ -1604,9 +1610,13 @@ def build_action_ranking_prompt(
             {"action_id": "a5", "score": 0.25, "reason": "Exploration is useful, but prioritize more targeted changes first."},
         ],
         "prediction": {
+            "expected_speedup": {
+                "factor": 1.05,
+                "relative_to": "current_parent_solution",
+                "source": "world_model_prediction"
+            },
             "expected_speedup_factor": 1.15,
             "expected_latency_ms": None,
-            "expected_vs_baseline_factor": 1.05,
             "confidence": 0.55,
             "rationale": "Reducing register pressure should improve occupancy and reduce spill traffic."
         },
@@ -1644,9 +1654,9 @@ def build_action_ranking_prompt(
         "    ... 5 total ...\n"
         "  ],\n"
         '  "prediction": {\n'
+        '    "expected_speedup": {"factor": null, "relative_to": "current_parent_solution", "source": "world_model_prediction"},\n'
         '    "expected_speedup_factor": null,\n'
         '    "expected_latency_ms": null,\n'
-        '    "expected_vs_baseline_factor": null,\n'
         '    "confidence": 0.5,\n'
         '    "rationale": ""\n'
         "  }\n"
@@ -1672,7 +1682,7 @@ def build_action_ranking_prompt(
         "- reason is 1-2 sentences, grounded in world model + current code excerpt + eval_result.\n"
         "- Actions should be specific (e.g., propose concrete tiling/scheduling/layout/pipeline changes), not generic advice.\n"
         "- prediction confidence must be in [0,1]; other prediction fields may be null.\n"
-        "- If a baseline target is provided, prediction.expected_vs_baseline_factor should be your primary predicted metric.\n"
+        "- If a baseline target is provided, prediction.expected_speedup should state factor and relative_to explicitly.\n"
         "- Output JSON only (no markdown, no backticks, no commentary).\n"
     )
 
@@ -1786,11 +1796,13 @@ def try_parse_action_ranking_json(
                 return float(x) if x is not None else None
             except Exception:
                 return None
+        speedup_obj = pred_obj.get("expected_speedup") if isinstance(pred_obj.get("expected_speedup"), dict) else {}
+        explicit_factor = speedup_obj.get("factor") if isinstance(speedup_obj, dict) else None
 
         pred = Prediction(
             expected_speedup_factor=_f(pred_obj.get("expected_speedup_factor")),
             expected_latency_ms=_f(pred_obj.get("expected_latency_ms")),
-            expected_vs_baseline_factor=_f(pred_obj.get("expected_vs_baseline_factor")),
+            expected_vs_baseline_factor=_f(explicit_factor if explicit_factor is not None else pred_obj.get("expected_vs_baseline_factor")),
             confidence=conf,
             rationale=str(pred_obj.get("rationale", "") or "").strip(),
         )

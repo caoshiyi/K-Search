@@ -113,14 +113,37 @@ def _performance_summary(eval_result: EvalResult) -> dict[str, Any]:
     return {key: value for key, value in perf.items() if value is not None}
 
 
+def _baseline_summary(*, eval_result: EvalResult | None, task: Any) -> dict[str, Any]:
+    metrics = getattr(eval_result, "metrics", None) if eval_result is not None else None
+    metrics = metrics if isinstance(metrics, dict) else {}
+    original_us = (
+        _ms_to_us(getattr(eval_result, "reference_latency_ms", None))
+        if eval_result is not None
+        else None
+    )
+    reference_ms = getattr(task, "reference_latency_ms", None)
+    baseline = {
+        "original_baseline_latency_us": original_us,
+        "original_baseline_source": (
+            "eval_result.reference_latency_ms" if original_us is not None else None
+        ),
+        "parent_latency_us": _perf_value_us(metrics, "parent_latency_us", "parent_latency_ms"),
+        "parent_solution_id": metrics.get("parent_solution_id"),
+        "parent_strategy_id": metrics.get("parent_strategy_id"),
+        "reference_latency_us": _ms_to_us(reference_ms),
+        "reference_source": "task.reference_latency_ms" if _ms_to_us(reference_ms) is not None else None,
+    }
+    return baseline
+
+
 def build_eval_context_for_llm(
     *,
     eval_result: EvalResult | None,
     task: Any,
 ) -> tuple[dict[str, Any], str]:
     if eval_result is None:
-        reference_latency_ms = getattr(task, "reference_latency_ms", None)
-        baseline_us = _ms_to_us(reference_latency_ms)
+        baseline = _baseline_summary(eval_result=None, task=task)
+        baseline_us = baseline.get("reference_latency_us")
         if baseline_us is not None:
             summary = _base_summary("reference_only", has_prior_candidate_eval=False)
             summary.update(
@@ -129,10 +152,7 @@ def build_eval_context_for_llm(
                     "compile_passed": None,
                     "correctness_passed": None,
                     "performance_available": False,
-                    "baseline": {
-                        "reference_latency_us": baseline_us,
-                        "source": "task.reference_latency_ms",
-                    },
+                    "baseline": baseline,
                     "message_for_llm": (
                         "No previous candidate evaluation exists. Use STRATEGY.md and task "
                         "specification. Reference latency is baseline context only."
@@ -198,6 +218,7 @@ def build_eval_context_for_llm(
                 "correctness_passed": True,
                 "performance_available": True,
                 "diagnostic_kind": "performance_result",
+                "baseline": _baseline_summary(eval_result=eval_result, task=task),
                 "performance": _performance_summary(eval_result),
             }
         )

@@ -13,7 +13,10 @@ def test_no_prior_eval_uses_reference_only_when_task_has_reference_latency():
     assert summary["has_prior_candidate_eval"] is False
     assert summary["has_eval_log"] is False
     assert summary["performance_available"] is False
+    assert summary["baseline"]["original_baseline_latency_us"] is None
+    assert summary["baseline"]["parent_latency_us"] is None
     assert summary["baseline"]["reference_latency_us"] == 2391.0
+    assert "reference_latency_ms" not in summary["baseline"]
     assert "No previous candidate evaluation exists" in log
 
 
@@ -84,6 +87,10 @@ def test_passed_context_contains_performance_only():
             "min_latency_ms": 2.3917,
             "max_latency_ms": 2.40204,
             "num_runs": 20,
+            "parent_latency_ms": 1.59,
+            "parent_solution_id": "sol_s1_adopted",
+            "parent_strategy_id": "fa_qkv_two_level_l1_reuse",
+            "speedup_vs_parent": 1.627,
         },
         log_excerpt=(
             "[benchmark stdout]\n"
@@ -98,10 +105,17 @@ def test_passed_context_contains_performance_only():
     assert summary["eval_context_status"] == "performance_measured"
     assert summary["has_eval_log"] is False
     assert summary["correctness_passed"] is True
+    assert summary["baseline"]["original_baseline_latency_us"] == 2391.0
+    assert summary["baseline"]["parent_latency_us"] == 1590.0
+    assert summary["baseline"]["parent_solution_id"] == "sol_s1_adopted"
+    assert summary["baseline"]["parent_strategy_id"] == "fa_qkv_two_level_l1_reuse"
+    assert summary["baseline"]["reference_latency_us"] is None
     assert summary["performance"]["mean_latency_us"] == 2396.596
     assert summary["performance"]["min_latency_us"] == 2391.7
     assert summary["performance"]["max_latency_us"] == 2402.04
     assert summary["performance"]["num_runs"] == 20
+    assert summary["performance"]["speedup_vs_original_baseline"] == 0.998
+    assert summary["performance"]["speedup_vs_parent"] == 1.627
     assert "No detailed failure log is needed" in log
     assert "profiler.py" not in log
     assert "Permission mismatch" not in log

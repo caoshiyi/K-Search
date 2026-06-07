@@ -624,6 +624,20 @@ class KernelGenerator:
                         task=task,
                         code_map_text=getattr(round_agentic_result, "code_map_text", None),
                         adopted=True,
+                        solution_id=solution.hash() if hasattr(solution, "hash") else None,
+                        candidate_id=(
+                            getattr(getattr(round_agentic_result, "candidate_patch", None), "candidate_id", None)
+                        ),
+                        action_node_id=(
+                            getattr(getattr(round_agentic_result, "candidate_patch", None), "action_node_id", None)
+                        ),
+                        eval_status=str(getattr(eval_result, "status", "") or ""),
+                        speedup_vs_parent=(
+                            getattr(eval_result, "metrics", {}).get("speedup_vs_parent")
+                            if isinstance(getattr(eval_result, "metrics", None), dict)
+                            else None
+                        ),
+                        created_round=int(round_num),
                     )
                     save_knowledge_if_adopted(
                         task=task,

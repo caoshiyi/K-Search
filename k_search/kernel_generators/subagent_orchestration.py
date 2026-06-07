@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from k_search.kernel_generators.claude_agent_project_editor import ClaudeProjectEditResult
+from k_search.kernel_generators.prompt_hygiene import check_prompt_hygiene_or_raise
 from k_search.kernel_generators.worktree_context import assert_no_absolute_paths_for_llm
 
 logger = logging.getLogger(__name__)
@@ -171,10 +172,16 @@ def render_subagent_stage_prompt(
     active_stage_count: int,
     base_prompt: str,
 ) -> str:
-    required = ", ".join(stage.required_files) if stage.required_files else "(none)"
+    required_lines = (
+        "\n".join(f"- {path}" for path in stage.required_files)
+        if stage.required_files
+        else "- (none)"
+    )
     parts = [
         f"Stage {active_stage_index}/{active_stage_count}: {stage.name}",
-        f"Flow: {flow.name}",
+        f"Current agent: {stage.agent}",
+        "Current stage goal:",
+        stage.instruction.strip(),
         (
             f"You MUST invoke exactly one native subagent for this stage: {stage.agent}. "
             f"Use the Agent tool with subagent_type={stage.agent!r}. "
@@ -182,8 +189,13 @@ def render_subagent_stage_prompt(
         ),
         f"Use the {stage.agent} subagent for this stage.",
         "Do not invoke any other subagent during this stage.",
-        stage.instruction.strip(),
-        f"Required file outputs after this stage: {required}.",
+        "Required outputs:",
+        required_lines,
+        "Required reads:",
+        "- .ksearch/context/STRATEGY.md",
+        "- .ksearch/context/STRATEGY_SUMMARY.md",
+        "- .ksearch/context/EVAL_SUMMARY.json",
+        "- .ksearch/context/EVAL_LOG.md only when EVAL_SUMMARY.json has has_eval_log=true",
         (
             f"When writing any stage handoff file, include this marker near the top if possible: "
             f"<!-- ksearch-stage: {stage.name}; ksearch-agent: {stage.agent} -->"
@@ -216,6 +228,8 @@ def run_configured_subagent_flow(
     telemetry_recorder: Any | None = None,
     session: Any | None = None,
     close_session_on_exit: bool = True,
+    stage_prompt_sink: Any | None = None,
+    prompt_hygiene_known_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
 ) -> ClaudeProjectEditResult:
     project_root = Path(project_dir).expanduser().resolve()
     active_stages = [stage for stage in flow.stages if _should_run_stage(stage, project_root)]
@@ -237,6 +251,12 @@ def run_configured_subagent_flow(
                 active_stage_count=len(active_stages),
                 base_prompt=base_prompt,
             )
+            hygiene = check_prompt_hygiene_or_raise(
+                prompt,
+                known_paths=[project_root, *(prompt_hygiene_known_paths or [])],
+            )
+            if stage_prompt_sink is not None:
+                stage_prompt_sink.write(index=index, stage=stage, prompt=prompt, hygiene=hygiene)
             event_start = len(getattr(telemetry_recorder, "events", []) or [])
             result = editor_client.send_prompt(
                 session,

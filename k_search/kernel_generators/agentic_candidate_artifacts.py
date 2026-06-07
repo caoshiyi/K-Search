@@ -31,6 +31,19 @@ def eval_result_to_dict(eval_result: Any) -> dict[str, Any]:
     return data if isinstance(data, dict) else {"value": data}
 
 
+def get_agentic_candidate_artifact_dir(
+    *,
+    artifacts_dir: str | Path | None,
+    task_name: str,
+    run_id: str,
+    round_num: int,
+    attempt_idx: int,
+) -> Path:
+    root = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=task_name, run_id=run_id)
+    candidate_id = f"round_{int(round_num):04d}_attempt_{int(attempt_idx):02d}"
+    return root / "candidates" / candidate_id
+
+
 def write_agentic_candidate_artifacts(
     *,
     artifacts_dir: str | Path | None,
@@ -51,10 +64,16 @@ def write_agentic_candidate_artifacts(
     model_name: str,
     metadata: dict[str, Any] | None = None,
     handoff_files: dict[str, str] | None = None,
+    stage_prompt_records: list[dict[str, Any]] | None = None,
 ) -> tuple[CandidatePatch, dict[str, str]]:
-    root = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=task_name, run_id=run_id)
     candidate_id = f"round_{int(round_num):04d}_attempt_{int(attempt_idx):02d}"
-    out_dir = root / "candidates" / candidate_id
+    out_dir = get_agentic_candidate_artifact_dir(
+        artifacts_dir=artifacts_dir,
+        task_name=task_name,
+        run_id=run_id,
+        round_num=round_num,
+        attempt_idx=attempt_idx,
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     paths = {
@@ -113,5 +132,7 @@ def write_agentic_candidate_artifacts(
     }
     if handoff_paths:
         manifest["native_handoff_paths"] = handoff_paths
+    if stage_prompt_records is not None:
+        manifest["stage_prompt_paths"] = list(stage_prompt_records)
     paths["manifest_path"].write_text(json.dumps(_jsonable(manifest), indent=2, sort_keys=True), encoding="utf-8")
     return candidate, {key: str(path) for key, path in paths.items()}

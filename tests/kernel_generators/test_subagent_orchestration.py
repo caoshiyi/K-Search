@@ -106,10 +106,50 @@ def test_render_subagent_stage_prompt_names_exact_agent_and_required_outputs():
     )
 
     assert "Stage 1/1: designer" in prompt
+    assert "Current agent: designer" in prompt
     assert "Use the designer subagent for this stage." in prompt
     assert "Do not invoke any other subagent during this stage." in prompt
     assert "ASCENDC_DESIGN.md" in prompt
+    assert "Required reads:" in prompt
+    assert ".ksearch/context/STRATEGY.md" in prompt
     assert "BASE ATTEMPT CONTEXT" in prompt
+    assert "Flow:" not in prompt
+    assert "Initial codegen flow agents" not in prompt
+    assert "Eval-failure repair flow agents" not in prompt
+    assert "bug-fixer" not in prompt
+
+
+def test_stage_prompt_hygiene_blocks_global_flow_policy(tmp_path):
+    flow = SubagentFlowConfig(
+        name="test-flow",
+        description="Test flow.",
+        stages=(
+            SubagentStageConfig(
+                name="designer",
+                agent="designer",
+                instruction="Create ASCENDC_DESIGN.md.",
+                required_files=("ASCENDC_DESIGN.md",),
+            ),
+        ),
+    )
+
+    class SessionClient:
+        def open_session(self, *, project_dir, telemetry_recorder=None):
+            return SimpleNamespace(project_dir=Path(project_dir), _closed=False)
+
+        def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+            raise AssertionError("prompt with global policy should not be sent")
+
+        def close_session(self, session):
+            session._closed = True
+
+    with pytest.raises(RuntimeError, match="global flow policy"):
+        run_configured_subagent_flow(
+            editor_client=SessionClient(),
+            project_dir=tmp_path,
+            base_prompt="Initial codegen flow agents: code-reader, designer, codegen, reviewer.",
+            flow=flow,
+        )
 
 
 def test_run_configured_subagent_flow_uses_one_session_and_skips_reader_when_code_map_exists(tmp_path):

@@ -41,6 +41,9 @@ def _write_native_handoffs(root: Path, code_map: str = "# CODE_MAP\nkernel/foo.h
 def _code_map_disabled_by_default(monkeypatch):
     # Keep memory-store tests hermetic unless they explicitly opt into persisted code_map behavior.
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
+    # Most legacy runner tests in this file use a one-shot edit_project test double.
+    # Product code must still fail closed by default; dedicated tests delete this env.
+    monkeypatch.setenv("KSEARCH_ALLOW_LEGACY_SINGLE_AGENT_FLOW", "1")
 
 
 class EditingClient:
@@ -193,15 +196,16 @@ def test_prompt_builder_omits_full_project_container_and_includes_action():
     assert "compile ok" in prompt
     assert "<ascendc_project>" not in prompt
     assert "Read/Grep/Glob/Edit/Write" in prompt
-    assert "code-reader -> designer -> codegen -> reviewer" in prompt
+    assert "Required native subagent flow" not in prompt
+    assert "code-reader -> designer -> codegen -> reviewer" not in prompt
     assert "ASCENDC_DESIGN.md" in prompt
     assert "IMPLEMENTATION_EXECUTION_PLAN.md" in prompt
     assert "IMPLEMENTATION_HANDOFF.md" in prompt
     assert "REVIEW_NOTES.md" in prompt
-    assert "bug-fixer" in prompt
+    assert "bug-fixer" not in prompt
     assert "must not be invoked" not in prompt
-    assert "Do not invoke bug-fixer during initial_codegen." in prompt
-    assert "Invoke bug-fixer during eval_failure_repair" in prompt
+    assert "Initial codegen flow agents" not in prompt
+    assert "Eval-failure repair flow agents" not in prompt
 
 
 def test_prompt_builder_raises_section_aware_error_when_budget_exceeded():
@@ -671,7 +675,7 @@ def test_prompt_builder_uses_code_map_branch_when_present():
     assert "update the affected sections" in with_map
     assert "CODE_MAP.md already exists: yes" in with_map
     assert "CODE_MAP.md already exists: no" in without_map
-    assert "Use the code-reader subagent to create CODE_MAP.md" in without_map
+    assert "Use the code-reader subagent to create CODE_MAP.md" not in without_map
 
 
 def test_prompt_builder_requires_file_handoff_and_short_subagent_summaries():
@@ -1022,7 +1026,16 @@ def test_runner_reuses_existing_code_map_without_reader(tmp_path, monkeypatch):
     (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
     task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
     from k_search.kernel_generators.memory import CODE_MAP, MemoryStore
-    MemoryStore.for_task(task).save(CODE_MAP, "# CODE_MAP\npreseeded\n")
+    MemoryStore.for_task(task).save(
+        CODE_MAP,
+        "# CODE_MAP\npreseeded\n",
+        meta={
+            "schema_version": 1,
+            "solution_id": "sol_parent",
+            "branch_id": "root/s1",
+            "adopted": True,
+        },
+    )
 
     class CodegenOnlyClient:
         def __init__(self):
@@ -1048,6 +1061,11 @@ def test_runner_reuses_existing_code_map_without_reader(tmp_path, monkeypatch):
         request=AscendCAgenticCodegenRequest(
             definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
             target_gpu="ascend_910b", round_num=2, attempt_idx=1, mode="improve",
+            strategy_context={
+                "parent_solution_id": "sol_parent",
+                "parent_branch_id": "root/s1",
+                "action_node_id": "s2",
+            },
         ),
         base_solution=None,
     )
@@ -1135,8 +1153,27 @@ def test_runner_materializes_native_assets_and_uses_single_project_edit(tmp_path
     project_dir, prompt = client.calls[0]
     assert project_dir
     assert all(client.assets_seen.values())
+    assert "Required native subagent flow" in prompt
     assert "code-reader -> designer -> codegen -> reviewer" in prompt
     assert "BETA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
+
+
+def test_native_flow_requires_configured_flow_support_by_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("KSEARCH_ALLOW_LEGACY_SINGLE_AGENT_FLOW", raising=False)
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+
+    with pytest.raises(RuntimeError, match="Configured subagent flow is required"):
+        AscendCAgenticCodegenRunner(model_name="claude", editor_client=NativeEditingClient()).run(
+            task=task,
+            request=AscendCAgenticCodegenRequest(
+                definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+                target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
+            ),
+            base_solution=None,
+        )
 
 
 def test_runner_accepts_split_heading_review_notes(tmp_path, monkeypatch):
@@ -1256,6 +1293,18 @@ def test_runner_uses_configured_subagent_stages_in_one_session(tmp_path, monkeyp
     ]
     assert result.changed_paths == ["kernel/foo.h"]
     assert "BETA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
+    assert result.artifact_paths is not None
+    manifest = json.loads(Path(result.artifact_paths["manifest_path"]).read_text(encoding="utf-8"))
+    stage_paths = manifest["stage_prompt_paths"]
+    assert [item["stage"] for item in stage_paths] == ["code-reader", "designer", "codegen", "reviewer"]
+    for item in stage_paths:
+        assert item["path"].startswith("stage_prompts/")
+        assert not Path(item["path"]).is_absolute()
+        saved_prompt = Path(result.artifact_paths["manifest_path"]).parent / item["path"]
+        assert saved_prompt.is_file()
+        assert saved_prompt.read_text(encoding="utf-8") == client.prompts[item["index"] - 1]
+        assert item["hygiene"]["contains_absolute_path"] is False
+        assert item["hygiene"]["contains_global_flow_policy"] is False
 
 
 def test_runner_does_not_import_old_python_project_agents(tmp_path, monkeypatch):

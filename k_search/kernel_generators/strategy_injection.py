@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from k_search.kernel_generators.baseline_model import normalize_expected_speedup
+
 
 STRATEGY_FORMS = ("natural_language",)
 INLINE_STRATEGY_COMPAT_ENV = "KSEARCH_ALLOW_INLINE_STRATEGY"
@@ -104,16 +106,14 @@ def _coerce_bool(raw: dict[str, Any], key: str, strategy_id: str, default: bool 
 
 
 def _coerce_expected_speedup(raw: dict[str, Any], strategy_id: str) -> dict[str, Any] | None:
-    value = raw.get("expected_speedup")
-    if value is None:
-        return None
-    if not isinstance(value, dict):
-        raise StrategyCatalogError(f"strategy {strategy_id} field expected_speedup must be an object")
-    out = dict(value)
-    factor = out.get("factor")
-    if factor is not None and (isinstance(factor, bool) or not isinstance(factor, (int, float))):
-        raise StrategyCatalogError(f"strategy {strategy_id} field expected_speedup.factor must be numeric")
-    return out
+    try:
+        return normalize_expected_speedup(
+            raw,
+            strategy_requires=_coerce_requires(raw, strategy_id),
+            allow_unspecified_legacy=("expected_speedup" not in raw),
+        )
+    except ValueError as exc:
+        raise StrategyCatalogError(f"strategy {strategy_id} field expected_speedup invalid: {exc}") from exc
 
 
 def _coerce_score(raw: dict[str, Any], strategy_id: str) -> float:
@@ -325,12 +325,18 @@ def render_strategy_action_text(
     if len(full_text) > max_markdown_chars:
         full_text = full_text[:max_markdown_chars] + "\n\n[truncated strategy markdown]"
 
+    expected_speedup_text = (
+        json.dumps(entry.expected_speedup, ensure_ascii=False, sort_keys=True)
+        if entry.expected_speedup
+        else "(none)"
+    )
     return (
         f"Strategy ID: {entry.id}\n"
         f"Strategy title: {entry.title}\n"
         f"Strategy summary: {entry.summary}\n"
         f"Strategy tags: {', '.join(entry.tags) if entry.tags else '(none)'}\n"
         f"Strategy difficulty: {entry.difficulty_1_to_5}/5\n\n"
+        f"Expected speedup: {expected_speedup_text}\n\n"
         f"Strategy requires: {', '.join(entry.requires) if entry.requires else '(none)'}\n\n"
         "Full natural-language strategy markdown:\n"
         f"{full_text}"
@@ -573,7 +579,7 @@ def _build_action_node(
             ),
             "score_0_to_1": strategy.score_0_to_1,
             "difficulty_1_to_5": strategy.difficulty_1_to_5,
-            "expected_vs_baseline_factor": strategy.expected_vs_baseline_factor,
+            "expected_speedup": dict(strategy.expected_speedup) if strategy.expected_speedup else None,
             "requires": list(strategy.requires),
             "allow_reexecute": bool(strategy.allow_reexecute),
             "strategy_ref": {
@@ -658,7 +664,7 @@ def build_wm_from_strategies(
             "rationale": "",
             "score_0_to_1": 0.0,
             "difficulty_1_to_5": 1,
-            "expected_vs_baseline_factor": None,
+            "expected_speedup": None,
         },
         "impacts": {
             "memory_bandwidth": {"rating_0_to_10": 3, "risk": "", "notes": ""},
@@ -707,11 +713,7 @@ def _build_impacts_from_strategy(strategy: StrategyCatalogEntry) -> dict[str, di
     """Build broad impact ratings from strategy metadata."""
     rating = max(1, min(10, round(strategy.score_0_to_1 * 10)))
     tags = {tag.lower() for tag in strategy.tags}
-    expected_note = (
-        f"Expected vs baseline factor: {strategy.expected_vs_baseline_factor}"
-        if strategy.expected_vs_baseline_factor is not None
-        else ""
-    )
+    expected_note = f"Expected speedup: {strategy.expected_speedup}" if strategy.expected_speedup else ""
     memory_tags = {"memory", "ub", "l1", "cache", "data-movement", "bandwidth"}
     compute_tags = {"compute", "vector", "pipeline", "tiling"}
 

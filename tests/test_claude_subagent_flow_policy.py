@@ -4,7 +4,6 @@ from k_search.kernel_generators.ascendc_agentic_codegen import (
     AscendCAgenticCodegenRequest,
     AscendCAgenticPromptBuilder,
     _build_repair_prompt,
-    _render_flow_policy,
 )
 from k_search.kernel_generators.subagent_orchestration import (
     SubagentFlowConfig,
@@ -29,22 +28,16 @@ def _request() -> AscendCAgenticCodegenRequest:
 
 
 def test_initial_prompt_does_not_globally_ban_bug_fixer():
-    flows = load_subagent_flows()
-    policy = _render_flow_policy(
-        initial_flow=flows.get("initial_codegen"),
-        repair_flow=flows.get("eval_failure_repair"),
-    )
-
     prompt = AscendCAgenticPromptBuilder(max_chars=20_000).build(
         _request(),
-        flow_policy_text=policy,
     )
 
     assert "must not be invoked in this release" not in prompt
-    assert "eval_failure_repair" in prompt
-    assert "bug-fixer" in prompt
-    assert "Initial codegen flow agents: code-reader, designer, codegen, reviewer." in prompt
-    assert "Eval-failure repair flow agents: bug-fixer, reviewer." in prompt
+    assert "eval_failure_repair" not in prompt
+    assert "bug-fixer" not in prompt
+    assert "Required native subagent flow" not in prompt
+    assert "Initial codegen flow agents" not in prompt
+    assert "Eval-failure repair flow agents" not in prompt
 
 
 def test_repair_prompt_explicitly_allows_bug_fixer():

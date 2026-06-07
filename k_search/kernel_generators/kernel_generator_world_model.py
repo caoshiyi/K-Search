@@ -571,6 +571,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             "dependencies_satisfied": all(req in adopted_set for req in requires),
             "parent_strategy_lineage": adopted,
             "parent_solution_id": parent_solution_id,
+            "parent_branch_id": parent_id or None,
             "action_node_id": str(node_obj.get("node_id") or ""),
         }
 
@@ -1428,7 +1429,12 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             prediction = None
             try:
                 act = (node_obj or {}).get("action") if isinstance((node_obj or {}).get("action"), dict) else {}
-                evb = act.get("expected_vs_baseline_factor", None)
+                expected_speedup = act.get("expected_speedup") if isinstance(act.get("expected_speedup"), dict) else None
+                evb = (
+                    expected_speedup.get("factor")
+                    if isinstance(expected_speedup, dict) and expected_speedup.get("factor") is not None
+                    else act.get("expected_vs_baseline_factor", None)
+                )
                 prediction = (
                     Prediction(
                         expected_vs_baseline_factor=float(evb),
@@ -1665,6 +1671,32 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                     task=task,
                                     code_map_text=getattr(result, "code_map_text", None),
                                     adopted=True,
+                                    solution_id=solution.hash() if hasattr(solution, "hash") else None,
+                                    parent_solution_id=(
+                                        selected_strategy_context.get("parent_solution_id")
+                                        if isinstance(selected_strategy_context, dict)
+                                        else None
+                                    ),
+                                    candidate_id=(
+                                        result.candidate_patch.candidate_id
+                                        if result.candidate_patch is not None
+                                        else None
+                                    ),
+                                    action_node_id=str(chosen_leaf) if chosen_leaf else None,
+                                    strategy_id=(
+                                        selected_strategy_context.get("strategy_id")
+                                        if isinstance(selected_strategy_context, dict)
+                                        else None
+                                    ),
+                                    branch_id=str(chosen_leaf) if chosen_leaf else None,
+                                    eval_status=str(getattr(round_eval, "status", "") or ""),
+                                    speedup_vs_parent=(
+                                        round_eval.metrics.get("speedup_vs_parent")
+                                        if isinstance(getattr(round_eval, "metrics", None), dict)
+                                        else None
+                                    ),
+                                    created_round=int(round_num),
+                                    created_attempt=int(attempt_idx),
                                 )
                                 save_knowledge_if_adopted(
                                     task=task,

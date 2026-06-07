@@ -258,6 +258,57 @@ def test_runner_edits_worktree_and_returns_solution(tmp_path):
     assert "<ascendc_project>" not in client.calls[0][1]
 
 
+def test_runner_materializes_strategy_from_canonical_path_not_action_text(tmp_path):
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    (task_dir / "spec.md").write_text("Optimize tiny project.", encoding="utf-8")
+    (task_dir / "kernel").mkdir()
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    canonical_strategy = tmp_path / "catalog_strategy.md"
+    canonical_body = "# Canonical Strategy\n\n" + "full strategy line\n" * 200
+    canonical_strategy.write_text(canonical_body, encoding="utf-8")
+    task = AscendCTask(task_path=task_dir, definition_name="x")
+
+    class StrategyInspectingClient(EditingClient):
+        def edit_project(self, *, project_dir, prompt):
+            root = Path(project_dir)
+            strategy_text = (root / ".ksearch" / "context" / "STRATEGY.md").read_text(
+                encoding="utf-8"
+            )
+            assert strategy_text == canonical_body
+            assert "[truncated strategy markdown]" not in strategy_text
+            assert "[truncated for agentic prompt budget]" not in strategy_text
+            assert "[truncated strategy markdown]" not in prompt
+            assert "Full natural-language strategy markdown" not in prompt
+            return super().edit_project(project_dir=project_dir, prompt=prompt)
+
+    client = StrategyInspectingClient("alpha\nBETA\ngamma\n")
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text=task.get_agentic_definition_text(language="ascendc"),
+            action_text=(
+                "Change beta to BETA.\n\n"
+                "Full natural-language strategy markdown:\n"
+                "stale prompt section\n\n"
+                "[truncated strategy markdown]"
+            ),
+            trace_logs="",
+            perf_summary="",
+            target_gpu="ascend_910b",
+            round_num=3,
+            attempt_idx=1,
+            mode="action",
+            canonical_strategy_markdown_path=canonical_strategy,
+        ),
+        base_solution=None,
+    )
+
+    assert "BETA" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
+
+
 def test_runner_evaluates_worktree_and_persists_project_snapshot_candidate(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_TASK_ID", "task-artifact")
     task_dir = tmp_path / "task"

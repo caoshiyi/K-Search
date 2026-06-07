@@ -362,11 +362,14 @@ def _definition_text_for_codegen_prompt(
 class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
     """Baseline-aware generator variant that maintains and injects a persistent world model."""
 
+    def _strategy_entry_for_node(self, node_obj: dict[str, Any] | None) -> StrategyCatalogEntry | None:
+        if not isinstance(node_obj, dict) or not self._strategy_catalog:
+            return None
+        return resolve_strategy_catalog_entry(node_obj, self._strategy_catalog)
+
     def _strategy_text_for_node(self, node_obj: dict[str, Any] | None) -> str:
         """Render full markdown strategy text for a selected action node."""
-        if not isinstance(node_obj, dict) or not self._strategy_catalog:
-            return ""
-        entry = resolve_strategy_catalog_entry(node_obj, self._strategy_catalog)
+        entry = self._strategy_entry_for_node(node_obj)
         if entry is None:
             return ""
 
@@ -1337,6 +1340,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             node_obj = self._wm.get_node_obj(definition_name=task.name, node_id=chosen_leaf)
             chosen_action_text = None
             strategy_text = ""
+            selected_strategy_entry = self._strategy_entry_for_node(node_obj)
             blk = render_chosen_action_node_block(node_obj or {})
             if blk.strip():
                 chosen_action_text = blk.strip()
@@ -1551,7 +1555,11 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             parent_candidate_id=cycle_best_candidate_id,
                             action_node_id=str(chosen_leaf) if chosen_leaf else None,
                             eval_result=last_eval,
-                            strategy_markdown=str(strategy_text or chosen_action_text or ""),
+                            canonical_strategy_markdown_path=(
+                                Path(selected_strategy_entry.markdown_path)
+                                if selected_strategy_entry is not None
+                                else None
+                            ),
                             strategy_summary=(
                                 str(blk or "").strip()
                                 if str(blk or "").strip()

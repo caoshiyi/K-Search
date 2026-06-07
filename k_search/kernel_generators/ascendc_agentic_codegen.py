@@ -79,7 +79,7 @@ class AscendCAgenticCodegenRequest:
     parent_candidate_id: str | None = None
     action_node_id: str | None = None
     eval_result: EvalResult | None = None
-    strategy_markdown: str | None = None
+    canonical_strategy_markdown_path: Path | None = None
     strategy_summary: str | None = None
     eval_summary: dict[str, Any] | None = None
     eval_log: str | None = None
@@ -1100,16 +1100,14 @@ class AscendCAgenticCycle:
         else:
             eval_summary = dict(request.eval_summary)
             eval_log = str(request.eval_log)
-        strategy_markdown = str(request.strategy_markdown or request.action_text or "").strip()
         strategy_summary = str(
             request.strategy_summary or _extract_bounded_strategy_summary(request.action_text)
         ).strip()
-        assert_no_absolute_paths_for_llm(strategy_markdown)
         assert_no_absolute_paths_for_llm(strategy_summary)
         assert_no_absolute_paths_for_llm(eval_log)
         paths = materialize_worktree_context(
             project_dir=self.wt_session.project_dir,
-            strategy_markdown=strategy_markdown,
+            canonical_strategy_markdown_path=request.canonical_strategy_markdown_path,
             strategy_summary=strategy_summary,
             eval_summary=eval_summary,
             eval_log=eval_log,
@@ -1117,7 +1115,6 @@ class AscendCAgenticCycle:
         )
         request = replace(
             request,
-            strategy_markdown=strategy_markdown,
             strategy_summary=strategy_summary,
             eval_summary=eval_summary,
             eval_log=eval_log,

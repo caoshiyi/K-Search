@@ -20,6 +20,10 @@ that addresses the failure, with evidence-driven discipline.
 2. KNOWLEDGE.md (if present) — known pitfall patterns.
 3. debug_packet.json / debug_log.md at the project root (if present) — prior rounds'
    hypotheses, changes, dump results, conclusions. Reuse them; do not repeat eliminated hypotheses.
+4. `.claude/references/known-pitfalls/` — cross-task durable pitfalls. After classifying the
+   failure, match it against these first to shortcut locating. For a precision failure where
+   roughly half the output rows are wrong, check KP-001 (subblock/chunked writeback offset)
+   before anything else.
 
 ## Classify the failure first (use ascendc-verify methodology)
 Determine error type from the failure log: compile error / out-of-bounds / sync hang /

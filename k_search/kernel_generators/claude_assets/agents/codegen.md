@@ -19,7 +19,8 @@ Read these files in order:
 1. `ASCENDC_DESIGN.md` to understand the detailed AscendC design target.
 2. `CODE_MAP.md` to locate likely source files and project contracts.
 3. `KNOWLEDGE.md` if present, to apply distilled patterns and avoid known pitfalls.
-4. The real source files referenced by the design and map, using Glob/Grep/Read before any Edit.
+4. `.claude/references/known-pitfalls/` — cross-task durable pitfalls; read entries relevant to this operator before editing (e.g. KP-001 for any subblock/chunked writeback offset).
+5. The real source files referenced by the design and map, using Glob/Grep/Read before any Edit.
 
 `CODE_MAP.md is an index, not evidence.`
 Never edit code based only on CODE_MAP.md summaries. Confirm functions, structs, tiling fields, buffer names, workspace layout, synchronization points, Python wrapper contracts, and build files from the actual source files before editing.
@@ -68,6 +69,7 @@ After this file exists, implement tasks in order. If real source structure inval
 - Do not add shape padding or alignment workarounds in Python wrappers to hide kernel tail bugs.
 - Preserve public entry points, host tiling contracts, dtype support, build layout, and non-incremental paths unless the design explicitly requires a compatible contract change.
 - Implement incrementally in the existing candidate project. Do not copy an external baseline into the project and do not rewrite healthy existing logic from scratch.
+- Do NOT rewrite a line that is already correct just to make a parameter name self-consistent or to tidy code. A misleadingly named but mathematically correct call (e.g. a writeback parameter named `startRow` that actually receives a global row offset) must be preserved as-is unless a failing case proves it wrong. "Name alignment" rewrites are a top regression source — see `.claude/references/known-pitfalls/KP-001`.
 
 ## Design Deviations
 

@@ -17,6 +17,7 @@ skills:
 - 可选调用 `ascendc-dev-knowledge` 了解 AscendC API 的用法
 - 必须先读取 `CODE_MAP.md`；`CODE_MAP.md` 是索引，不是证据，所有关键结论必须回到真实源码或输入文件确认
 - 如存在 `KNOWLEDGE.md`，必须读取并应用其中的已知坑点和项目约束
+- 必须浏览 `.claude/references/known-pitfalls/`（跨任务常驻坑点库），把与当前算子相关的条目对应的设计契约写进 `ASCENDC_DESIGN.md`（如涉及 subblock/分块写回时套用 KP-001 的单一全局行坐标系约束）
 - 不得硬编码某个算子目录为必读项；参考实现必须先发现、再判定适用性、最后按需读取
 - 设计输出必须能直接驱动后续实现
 - **唯一输出文件是项目根目录 `ASCENDC_DESIGN.md`**

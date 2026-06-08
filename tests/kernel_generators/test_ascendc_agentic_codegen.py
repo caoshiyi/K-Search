@@ -1,5 +1,6 @@
 import json
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,6 +18,17 @@ from k_search.tasks.task_base import BuildSpec, Solution, SourceFile, SupportedL
 
 def _py_cmd(code: str) -> str:
     return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+
+
+def _git(cwd: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return proc.stdout.strip()
 
 
 def _write_native_handoffs(root: Path, code_map: str = "# CODE_MAP\nkernel/foo.h\n") -> None:
@@ -392,6 +404,71 @@ def test_runner_evaluates_worktree_and_persists_project_snapshot_candidate(tmp_p
     assert manifest["mode"] == "action"
     assert Path(result.artifact_paths["diff_path"]).read_text(encoding="utf-8") == result.diff_text
     assert json.loads(Path(result.artifact_paths["eval_path"]).read_text(encoding="utf-8"))["status"] == "passed"
+
+
+def test_runner_evaluation_remaps_absolute_harness_path_to_isolated_worktree_copy(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_TASK_ID", "task-absolute-harness")
+    repo = tmp_path / "repo"
+    task_dir = repo / "agent_workdir" / "flash_attention"
+    scripts_dir = repo / "agent_workdir" / "scripts"
+    (task_dir / "kernel").mkdir(parents=True)
+    scripts_dir.mkdir(parents=True)
+    (task_dir / "spec.md").write_text("Optimize tiny project.", encoding="utf-8")
+    (task_dir / "kernel" / "foo.h").write_text("baseline-good\n", encoding="utf-8")
+    (scripts_dir / "evaluate_ascendc.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "SCRIPT_DIR=$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd)\n"
+        "WORKDIR=$(cd \"$SCRIPT_DIR/..\" && pwd)\n"
+        "TASK_NAME=${1:?task name required}\n"
+        "TARGET=\"$WORKDIR/$TASK_NAME/kernel/foo.h\"\n"
+        "echo \"checking $TARGET\"\n"
+        "if grep -q candidate-broken \"$TARGET\"; then\n"
+        "  echo \"candidate precision failed\"\n"
+        "  exit 9\n"
+        "fi\n"
+        "echo \"baseline precision passed\"\n",
+        encoding="utf-8",
+    )
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ksearch@example.invalid")
+    _git(repo, "config", "user.name", "K Search Tests")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "initial")
+
+    task = AscendCTask(
+        task_path=task_dir,
+        definition_name="flash_attention",
+        artifacts_dir=str(tmp_path / "artifacts"),
+        build_cmd=_py_cmd("print('build ok')"),
+        test_cmd=f"bash {shlex.quote(str(scripts_dir / 'evaluate_ascendc.sh'))} flash_attention basic",
+        bench_cmd=_py_cmd("print('latency_ms=4.0')"),
+        reference_latency_ms=8.0,
+        timeout_seconds=30,
+    )
+    client = NativeEditingClient(new_text="candidate-broken\n")
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text=task.get_agentic_definition_text(language="ascendc"),
+            action_text="Make candidate fail correctness.",
+            trace_logs="",
+            perf_summary="",
+            target_gpu="ascend_910b",
+            round_num=3,
+            attempt_idx=1,
+            mode="action",
+            run_id="absolute-harness-run",
+            task_name="flash_attention",
+        ),
+        base_solution=None,
+    )
+
+    assert result.eval_result.status == "failed"
+    assert "candidate precision failed" in result.eval_result.log_excerpt
+    assert "baseline precision passed" not in result.eval_result.log_excerpt
 
 
 def test_runner_requires_explicit_run_id_by_default(tmp_path, monkeypatch):

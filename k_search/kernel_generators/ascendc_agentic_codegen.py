@@ -5,6 +5,7 @@ import os
 import logging
 import re
 import shutil
+import subprocess
 import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -601,9 +602,36 @@ def _capture_and_remove_non_candidate_files(project_dir: Path) -> dict[str, str]
     return captured
 
 
+def _find_git_root_for_eval(path: Path) -> Path | None:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    root_text = (proc.stdout or "").strip()
+    if not root_text:
+        return None
+    root = Path(root_text).expanduser().resolve()
+    try:
+        path.resolve().relative_to(root)
+    except ValueError:
+        return None
+    return root if root.is_dir() else None
+
+
 def _copy_project_for_eval(candidate_dir: Path) -> tuple[tempfile.TemporaryDirectory[str], Path]:
     tmp = tempfile.TemporaryDirectory(prefix="ksearch_eval_")
-    eval_dir = Path(tmp.name).resolve() / "project"
+    candidate_dir = Path(candidate_dir).expanduser().resolve()
+    source_root = _find_git_root_for_eval(candidate_dir) or candidate_dir
+    rel_project = candidate_dir.relative_to(source_root)
+    eval_root = Path(tmp.name).resolve() / "project"
+    eval_dir = eval_root / rel_project
     ignore = shutil.ignore_patterns(
         ".git",
         ".claude",
@@ -615,7 +643,7 @@ def _copy_project_for_eval(candidate_dir: Path) -> tuple[tempfile.TemporaryDirec
         *NATIVE_RUNTIME_DIRS,
         *NATIVE_RUNTIME_FILES,
     )
-    shutil.copytree(candidate_dir, eval_dir, symlinks=False, ignore=ignore)
+    shutil.copytree(source_root, eval_root, symlinks=False, ignore=ignore)
     return tmp, eval_dir
 
 

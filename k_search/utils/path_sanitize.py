@@ -5,11 +5,12 @@ import re
 # 匹配 ksearch 临时 worktree / fallback 临时 repo 的绝对路径根:
 #   /<任意前缀>/ksearch_agentic_worktree_<rand>
 #   /<任意前缀>/ksearch_agentic_temp_repo_<rand>
+#   /<任意前缀>/ksearch_eval_<rand>
 # 捕获到随机根目录为止,其后的相对子路径保留不动。
 # 后缀 [A-Za-z0-9]+ 对应 tempfile.mkdtemp 产出的随机名(见 k_search/kernel_generators/agentic_worktree.py 的
-# prefix="ksearch_agentic_worktree_" / "ksearch_agentic_temp_repo_",无 suffix= 故为纯字母数字)。
+# prefix="ksearch_agentic_worktree_" / "ksearch_agentic_temp_repo_" / "ksearch_eval_",无 suffix= 故为纯字母数字)。
 _WORKTREE_ROOT_RE = re.compile(
-    r"/[^\s]*?/(?:ksearch_agentic_worktree|ksearch_agentic_temp_repo)_[A-Za-z0-9]+"
+    r"/[^\s]*?/(?:ksearch_agentic_worktree|ksearch_agentic_temp_repo|ksearch_eval)_[A-Za-z0-9]+"
 )
 
 

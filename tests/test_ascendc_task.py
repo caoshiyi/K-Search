@@ -162,6 +162,26 @@ def test_ascendc_task_run_benchmark_in_project_dir_uses_existing_project(tmp_pat
     assert "build ok" in result.log_excerpt
 
 
+def test_ascendc_task_command_remap_does_not_rewrite_unrelated_shared_ancestor():
+    task = AscendCTask(
+        task_path="/mnt/workspace/cv_agent_adv/agent_workdir/flash_attention",
+        definition_name="flash_attention",
+    )
+    command = (
+        "bash /mnt/workspace/K-Search/scripts/driver.sh && "
+        "bash /mnt/workspace/cv_agent_adv/agent_workdir/scripts/evaluate_ascendc.sh flash_attention basic"
+    )
+
+    remapped = task._remap_command_for_workdir(
+        command,
+        cwd=Path("/tmp/ksearch_eval_ab12cd/project/agent_workdir/flash_attention"),
+    )
+
+    assert "/mnt/workspace/K-Search/scripts/driver.sh" in remapped
+    assert "/tmp/ksearch_eval_ab12cd/project/agent_workdir/scripts/evaluate_ascendc.sh" in remapped
+    assert "/mnt/workspace/cv_agent_adv/agent_workdir/scripts/evaluate_ascendc.sh" not in remapped
+
+
 def test_ascendc_task_run_benchmark_reports_compile_failure(tmp_path):
     solution = Solution(
         name="candidate",

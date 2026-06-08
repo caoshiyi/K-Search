@@ -300,7 +300,9 @@ ComputeVec2(slot, isFirst, isLast):
 - `wsAccO`、`wsMeta` 的 slot 也按 `mBaseSize` 放大（`RING_SLOTS × mBaseSize × dimAlign`、`RING_SLOTS × mBaseSize × 3`）。
 - exp/sum 状态从 6.3 的 cache 读；`accOffset` 用 `prevSlot * mBaseSize + rowOffset` 寻址（基线是 `* BLOCK_M`）。
 - **state cache stride 契约**：`maxCache/sumCache/expCache` 的每个 ring slot 使用固定 `stateStride = AlignUp(mBaseSize, 32)`，而不是当前 subblock 的 `vecDealM`。subblock 二分后，cache 行号仍使用任务内全局行 `mGlobal = vecStartM + chunkRow + localRow`。读取上一 slot 时使用同一个 `mGlobal`，确保两个 AIV subblock 的状态不会互相覆盖或错位。
-- `FinalizeOutputChunk` 的输出地址基于 `curQRowStart_ + startRow`（任务级 Q 行起点），不再是基线的 `curBx_ * BLOCK_M`。
+- **`FinalizeOutputChunk` 写回地址必须用任务内全局行 `mGlobal`（= `vecStartM + chunkRow`），不是 subblock 内局部偏移**：输出地址 = `curQRowStart_ + mGlobal`（再 `qSeqLen` clamp），而非基线的 `curBx_ * BLOCK_M`。
+  - ⚠️ 高危坑（KP-001，已实测复现）：本节内 state cache 用了全局行 `mGlobal`，但若写回这里误用 subblock 内局部偏移（如循环变量 `startRow`，漏掉 `vecStartM`/`rowStart_`），第二个 AIV subblock（Q 后半行）会写到错误地址，整段错位，mismatch ~50%（实测 57%，改回全局偏移后 PASS）。
+  - **单一坐标系硬约束**：本设计全程只用一个任务内全局行变量 `mGlobal` 表达 GM/workspace/state/exp-meta 的行偏移。`FinalizeOutputChunk` 的行入参应命名为 `globalRow`（不要沿用会误导的 `startRow`），且 `globalRowStart` 在 clamp 前只计算一次，不叠加两个等价偏移。
 
 ### 6.5 UB 容量校验（192 KB）
 单缓冲峰值（推荐取值，本 shape）：
@@ -370,7 +372,7 @@ perCoreBytes = wsS+wsP+wsO+wsMeta+wsAccO ;  totalWsBytes = perCoreBytes * usedCo
 3. Q 尾块（`qRows < mBaseSize`）、KV 尾块（`s2Rows < s2BaseSize`）、dim 尾块（`dim % BASE_K`，本 shape 为 0）都要用 `min/AlignUp` 正确收口。
 4. softmax `oriSrcK = kvRows`（实际有效 KV 列）务必正确传入，替代基线手写 `-inf` mask；否则尾块归约会把 padding 算进去。
 5. online-softmax 状态 cache 的 `slot`/`prevSlot` 环形索引、`isFirst/isLast` 边界要和 KV 外层循环对齐。
-6. 输出写回地址基于任务级 `qRowStart`，并用 `qSeqLen` 钳位有效行（避免写越界到 padding 区）。
+6. 输出写回地址基于任务内全局行 `mGlobal`（`curQRowStart_ + mGlobal`），并用 `qSeqLen` 钳位有效行（避免写越界到 padding 区）。**禁止用 subblock 内局部偏移（循环变量 `startRow`）直接当写回行号**——subblock 二分后会少加 `vecStartM`，第二个 subblock 整段写错地址（KP-001，实测 mismatch 57%）。全程只用一个全局行变量表达所有行偏移，写回入参命名为 `globalRow`。
 7. L1 峰值 ≤ 512KB、UB 峰值 ≤ 192KB（见 3.4 / 6.5）。
 
 ---
@@ -401,3 +403,4 @@ perCoreBytes = wsS+wsP+wsO+wsMeta+wsAccO ;  totalWsBytes = perCoreBytes * usedCo
 4. **tiling 结构体布局一致性**：新增字段后 host 写入顺序与 kernel `CopyTiling` 读取顺序必须逐字段对齐；建议字段类型统一 uint32 并同步改 `CopyTiling`。
 5. **slot 粒度放大后的 workspace 寻址**：`* BLOCK_M` 全部要改成 `* mBaseSize`（accO/meta/O 偏移），漏改会读写错位、结果错乱。
 6. **单缓冲 L1 覆盖同步**：复用同一 K/V/P L1 buffer 时，覆盖前必须等待上一块所有 L1→L0 读取完成；这是本轮最容易被遗漏的正确性契约。
+7. **subblock 写回偏移坐标系（KP-001，最高优先级，已实测复现）**：`FinalizeOutputChunk` 写回 `outGm` 必须用任务内全局行 `mGlobal`，不是 subblock 内局部偏移。详设里 state cache 用全局行、写回却写成 `curQRowStart_ + startRow`（局部偏移），实现者照字面写就会少加 `vecStartM`/`rowStart_`，导致第二个 AIV subblock 整段错位、mismatch 57%。规避：全程单一全局行坐标系，写回入参命名 `globalRow`，详设勿在不同小节混用 `startRow`/`mGlobal` 两套名。

@@ -96,6 +96,23 @@ attention 的 buffer 设计要从“数据流”出发，不是从“我有几�
 - UB：Vector 中间结果、softmax 状态、update 和 copyout。
 - workspace：跨核共享的中间结果或合并结果。
 
+### 4.4 分段 / 子块寻址必须用单一全局行坐标系
+
+当一个 task 的行（Q 行 / head 行 / M 行）在多个 AIV subblock 间二次切分、或在
+subblock 内再按 chunk 分块时，写回 `outGm` / `workspace` / state cache 的偏移很容易算错。
+详设必须把寻址坐标系定死，避免实现阶段少加 / 多加一次 subblock 基址（参见
+`known-pitfalls/KP-001`，已在多任务复现，典型现象是「约一半行 mismatch」）。
+
+硬规则：
+
+- 全文只定义**一个** task 内全局行变量（如 `globalRow = rowStart_ + chunk`）。
+  **所有** GM / workspace / state / exp-meta 的行偏移公式一律用它表达。
+- 禁止在不同小节切换 `startRow` / `rowOffset` / `mGlobal` 等近义名指代行偏移——
+  同一份详设出现两套坐标名，实现者照字面写就会错。
+- 写回函数的行入参，详设里要写清它是「task 内全局行」还是「subblock 内局部偏移」，
+  并明确推荐形参命名反映语义（如 `globalRow`），不要沿用会误导的 `startRow`。
+- `globalRowStart` 在越界裁剪（`qSeqLen` clamp）前只计算一次，不叠加两个等价偏移。
+
 ## 5. 同步的原则
 
 attention 的同步不是”哪里写个 flag”，而是**把跨核数据依赖显式化**。

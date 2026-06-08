@@ -64,6 +64,7 @@ NATIVE_REFERENCE_DIRS = [
     "ascendc-design",
     "attention-patterns",
     "curation-format",
+    "known-pitfalls",
 ]
 
 NATIVE_AGENT_TOOL_NAMES = ["Agent"]

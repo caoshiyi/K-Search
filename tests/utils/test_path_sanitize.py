@@ -15,6 +15,13 @@ def test_replaces_temp_repo_fallback_path():
     assert out == "see <PROJECT_ROOT>/kernel/foo.h"
 
 
+def test_replaces_isolated_eval_copy_path():
+    text = "failed in /tmp/ksearch_eval_ab12cd/project/agent_workdir/flash_attention/kernel/foo.h"
+    out = sanitize_worktree_paths(text)
+    assert "ksearch_eval_ab12cd" not in out
+    assert out == "failed in <PROJECT_ROOT>/project/agent_workdir/flash_attention/kernel/foo.h"
+
+
 def test_replaces_multiple_distinct_random_suffixes():
     text = (
         "old /tmp/ksearch_agentic_worktree_02ut4r9r/a.cpp "

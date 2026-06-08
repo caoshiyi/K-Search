@@ -698,6 +698,7 @@ Generate the corrected and optimized implementation:"""
         c = str(cmd or "").strip()
         if not c:
             return None
+        c = self._remap_command_for_workdir(c, cwd=cwd)
         return subprocess.run(
             c,
             cwd=str(cwd),
@@ -707,6 +708,68 @@ Generate the corrected and optimized implementation:"""
             timeout=max(1, int(self.timeout_seconds)),
             check=False,
         )
+
+    def _remap_command_for_workdir(self, cmd: str, *, cwd: Path) -> str:
+        """Map original task absolute paths to the candidate/eval workdir.
+
+        AscendC harness commands are often authored as absolute paths to
+        ``task_path`` or its parent workspace (for example
+        ``/repo/agent_workdir/scripts/evaluate_ascendc.sh``). During K-Search
+        evaluation, those paths must resolve to the isolated candidate copy,
+        not the original baseline workspace.
+        """
+        if self.task_path is None:
+            return cmd
+        try:
+            src = self.task_path.resolve()
+            dst = Path(cwd).expanduser().resolve()
+            stop_src = self._command_remap_stop_path(src)
+        except Exception:
+            return cmd
+
+        replacements: list[tuple[str, str]] = []
+        while True:
+            replacements.append((str(src), str(dst)))
+            if src == stop_src or src.parent == src or dst.parent == dst:
+                break
+            src = src.parent
+            dst = dst.parent
+
+        rewritten = cmd
+        for old, new in sorted(replacements, key=lambda pair: len(pair[0]), reverse=True):
+            rewritten = rewritten.replace(old, new)
+        return rewritten
+
+    def _command_remap_stop_path(self, task_path: Path) -> Path:
+        git_root = self._find_task_git_root(task_path)
+        if git_root is not None:
+            return git_root
+        return task_path.parent
+
+    @staticmethod
+    def _find_task_git_root(path: Path) -> Path | None:
+        if not path.exists():
+            return None
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        except Exception:
+            return None
+        if proc.returncode != 0:
+            return None
+        root_text = (proc.stdout or "").strip()
+        if not root_text:
+            return None
+        root = Path(root_text).expanduser().resolve()
+        try:
+            path.resolve().relative_to(root)
+        except ValueError:
+            return None
+        return root if root.is_dir() else None
 
     @staticmethod
     def _append_command_log(logs: list[str], label: str, proc: subprocess.CompletedProcess[str] | None) -> None:

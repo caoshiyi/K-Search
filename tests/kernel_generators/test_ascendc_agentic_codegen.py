@@ -1544,28 +1544,110 @@ def test_runner_fails_when_review_notes_missing(tmp_path, monkeypatch):
         )
 
 
-def test_runner_fails_when_reviewer_marks_candidate_not_eval_ready(tmp_path, monkeypatch):
+def test_runner_retries_codegen_when_reviewer_marks_candidate_not_eval_ready(tmp_path, monkeypatch):
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "review-retry")
     task_dir = tmp_path / "task"
     (task_dir / "kernel").mkdir(parents=True)
     (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
-    task = AscendCTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
-    runner = AscendCAgenticCodegenRunner(
-        model_name="claude",
-        editor_client=NativeEditingClient(
-            review_text="status: needs_fix\neval_ready: false\nrequired_fixes: fix tiling contract\n",
-        ),
+    task = AscendCTask(
+        task_path=task_dir,
+        definition_name="x",
+        artifacts_dir=str(tmp_path / "artifacts"),
+        build_cmd=_py_cmd("print('build ok')"),
+        test_cmd=_py_cmd("print('correctness ok')"),
+        bench_cmd=_py_cmd("print('latency_ms=1.0')"),
+        reference_latency_ms=2.0,
     )
 
-    with pytest.raises(RuntimeError, match="REVIEW_NOTES.md"):
-        runner.run(
-            task=task,
-            request=AscendCAgenticCodegenRequest(
-                definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
-                target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action",
-            ),
-            base_solution=None,
-        )
+    class ReviewRetryClient:
+        def __init__(self):
+            self.prompts: list[str] = []
+
+        def open_session(self, *, project_dir, telemetry_recorder=None):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(_closed=False, project_dir=Path(project_dir))
+
+        def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+            self.prompts.append(prompt)
+            root = Path(session.project_dir)
+            first = prompt.splitlines()[0]
+            if first == "Stage 1/4: code-reader":
+                (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
+                text = "reader done"
+            elif first == "Stage 2/4: designer":
+                (root / "ASCENDC_DESIGN.md").write_text("# design\n" + "detail\n" * 20, encoding="utf-8")
+                text = "designer done"
+            elif first == "Stage 3/4: codegen":
+                (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+                (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h updated\n", encoding="utf-8")
+                (root / "IMPLEMENTATION_EXECUTION_PLAN.md").write_text(
+                    "# execution\nchange beta after source inspection\n",
+                    encoding="utf-8",
+                )
+                (root / "IMPLEMENTATION_HANDOFF.md").write_text(
+                    "# handoff\nchanged kernel/foo.h and preserved contracts\n",
+                    encoding="utf-8",
+                )
+                text = "codegen done"
+            elif first == "Stage 4/4: reviewer":
+                (root / "REVIEW_NOTES.md").write_text(
+                    "status: needs_fix\neval_ready: false\nrequired_fixes: fix tiling contract\n",
+                    encoding="utf-8",
+                )
+                text = "review needs fix"
+            elif first == "Stage 1/2: codegen":
+                assert "required_fixes: fix tiling contract" in prompt
+                (root / "kernel" / "foo.h").write_text("alpha\nREVIEWED\ngamma\n", encoding="utf-8")
+                (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h reviewed\n", encoding="utf-8")
+                (root / "IMPLEMENTATION_EXECUTION_PLAN.md").write_text(
+                    "# execution\napply reviewer feedback after source inspection\n",
+                    encoding="utf-8",
+                )
+                (root / "IMPLEMENTATION_HANDOFF.md").write_text(
+                    "# handoff\naddressed reviewer feedback in kernel/foo.h\n",
+                    encoding="utf-8",
+                )
+                text = "codegen review retry done"
+            elif first == "Stage 2/2: reviewer":
+                (root / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
+                text = "review ready"
+            else:
+                raise AssertionError(first)
+            return ClaudeProjectEditResult(
+                text=text,
+                transcript=text,
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+        def close_session(self, session):
+            session._closed = True
+
+    client = ReviewRetryClient()
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+            target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action", run_id="review-retry",
+        ),
+        base_solution=None,
+    )
+
+    assert result.eval_result.status == "passed"
+    assert [prompt.splitlines()[0] for prompt in client.prompts] == [
+        "Stage 1/4: code-reader",
+        "Stage 2/4: designer",
+        "Stage 3/4: codegen",
+        "Stage 4/4: reviewer",
+        "Stage 1/2: codegen",
+        "Stage 2/2: reviewer",
+    ]
+    assert "REVIEWED" in next(src.content for src in result.solution.sources if src.path == "kernel/foo.h")
 
 
 def test_runner_fails_when_code_map_missing(tmp_path, monkeypatch):

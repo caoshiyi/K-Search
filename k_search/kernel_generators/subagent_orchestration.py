@@ -180,6 +180,22 @@ def render_subagent_stage_prompt(
     parts = [
         f"Stage {active_stage_index}/{active_stage_count}: {stage.name}",
         f"Current agent: {stage.agent}",
+        "Project root contract:",
+        '- Treat "." as the candidate project root.',
+        '- All required reads and outputs are relative to "." unless explicitly stated otherwise.',
+        '- Read and write only paths under ".".',
+        "- Do not use parent directories, sibling task directories, archive directories, or historical run artifacts.",
+        "- Do not use absolute paths in the Agent prompt or final message.",
+        "Parent-agent dispatch contract:",
+        (
+            "When constructing the Agent prompt, preserve the project root contract verbatim. "
+            "Do not invent a parent directory, sibling task directory, archive directory, or historical run artifact as CWD."
+        ),
+        "Do not introduce task-layout assumptions not present in the candidate project.",
+        (
+            "If the subagent prompt mentions CWD, it must describe the current candidate project directory "
+            'as "." and must not name a parent directory.'
+        ),
         "Current stage goal:",
         stage.instruction.strip(),
         (

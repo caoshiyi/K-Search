@@ -153,6 +153,7 @@ WorkspaceQueue 是封装好的跨核同步工具类；如项目内存在 FA base
 | HardEvent | 语义 | 典型场景 |
 |---|---|---|
 | MTE2_MTE1 | GM→L1 搬完后才能 L1→L0 | workspace_kv 搬入 L1 后才能 LoadData |
+| MTE1_MTE2 | L1→L0 读完后才能覆盖 L1 | 单缓冲 K/P/V L1 复用前，等上一 tile 的 L0A/L0B 读取完成 |
 | M_MTE1 | Cube 空闲后才能 L1→L0 | 上一轮 Mmad 结束后才能搬下一轮 L0 |
 | MTE1_M | L1→L0 搬完后才能 Mmad | LoadData 完成后才能启动 Cube |
 | M_FIX | Mmad 完成后才能 Fixpipe | L0C 写完后才能搬出 |
@@ -166,6 +167,19 @@ WorkspaceQueue 是封装好的跨核同步工具类；如项目内存在 FA base
 - 只写跨核同步（WorkspaceQueue），不写核内同步（SetWaitFlag）
 - 混淆 HardEvent 方向（如 MTE2_V 和 V_MTE3 是不同方向）
 - 遗漏 SetWaitFlag 导致数据竞争
+
+### 单缓冲 L1 复用必须写反向同步
+
+当 K / P / V / workspace tile 使用 `TBuf<A1>` 或等价裸 L1 buffer 单缓冲复用时，
+详设和实现都必须检查 `MTE2_MTE1` 与 `MTE1_MTE2` 是否成对覆盖生命周期。
+
+- `MTE2_MTE1` 只表示当前 tile 已经 GM/workspace→L1 搬完，允许 MTE1 从 L1 读到 L0。
+- `MTE1_MTE2` 表示上一 tile 的 L1→L0 读取已经完成，允许下一轮 MTE2 覆盖同一个 L1 buffer。
+
+如果只写前者、不写后者，下一轮 `LoadNdGmToNzL1` 可能覆盖仍在被 MTE1 读取的 L1，
+导致矩阵乘输入被污染，表现为编译通过、无死锁但精度失败。详设中凡是出现“同一个 L1 buffer
+在循环中被下一 tile 覆盖”的结构，都要显式写出覆盖前等待或说明使用 TQue ping-pong
+由 `AllocTensor/FreeTensor` 自动保护该生命周期。详见 `known-pitfalls/KP-002`。
 
 ### WorkspaceQueue 与多子数据的关系
 

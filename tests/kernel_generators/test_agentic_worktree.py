@@ -94,6 +94,39 @@ def test_real_worktree_materializes_untracked_task_subdir(tmp_path):
         session.cleanup()
 
 
+def test_real_worktree_removes_ancestor_project_memory_without_touching_project_memory(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ksearch@example.invalid")
+    _git(repo, "config", "user.name", "K Search Tests")
+    parent_scope = repo / "workspace_scope"
+    task_path = parent_scope / "candidate_project"
+    task_path.mkdir(parents=True)
+    (repo / "CLAUDE.md").write_text("repo-root instructions\n", encoding="utf-8")
+    (parent_scope / "CLAUDE.md").write_text("parent-scope instructions\n", encoding="utf-8")
+    (parent_scope / "AGENTS.md").write_text("parent-scope agent instructions\n", encoding="utf-8")
+    (task_path / "CLAUDE.md").write_text("task-local instructions\n", encoding="utf-8")
+    (task_path / "kernel.cpp").write_text("void run() {}\n", encoding="utf-8")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-m", "initial")
+
+    session = create_agentic_worktree(task_path=task_path)
+
+    try:
+        assert not (session.worktree_root / "CLAUDE.md").exists()
+        assert not (session.worktree_root / "workspace_scope" / "CLAUDE.md").exists()
+        assert not (session.worktree_root / "workspace_scope" / "AGENTS.md").exists()
+        assert (session.project_dir / "CLAUDE.md").read_text(encoding="utf-8") == "task-local instructions\n"
+        assert session.changed_paths() == []
+    finally:
+        session.cleanup()
+
+    assert (repo / "CLAUDE.md").read_text(encoding="utf-8") == "repo-root instructions\n"
+    assert (parent_scope / "CLAUDE.md").read_text(encoding="utf-8") == "parent-scope instructions\n"
+    assert (parent_scope / "AGENTS.md").read_text(encoding="utf-8") == "parent-scope agent instructions\n"
+
+
 def test_create_agentic_worktree_falls_back_for_non_git_task_path(tmp_path):
     task_path = tmp_path / "plain_task"
     task_path.mkdir()

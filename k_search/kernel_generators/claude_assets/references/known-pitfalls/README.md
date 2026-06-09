@@ -22,3 +22,4 @@
 | ID | 标题 | 主要受益 agent |
 |----|------|----------------|
 | KP-001 | 分段/子块写回偏移必须用单一全局行坐标系 | designer / codegen / bug-fixer |
+| KP-002 | 单缓冲 L1 复用必须补齐 MTE1→MTE2 反向同步 | designer / codegen / bug-fixer / reviewer |

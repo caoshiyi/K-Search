@@ -38,6 +38,7 @@ def test_materialize_claude_project_assets_copies_reference_dirs_not_symlinks(tm
         tmp_path / ".claude" / "references" / "ascendc-design",
         tmp_path / ".claude" / "references" / "attention-patterns",
         tmp_path / ".claude" / "references" / "curation-format",
+        tmp_path / ".claude" / "references" / "known-pitfalls",
         tmp_path / ".claude" / "skills" / "ascendc-dumptensor" / "references",
         tmp_path / ".claude" / "skills" / "ascendc-fa-detailed-design" / "references",
     ]
@@ -60,12 +61,19 @@ def test_materializer_can_replace_unmanaged_candidate_claude_assets_without_over
 
 
 def test_materializer_fails_fast_when_dev_knowledge_references_missing(tmp_path, monkeypatch):
-    from k_search.kernel_generators.claude_assets import materialize_claude_project_assets
+    from k_search.kernel_generators.claude_assets import materializer
 
     monkeypatch.delenv("KSEARCH_ALLOW_MISSING_DEV_KNOWLEDGE", raising=False)
+    fake_asset_root = tmp_path / "fake-assets"
+    fake_asset_root.mkdir()
+    monkeypatch.setattr(materializer, "_asset_root", lambda: fake_asset_root)
+    monkeypatch.setattr(materializer, "NATIVE_AGENT_FILES", [])
+    monkeypatch.setattr(materializer, "NATIVE_SKILL_FILES", [])
+    monkeypatch.setattr(materializer, "NATIVE_SKILL_REFERENCE_DIRS", ["ascendc-dev-knowledge"])
+    monkeypatch.setattr(materializer, "NATIVE_REFERENCE_DIRS", [])
 
     with pytest.raises(RuntimeError, match="ascendc-dev-knowledge/references"):
-        materialize_claude_project_assets(tmp_path)
+        materializer.materialize_claude_project_assets(tmp_path)
 
 
 def test_materializer_can_refresh_managed_files(tmp_path):
@@ -115,6 +123,16 @@ def test_asset_files_contain_required_handoff_contracts(tmp_path):
     attention_principles = (
         tmp_path / ".claude" / "references" / "ascendc-design" / "attention-design-principles.md"
     ).read_text(encoding="utf-8")
+    known_pitfalls_index = (
+        tmp_path / ".claude" / "references" / "known-pitfalls" / "README.md"
+    ).read_text(encoding="utf-8")
+    kp002 = (
+        tmp_path
+        / ".claude"
+        / "references"
+        / "known-pitfalls"
+        / "KP-002-l1-single-buffer-reuse-reverse-sync.md"
+    ).read_text(encoding="utf-8")
 
     old_design_name = "IMPLEMENTATION_" + "PLAN.md"
 
@@ -146,6 +164,7 @@ def test_asset_files_contain_required_handoff_contracts(tmp_path):
     assert "attention-checklist.md" in designer
     assert "WorkspaceQueue" in designer
     assert "HardEvent" in designer
+    assert "KP-002" in designer
     assert "basic_case" in designer
     assert "300-500" in designer
     assert "300-500" in attention_checklist
@@ -157,10 +176,20 @@ def test_asset_files_contain_required_handoff_contracts(tmp_path):
     assert "flash_attention AscendC kernel 已读（`flash_attention/kernel/`）" not in attention_checklist
     assert "相关 tile-level / TileLang 参考已判定" in attention_checklist
     assert "相关 FA AscendC baseline 已判定" in attention_checklist
+    assert "MTE1_MTE2" in attention_checklist
+    assert "KP-002" in attention_checklist
+    assert "MTE1_MTE2" in attention_principles
+    assert "known-pitfalls/KP-002" in attention_principles
+    assert "KP-002" in known_pitfalls_index
+    assert "单缓冲 L1 复用必须补齐 MTE1→MTE2 反向同步" in kp002
+    assert "MTE1_MTE2" in kp002
     assert "TileLang" in designer
     assert "next: codegen" in designer
 
     assert "ASCENDC_DESIGN.md" in codegen
+    assert "KP-002" in codegen
+    assert "L1 Buffer Lifecycle Table" in codegen
+    assert "required synchronization/lifecycle guard" in codegen
     assert "CODE_MAP.md is an index, not evidence" in codegen
     assert "Never edit code based only on CODE_MAP.md summaries" in codegen
     assert "IMPLEMENTATION_EXECUTION_PLAN.md" in codegen
@@ -174,8 +203,12 @@ def test_asset_files_contain_required_handoff_contracts(tmp_path):
     assert "eval_failure_repair" in reviewer
     assert "do not fail solely" in reviewer
     assert "handoff files are absent" in reviewer
+    assert "KP-002" in reviewer
+    assert "eval_ready: false" in reviewer
+    assert "naked L1" in reviewer
     assert "REVIEW_NOTES.md" in reviewer
     assert "python evaluation" in bug_fixer.lower()
+    assert "KP-002" in bug_fixer
     assert "tools: Read, Grep, Glob, Edit, Write" in bug_fixer
     assert "debug_packet.json" in bug_fixer
     assert "ASCENDC_DESIGN.md, IMPLEMENTATION_EXECUTION_PLAN.md, IMPLEMENTATION_HANDOFF.md" in bug_fixer

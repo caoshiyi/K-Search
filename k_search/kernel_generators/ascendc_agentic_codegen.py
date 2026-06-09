@@ -426,14 +426,38 @@ def _empty_required_fixes(value: str | None) -> bool:
     return normalized in {"", "[]", "none", "no", "n/a", "null", "false"}
 
 
+@dataclass(frozen=True)
+class _ReviewNotesState:
+    status: str
+    eval_ready: str
+    required_fixes: str | None
+    raw: str
+
+    @property
+    def is_eval_ready(self) -> bool:
+        return (
+            self.status == "ok"
+            and self.eval_ready == "true"
+            and _empty_required_fixes(self.required_fixes)
+        )
+
+
+def _parse_review_notes(review_text: str) -> _ReviewNotesState:
+    raw = str(review_text or "")
+    return _ReviewNotesState(
+        status=(_field_value(raw, "status") or "").strip().lower(),
+        eval_ready=(_field_value(raw, "eval_ready") or "").strip().lower(),
+        required_fixes=_field_value(raw, "required_fixes"),
+        raw=raw,
+    )
+
+
 def _validate_review_notes(review_text: str) -> None:
-    status = (_field_value(review_text, "status") or "").strip().lower()
-    eval_ready = (_field_value(review_text, "eval_ready") or "").strip().lower()
-    required_fixes = _field_value(review_text, "required_fixes")
-    if status != "ok" or eval_ready != "true" or not _empty_required_fixes(required_fixes):
+    state = _parse_review_notes(review_text)
+    if not state.is_eval_ready:
         raise RuntimeError(
             "Claude native reviewer did not mark candidate eval-ready in REVIEW_NOTES.md "
-            f"(status={status or 'missing'}, eval_ready={eval_ready or 'missing'})"
+            f"(status={state.status or 'missing'}, eval_ready={state.eval_ready or 'missing'})"
         )
 
 
@@ -529,7 +553,69 @@ def _flow_handoff_files(flow: SubagentFlowConfig) -> set[str]:
     return required or set(NATIVE_HANDOFF_FILES)
 
 
-def _require_native_handoff_files(project_dir: Path, required_files: set[str] | None = None) -> dict[str, str]:
+def _review_feedback_retry_round_limit() -> int:
+    raw = os.getenv("KSEARCH_REVIEW_FEEDBACK_RETRY_ROUNDS", "1").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning("invalid KSEARCH_REVIEW_FEEDBACK_RETRY_ROUNDS=%r; using 1", raw)
+        return 1
+
+
+def _stage_is_reviewer(stage: Any) -> bool:
+    return str(getattr(stage, "agent", "")).strip() == "reviewer" or str(getattr(stage, "name", "")).strip() == "reviewer"
+
+
+def _review_feedback_retry_flow(flow: SubagentFlowConfig) -> SubagentFlowConfig:
+    reviewer_index = next((index for index, stage in enumerate(flow.stages) if _stage_is_reviewer(stage)), None)
+    if reviewer_index is None:
+        raise RuntimeError(f"subagent flow {flow.name!r} has no reviewer stage for review feedback retry")
+    if reviewer_index <= 0:
+        raise RuntimeError(f"subagent flow {flow.name!r} cannot retry review feedback without a prior implementation stage")
+    retry_stages = tuple(flow.stages[reviewer_index - 1 : reviewer_index + 1])
+    return replace(
+        flow,
+        name=f"{flow.name}-review-feedback-retry",
+        description=f"Review feedback retry for {flow.name}.",
+        stages=retry_stages,
+    )
+
+
+def _clear_review_retry_handoff_outputs(project_dir: Path, retry_flow: SubagentFlowConfig) -> None:
+    preserve = {CODE_MAP.filename, "ASCENDC_DESIGN.md"}
+    generated = {
+        path
+        for path in _flow_handoff_files(retry_flow)
+        if path in NATIVE_HANDOFF_FILES and path not in preserve
+    }
+    generated.update({"REVIEW_NOTES.md", "IMPLEMENTATION_DEVIATIONS.md"})
+    for name in sorted(generated):
+        if name in NATIVE_HANDOFF_FILES:
+            (project_dir / name).unlink(missing_ok=True)
+
+
+def _build_review_feedback_retry_prompt(base_prompt: str, review_text: str, retry_round: int) -> str:
+    review_text = sanitize_worktree_paths(str(review_text or "").strip())
+    return (
+        f"{str(base_prompt or '').rstrip()}\n\n"
+        f"Review feedback retry round {int(retry_round)}:\n"
+        "The native reviewer marked the candidate not eval-ready, so do not proceed to Python evaluation yet.\n"
+        "Re-run the implementation stage in this flow, address every item from REVIEW_NOTES.md, "
+        "update the implementation handoff files, then run reviewer again.\n"
+        "Use the existing CODE_MAP.md / ASCENDC_DESIGN.md and inspect source before editing.\n\n"
+        "REVIEW_NOTES.md feedback:\n"
+        "```text\n"
+        f"{review_text}\n"
+        "```\n"
+    )
+
+
+def _require_native_handoff_files(
+    project_dir: Path,
+    required_files: set[str] | None = None,
+    *,
+    validate_review_ready: bool = True,
+) -> dict[str, str]:
     required = set(required_files or NATIVE_HANDOFF_FILES)
     missing = [name for name in sorted(required) if not (project_dir / name).is_file()]
     if missing:
@@ -551,7 +637,7 @@ def _require_native_handoff_files(project_dir: Path, required_files: set[str] | 
         )
     if "IMPLEMENTATION_HANDOFF.md" in required:
         _validate_optional_handoff(handoffs.get("IMPLEMENTATION_HANDOFF.md", ""), _validate_implementation_handoff)
-    if "REVIEW_NOTES.md" in required:
+    if validate_review_ready and "REVIEW_NOTES.md" in required:
         _validate_review_notes(handoffs.get("REVIEW_NOTES.md", ""))
     return handoffs
 
@@ -1184,6 +1270,75 @@ class AscendCAgenticCycle:
             subagent_flow=flow,
         )
 
+    def _review_notes_state_for_flow(self, flow: SubagentFlowConfig) -> _ReviewNotesState | None:
+        assert self.wt_session is not None
+        required = _flow_handoff_files(flow)
+        if "REVIEW_NOTES.md" not in required and not (self.wt_session.project_dir / "REVIEW_NOTES.md").is_file():
+            return None
+        handoff_texts = _require_native_handoff_files(
+            self.wt_session.project_dir,
+            required,
+            validate_review_ready=False,
+        )
+        review_text = handoff_texts.get("REVIEW_NOTES.md")
+        if review_text is None:
+            return None
+        return _parse_review_notes(review_text)
+
+    def _run_review_feedback_retries(
+        self,
+        *,
+        edit_result: ClaudeProjectEditResult,
+        prompt: str,
+        telemetry_recorder: Any,
+        flow: SubagentFlowConfig,
+        mode: str,
+        stage_prompt_records: list[dict[str, Any]],
+    ) -> tuple[ClaudeProjectEditResult, str, Any, SubagentFlowConfig]:
+        assert self.wt_session is not None
+        current_result = edit_result
+        current_prompt = prompt
+        current_recorder = telemetry_recorder
+        current_flow = flow
+        records = list(stage_prompt_records)
+        retry_limit = _review_feedback_retry_round_limit()
+        retry_round = 0
+
+        while True:
+            review_state = self._review_notes_state_for_flow(current_flow)
+            if review_state is None or review_state.is_eval_ready:
+                self.last_stage_prompt_records = records
+                return current_result, current_prompt, current_recorder, current_flow
+            if retry_round >= retry_limit:
+                _validate_review_notes(review_state.raw)
+
+            retry_round += 1
+            retry_flow = _review_feedback_retry_flow(flow)
+            _clear_review_retry_handoff_outputs(self.wt_session.project_dir, retry_flow)
+            retry_prompt = _build_review_feedback_retry_prompt(
+                base_prompt=prompt,
+                review_text=review_state.raw,
+                retry_round=retry_round,
+            )
+            retry_recorder = build_file_recorder(
+                context=self._telemetry_context(stage=f"{mode}_review_retry"),
+                prompt=retry_prompt,
+            )
+            retry_stage_prompt_sink = self._stage_prompt_sink()
+            try:
+                current_result = self._run_flow(
+                    prompt=retry_prompt,
+                    flow=retry_flow,
+                    telemetry_recorder=retry_recorder,
+                    stage_prompt_sink=retry_stage_prompt_sink,
+                )
+            finally:
+                retry_recorder.close()
+            records.extend(retry_stage_prompt_sink.records)
+            current_prompt = retry_prompt
+            current_recorder = retry_recorder
+            current_flow = retry_flow
+
     def run_initial(self) -> AscendCAgenticCodegenResult:
         self._require_open()
         if self._initial_has_run:
@@ -1204,12 +1359,19 @@ class AscendCAgenticCycle:
             )
         finally:
             telemetry_recorder.close()
-        self.last_stage_prompt_records = stage_prompt_sink.records
-        return self._finalize_attempt_result(
+        edit_result, prompt, telemetry_recorder, flow = self._run_review_feedback_retries(
             edit_result=edit_result,
             prompt=prompt,
             telemetry_recorder=telemetry_recorder,
             flow=self.runner.subagent_flow,
+            mode=self.request.mode,
+            stage_prompt_records=stage_prompt_sink.records,
+        )
+        return self._finalize_attempt_result(
+            edit_result=edit_result,
+            prompt=prompt,
+            telemetry_recorder=telemetry_recorder,
+            flow=flow,
             mode=self.request.mode,
         )
 
@@ -1253,12 +1415,19 @@ class AscendCAgenticCycle:
             )
         finally:
             telemetry_recorder.close()
-        self.last_stage_prompt_records = stage_prompt_sink.records
-        return self._finalize_attempt_result(
+        edit_result, prompt, telemetry_recorder, flow = self._run_review_feedback_retries(
             edit_result=edit_result,
             prompt=prompt,
             telemetry_recorder=telemetry_recorder,
             flow=self.runner.repair_subagent_flow,
+            mode="fix",
+            stage_prompt_records=stage_prompt_sink.records,
+        )
+        return self._finalize_attempt_result(
+            edit_result=edit_result,
+            prompt=prompt,
+            telemetry_recorder=telemetry_recorder,
+            flow=flow,
             mode="fix",
         )
 

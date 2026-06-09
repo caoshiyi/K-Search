@@ -119,6 +119,36 @@ def test_render_subagent_stage_prompt_names_exact_agent_and_required_outputs():
     assert "bug-fixer" not in prompt
 
 
+def test_render_subagent_stage_prompt_constrains_parent_agent_subagent_prompt():
+    flow = SubagentFlowConfig(
+        name="test-flow",
+        description="Test flow.",
+        stages=(
+            SubagentStageConfig(
+                name="designer",
+                agent="designer",
+                instruction="Write the detailed design.",
+                required_files=("ASCENDC_DESIGN.md",),
+            ),
+        ),
+    )
+
+    prompt = render_subagent_stage_prompt(
+        flow=flow,
+        stage=flow.stages[0],
+        active_stage_index=1,
+        active_stage_count=1,
+        base_prompt="BASE ATTEMPT CONTEXT",
+    )
+
+    assert "Project root contract:" in prompt
+    assert 'Treat "." as the candidate project root.' in prompt
+    assert "Parent-agent dispatch contract:" in prompt
+    assert "When constructing the Agent prompt, preserve the project root contract verbatim." in prompt
+    assert "Do not invent a parent directory, sibling task directory, archive directory, or historical run artifact as CWD." in prompt
+    assert "Do not introduce task-layout assumptions not present in the candidate project." in prompt
+
+
 def test_stage_prompt_hygiene_blocks_global_flow_policy(tmp_path):
     flow = SubagentFlowConfig(
         name="test-flow",

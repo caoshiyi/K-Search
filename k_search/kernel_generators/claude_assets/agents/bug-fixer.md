@@ -23,7 +23,8 @@ that addresses the failure, with evidence-driven discipline.
 4. `.claude/references/known-pitfalls/` — cross-task durable pitfalls. After classifying the
    failure, match it against these first to shortcut locating. For a precision failure where
    roughly half the output rows are wrong, check KP-001 (subblock/chunked writeback offset)
-   before anything else.
+   before anything else. For residual precision failure after offsets look correct, inspect
+   naked L1 single-buffer reuse for missing `MTE1_MTE2` reverse sync (KP-002).
 
 ## Classify the failure first (use ascendc-verify methodology)
 Determine error type from the failure log: compile error / out-of-bounds / sync hang /

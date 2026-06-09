@@ -19,7 +19,7 @@ Read these files in order:
 1. `ASCENDC_DESIGN.md` to understand the detailed AscendC design target.
 2. `CODE_MAP.md` to locate likely source files and project contracts.
 3. `KNOWLEDGE.md` if present, to apply distilled patterns and avoid known pitfalls.
-4. `.claude/references/known-pitfalls/` — cross-task durable pitfalls; read entries relevant to this operator before editing (e.g. KP-001 for any subblock/chunked writeback offset).
+4. `.claude/references/known-pitfalls/` — cross-task durable pitfalls; read entries relevant to this operator before editing (e.g. KP-001 for any subblock/chunked writeback offset, KP-002 for naked L1 single-buffer reuse).
 5. The real source files referenced by the design and map, using Glob/Grep/Read before any Edit.
 
 `CODE_MAP.md is an index, not evidence.`
@@ -47,6 +47,18 @@ The file records what will be changed, not hidden chain-of-thought. Split tasks 
 
 The first task must be source inspection and contract confirmation. It must list the source files opened and the contracts confirmed from real code.
 
+If the edit touches Cube/MMAD, L1 staging, or `TBuf<TPosition::A1>` / `TBuf<A1>` reuse paths, include this section in `IMPLEMENTATION_EXECUTION_PLAN.md`:
+
+```markdown
+### L1 Buffer Lifecycle Table
+
+| Buffer | Owning function/loop | Write or overwrite path | Read or consumer path | Reuse/overwrite condition | required synchronization/lifecycle guard | Evidence/status |
+|--------|----------------------|-------------------------|-----------------------|---------------------------|------------------------------------------|-----------------|
+| <buffer or slot> | <function/loop> | <GM/workspace->L1 write> | <L1->L0/MMAD consumer> | <when the same storage is reused> | <MTE1_MTE2, queue/multibuffer proof, or no-overwrite proof> | <source lines or pending action> |
+```
+
+For unchanged paths, mark `not touched` only after confirming from real source that the edit does not affect their write/read/reuse timing.
+
 End the file with:
 
 ```markdown
@@ -70,6 +82,8 @@ After this file exists, implement tasks in order. If real source structure inval
 - Preserve public entry points, host tiling contracts, dtype support, build layout, and non-incremental paths unless the design explicitly requires a compatible contract change.
 - Implement incrementally in the existing candidate project. Do not copy an external baseline into the project and do not rewrite healthy existing logic from scratch.
 - Do NOT rewrite a line that is already correct just to make a parameter name self-consistent or to tidy code. A misleadingly named but mathematically correct call (e.g. a writeback parameter named `startRow` that actually receives a global row offset) must be preserved as-is unless a failing case proves it wrong. "Name alignment" rewrites are a top regression source — see `.claude/references/known-pitfalls/KP-001`.
+- When reusing a naked `TBuf<A1>` L1 buffer across loop iterations, check both directions of the lifecycle before editing: `MTE2_MTE1` protects the current load before L1->L0 reads, while `MTE1_MTE2` protects the previous L1->L0 reads before the next GM/workspace->L1 overwrite. Missing the reverse wait is a precision bug source — see `.claude/references/known-pitfalls/KP-002`.
+- For any changed naked L1 / `TBuf<TPosition::A1>` reuse path, `status: ok` is only allowed when the L1 Buffer Lifecycle Table proves each overwrite is protected by explicit `MTE1_MTE2` reverse wait or by a concrete alternative: queue ownership, disjoint multibuffer slots, or proof that no overwrite can occur before the last L1->L0 consumer.
 
 ## Design Deviations
 
@@ -97,6 +111,7 @@ Before final response, check:
 - WorkspaceQueue producer and consumer calls are paired
 - `SoftmaxFlashV2` is used for softmax paths
 - non-incremental paths are not degraded
+- L1 Buffer Lifecycle Table exists and is resolved for any changed naked L1 reuse path
 - `CODE_MAP.md` reflects edited source contracts
 
 ## Implementation Handoff
@@ -106,6 +121,7 @@ After source edits, write `IMPLEMENTATION_HANDOFF.md` with:
 - implementation overview
 - changed files and code structure
 - key implementation details: enable conditions, execution flow, workspace layout, synchronization points, tail handling, dtype handling
+- L1 lifecycle summary for changed naked L1 / `TBuf<TPosition::A1>` buffers, referencing the plan table and final source guards
 - risk points: non-incremental paths, UB reuse, offsets, synchronization, API uncertainty
 - deviation summary referencing `IMPLEMENTATION_DEVIATIONS.md` when present
 - verification recommendations for Python runner and reviewer

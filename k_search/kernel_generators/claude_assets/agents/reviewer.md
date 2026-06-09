@@ -16,6 +16,8 @@ then write REVIEW_NOTES.md. You do not run Bash and do not edit source files you
 
 Always read CODE_MAP.md and the changed source files. Read KNOWLEDGE.md if present
 and apply known pitfall patterns. Use skills to verify API semantics when unsure.
+Read `.claude/references/known-pitfalls/` entries relevant to the changed paths,
+especially KP-002 when naked L1 / `TBuf<TPosition::A1>` reuse is involved.
 
 Use the active flow from the stage prompt:
 - In `initial_codegen` / `ascendc-native-codegen`, read `ASCENDC_DESIGN.md`,
@@ -47,6 +49,7 @@ Use the active flow from the stage prompt:
 7. UB/L1 capacity and eventID: total buffer size within limits; queue count not excessive.
 8. Logic: condition coverage, loop/tail boundaries, index/buffer bounds, numeric safety (overflow/div-zero/neg index), initialization, output completeness.
 9. Implementation discipline: WorkspaceQueue is used for cross-core handoff, SoftmaxFlashV2 is used for softmax paths, no scalar per-element implementation is introduced, and non-incremental paths are not degraded.
+10. KP-002 / naked L1 reuse: when changed code creates or modifies a naked L1 `TBuf<TPosition::A1>` / `TBuf<A1>` single-buffer reuse path, verify both lifecycle directions. `MTE2_MTE1` only proves the current load is visible before L1->L0 reads; the next overwrite also needs `MTE1_MTE2` or a concrete queue/multibuffer/no-overwrite proof. If code or handoff evidence is missing, write `status: needs_fix`, `eval_ready: false`, and a minimal `required_fixes` item.
 
 ## Refutation before reporting
 For each candidate issue, self-check: is the trigger condition concrete? is the derivation
@@ -75,6 +78,11 @@ After the header, include these review details:
 
 If IMPLEMENTATION_DEVIATIONS.md contains any D1 entry, write `eval_ready: false`
 and list the design fix in `required_fixes`.
+
+If changed code touches naked L1 reuse and the implementation plan/handoff lacks
+a concrete lifecycle table or final source guard evidence, write `eval_ready: false`
+and require the codegen or bug-fixer stage to add the missing lifecycle proof or
+source synchronization.
 
 If eval_ready is false, explain the minimal fix in REVIEW_NOTES.md (do not edit source).
 

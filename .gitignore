@@ -1,6 +1,7 @@
 __pycache__/
 logs/
-.ksearch/
+.ksearch/*
+!.ksearch/anti_patterns.json
 .ksearch-output*/
 .ksearch-exp*/
 ksearch-output*.tar

@@ -11,6 +11,14 @@ from typing import Optional
 
 from k_search.kernel_generators.runtime_artifacts import NATIVE_RUNTIME_DIRS
 
+ANCESTOR_PROJECT_MEMORY_FILES = frozenset(
+    {
+        "AGENTS.md",
+        "CLAUDE.local.md",
+        "CLAUDE.md",
+    }
+)
+
 
 class AgenticWorktreeError(RuntimeError):
     """Raised when K-Search cannot prepare or inspect an agentic worktree."""
@@ -79,6 +87,37 @@ def _mirror_project_state(src: Path, dst: Path, *, worktree_root: Path) -> None:
             _remove_path(dst)
         dst.mkdir(parents=True, exist_ok=True)
     _copy_project(src, dst)
+
+
+def _remove_ancestor_project_memory_files(*, project_dir: Path, worktree_root: Path) -> list[Path]:
+    root = worktree_root.resolve()
+    project = project_dir.resolve()
+    try:
+        project.relative_to(root)
+    except ValueError:
+        return []
+    if project == root:
+        return []
+
+    removed: list[Path] = []
+    cur = project.parent
+    while True:
+        try:
+            cur.relative_to(root)
+        except ValueError:
+            break
+        for filename in sorted(ANCESTOR_PROJECT_MEMORY_FILES):
+            path = cur / filename
+            if path.is_file() or path.is_symlink():
+                _remove_path(path)
+                removed.append(path)
+        if cur == root:
+            break
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+    return removed
 
 
 def _git_status_paths(root: Path) -> list[str]:
@@ -248,6 +287,7 @@ def create_agentic_worktree(
             rel_project = task_root.relative_to(repo_root)
             project_dir = temp_root / rel_project
             _mirror_project_state(task_root, project_dir, worktree_root=temp_root)
+            _remove_ancestor_project_memory_files(project_dir=project_dir, worktree_root=temp_root)
             baseline_commit = _commit_all(temp_root, "ksearch agentic baseline")
             return AgenticWorktreeSession(
                 worktree_root=temp_root,

@@ -22,7 +22,6 @@ fi
 # --- Required env ------------------------------------------------------------
 : "${ANTHROPIC_AUTH_TOKEN:?missing - export it or set .env.ANTHROPIC_AUTH_TOKEN in ~/.claude/settings.json}"
 : "${ANTHROPIC_BASE_URL:?missing - export it or set .env.ANTHROPIC_BASE_URL in ~/.claude/settings.json}"
-: "${BASELINE_MS:?run baseline first and export BASELINE_MS (mean_us/1000 from utils/run_perf.py)}"
 
 # --- Configurable ------------------------------------------------------------
 KSEARCH_ROOT="${KSEARCH_ROOT:-/mnt/workspace/K-Search}"
@@ -49,7 +48,7 @@ export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-64000}"
 # Cap max turns per session so the agent doesn't spin indefinitely.
 export CLAUDE_AGENT_MAX_TURNS=50
 
-# Measured baseline: 0.394ms (basic case, warmup=5, repeat=10)
+# Default measured baseline: 0.394ms (basic case, warmup=5, repeat=10). Override with BASELINE_MS=<float>.
 export BASELINE_MS="${BASELINE_MS:-0.394}"
 
 cd "$KSEARCH_ROOT"

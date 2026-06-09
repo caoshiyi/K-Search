@@ -1205,6 +1205,82 @@ def test_world_model_narrative_logger_uses_effective_run_id(tmp_path, monkeypatc
     )
 
 
+def test_world_model_snapshot_uses_generated_effective_run_id(tmp_path, monkeypatch):
+    from k_search.kernel_generators.kernel_generator_world_model import (
+        WorldModelKernelGeneratorWithBaseline,
+    )
+    import k_search.utils.paths as paths_module
+
+    class StopAfterInit(Exception):
+        pass
+
+    class FakeTask:
+        name = "lineage_task"
+
+        def get_definition_text(self, language):
+            return "spec"
+
+    class FakeWorldModel:
+        def ensure_initialized(self, **kwargs):
+            return '{"decision_tree": {"nodes": []}}'
+
+        def get(self, definition_name):
+            return '{"decision_tree": {"nodes": []}}'
+
+    run_ids = iter(["effective-run", "late-run"])
+
+    def fake_get_run_id():
+        return next(run_ids)
+
+    monkeypatch.delenv("KSEARCH_RUN_ID", raising=False)
+    monkeypatch.delenv("KSEARCH_RUN_START", raising=False)
+    monkeypatch.setenv("KSEARCH_TASK_ID", "task-lineage")
+    monkeypatch.setattr(paths_module, "get_run_id", fake_get_run_id)
+
+    generator = WorldModelKernelGeneratorWithBaseline(
+        model_name="fake",
+        language="ascendc",
+        target_gpu="ascend_910b",
+        llm_provider="claude-agent",
+        llm_client=SimpleNamespace(generate=lambda prompt: "{}"),
+        artifacts_dir=str(tmp_path / "artifacts"),
+    )
+    generator._wm = FakeWorldModel()
+    monkeypatch.setattr(
+        generator,
+        "_generate_world_model_cycles_v2",
+        lambda **kwargs: (_ for _ in ()).throw(StopAfterInit),
+    )
+
+    with pytest.raises(StopAfterInit):
+        generator.generate(task=FakeTask(), max_opt_rounds=1)
+
+    expected = (
+        tmp_path
+        / "artifacts"
+        / "lineage_task"
+        / "task-lineage"
+        / "runs"
+        / "effective-run"
+        / "artifacts"
+        / "world_model"
+        / "world_model.json"
+    )
+    wrong = (
+        tmp_path
+        / "artifacts"
+        / "lineage_task"
+        / "task-lineage"
+        / "runs"
+        / "late-run"
+        / "artifacts"
+        / "world_model"
+        / "world_model.json"
+    )
+    assert expected.is_file()
+    assert not wrong.exists()
+
+
 def test_baseline_agentic_memory_writeback_only_for_new_best(tmp_path, monkeypatch):
     from k_search.kernel_generators.kernel_generator import KernelGenerator
     from k_search.kernel_generators.ascendc_agentic_codegen import AscendCAgenticCodegenResult

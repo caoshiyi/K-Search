@@ -62,7 +62,7 @@ anti_pattern_registry:        # 反模式持久化
 
 single_npu_strategy:          # 单卡并行调度
   mechanism: "build/test 不占用 NPU"
-  
+
 npu_device_binding:           # NPU 设备绑定
   mechanism: "KSEARCH_DEVICE_ID 环境变量"
   consistency_levels: "session|strategy"
@@ -132,26 +132,26 @@ digraph flow_v2 {
 ```yaml
 runner_execution_mode:
   default_max_rounds: 1  # 核心改动：改为单轮
-  
+
   check_after_each_round: true  # Dispatcher 必须每轮检查
-  
+
   on_result:
     compile_fail:
       action: "立即启动 Analyzer subagent"
       max_retries: 3
-      
+
     accuracy_fail:
       action: "立即启动 Analyzer subagent"
       max_retries: 3
-      
+
     speedup_below_threshold:
       threshold: 1.0  # 如果比 baseline 还慢
       action: "立即分析为何慢"
-      
+
     speedup_below_expectation:
       threshold_pct: 5  # 预期加速的最小值
       action: "分析为何无效，考虑 refine/split"
-      
+
     success:
       action: "可继续跑 1-2 轮尝试更优，但不超过 max_rounds_per_strategy=3"
 ```
@@ -161,13 +161,13 @@ runner_execution_mode:
 ```yaml
 dispatcher_monitoring:
   polling_interval: 60s  # 每 60s 检查 runner 进度
-  
+
   check_events:
     - "读取 events.jsonl"
     - "检测 eval_result 类型事件"
     - "检测 stage_change 类型事件（build→test→bench）"
     - "立即根据结果做决策"
-  
+
   do_not:
     - "不要等待整个 runner 完成（20轮）才分析"
     - "不要让 runner 继续迭代已知失败的方向"
@@ -218,7 +218,7 @@ strategy_extraction_rules:
 ```yaml
 strategy_format_v2:
   output_format: "design_doc_style"
-  
+
   required_sections:
     - "1_已有模式与变更":
       - existing_patterns:  # 通用模式列表（不提及具体代码）
@@ -227,27 +227,27 @@ strategy_format_v2:
       - optimization_delta:
         must_have: "【变更】marker"
       - expected_speedup_pct
-      
+
     - "2_参数变更表":
       format: "table"
       columns: ["parameter", "baseline", "v1.1", "unit", "remark", "constraint"]
-      
+
     - "3_结构变更模式":
       format: "abstract_pattern"
       pseudo_code: "optional but recommended"
-      
+
     - "4_反模式":
       format: "list"
       required_fields: ["pattern", "reason", "metrics"]
-      
+
     - "5_硬件约束表":
       format: "table"
       columns: ["resource", "capacity", "baseline_usage", "v1.1_usage", "constraint"]
-      
+
     - "6_协同建议":
       - 独立性声明
       - synergistic_with
-      
+
     - "7_验证要点":
       compile_check: [...]
       accuracy_check: [...]
@@ -274,13 +274,13 @@ anti_pattern_structure:
   - id: "AP-XXX"
     pattern: "通用描述"
     category: "compile | accuracy | performance | direction | process"
-    
+
     # 成熟度相关字段
     maturity: "tentative | confirmed | established"
     hit_count: 1
     last_hit_date: "2026-06-04"
     hit_sources: ["s2_v2", "s6_v0"]
-    
+
     detection_signs: [...]
     prevention: [...]
     performance_impact: "量化描述"
@@ -323,7 +323,7 @@ single_npu_strategy:
     - "Runner 在 build/test 阶段不占用 NPU"
     - "只有 bench 阶段需要独占 NPU"
     - "提前启动的 runner 自动排队等待 bench"
-  
+
   implementation:
     - "当前 runner 进入 bench 阶段时 → 启动下一个 runner"
     - "下一个 runner 使用不同的 artifacts_dir"
@@ -353,7 +353,7 @@ max_parallel_runners_formula:
 ```yaml
 npu_device_binding:
   mechanism: "环境变量 KSEARCH_DEVICE_ID"
-  
+
   binding_rule:
     - "每个 runner subagent 启动时设置固定的 KSEARCH_DEVICE_ID"
     - "build/test/bench 全流程使用同一设备 ID"
@@ -401,10 +401,10 @@ pre_run_checks:
       permission: "+x"
     - path: "ksearch_bench.sh"
       permission: "+x"
-      
+
   required_env_vars:
     - "BASELINE_MS"
-    
+
   on_failure:
     missing_files:
       action: "create from template OR copy from reference"
@@ -417,7 +417,7 @@ pre_run_checks:
 ```yaml
 Phase_0_environment_validation:
   trigger: "Dispatcher 在启动第一个 runner 前"
-  
+
   steps:
     - "检查 required_files"
     - "检查执行权限"
@@ -439,7 +439,7 @@ mandatory_strategy_params:
       required: true
     - "--strategy-id {strategy_id}"
       required: true
-      
+
   validation:
     - "检查 run_meta.json 中 strategy_file 字段非空"
     - "检查 events.jsonl 中 action_selected 包含策略 ID"
@@ -461,7 +461,7 @@ mandatory_strategy_params:
 ```yaml
 parameter_table_validation:
   trigger: "Round 1 完成后"
-  
+
   steps:
     - "读取策略 '2_参数变更表'"
     - "解析 diff.patch 中的参数修改"
@@ -501,17 +501,17 @@ parameter_table_validation:
 ```yaml
 mandatory_refine_rule:
   trigger: "Analyzer 完成并返回 root_cause + suggestion"
-  
+
   rules:
     - condition: "root_cause == 'implementation_mismatch'"
       action: "MANDATORY: Spawn Refiner"
       max_skip_attempts: 1
-      
+
     - condition: "root_cause == 'strategy_misinterpretation'"
       action: "Refine + add existing_patterns + add anti-patterns"
-      
+
   max_refine_attempts: 3
-  
+
   only_skip_when:
     - "refine_attempts >= max_refine_attempts"
     - "root_cause == 'environment_fail' AND not fixable"
@@ -539,7 +539,7 @@ state_file_schema_v2:
     - id: "string"
       status: "..."
       assigned_device: "number"
-      
+
       version_history:
         - version: "v0|v1|..."
           device_id: "number"
@@ -547,30 +547,30 @@ state_file_schema_v2:
           speedup: "number"
           analysis_path: "string"
           refined_from: "string"
-          
+
       analysis_history:
         - version: "v2"
           root_cause: "..."
           matched_anti_pattern: "AP-XXX"
-          
+
       refined_versions:
         - version: "v3"
           refinement_reason: "..."
           changes: [...]
-          
+
       anti_patterns_encountered: ["AP-001", "AP-002"]
       lessons_learned: [...]
       refine_attempts: "number"
-      
+
   devices:
     - id: 0
       stage: "idle|build|test|bench"
       current_strategy: "string"
-      
+
   round_tracking:
     current_round: 1
     max_rounds_per_strategy: 3
-    
+
   pre_check_warnings: [...]
 ```
 

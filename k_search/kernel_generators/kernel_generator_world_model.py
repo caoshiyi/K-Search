@@ -1021,7 +1021,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         if wm_ref:
             self._resume_world_model_from_snapshot(task=task, ref=wm_ref, run_id=effective_run_id)
             _emit(render_world_model_status(self._wm.get(task.name)))
-            self._persist_world_model_snapshot(task=task, run_id=run_id)
+            self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
 
         # Optional W&B support
         try:
@@ -1083,7 +1083,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         )
                     _emit("[WM] Initialized+seeded root from continue_from_solution (code+eval).")
                     _emit(render_world_model_status(self._wm.get(task.name)))
-                    self._persist_world_model_snapshot(task=task, run_id=run_id)
+                    self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
             except LLMProviderFatalError as exc:
                 _emit(f"[ERROR] world model seed init failed with fatal provider error: {exc}")
                 raise
@@ -1124,7 +1124,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             dt = time.perf_counter() - t0
             _emit(render_world_model_status(wm))
             _emit(f"[STAGE] world model init latency: {dt:.2f}s")
-            self._persist_world_model_snapshot(task=task, run_id=run_id)
+            self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
             try:
                 _nar = getattr(self, "_narrative", None)
                 if _nar is not None:
@@ -2174,7 +2174,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         round_index=cycle_best_round,
                     )
                 _emit(render_world_model_status(self._wm.get(task.name)))
-                self._persist_world_model_snapshot(task=task, run_id=run_id)
+                self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
                 try:
                     _nar = getattr(self, "_narrative", None)
                     if _nar is not None:
@@ -2217,7 +2217,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             round_index=cycle_start_round + max(0, rounds_consumed - 1),
                         )
                     _emit(render_world_model_status(self._wm.get(task.name)))
-                    self._persist_world_model_snapshot(task=task, run_id=run_id)
+                    self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
                     try:
                         _nar = getattr(self, "_narrative", None)
                         if _nar is not None:

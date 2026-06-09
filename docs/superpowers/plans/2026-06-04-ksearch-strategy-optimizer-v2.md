@@ -43,26 +43,26 @@ Single-round execution mode - the most critical improvement to prevent wasted it
 ```yaml
 runner_execution_mode:
   default_max_rounds: 1  # ⚠️ 核心改动：改为单轮
-  
+
   check_after_each_round: true  # Dispatcher 必须每轮检查
-  
+
   on_result:
     compile_fail:
       action: "立即启动 Analyzer subagent"
       max_retries: 3
-      
+
     accuracy_fail:
       action: "立即启动 Analyzer subagent"
       max_retries: 3
-      
+
     speedup_below_threshold:
       threshold: 1.0  # 如果比 baseline 还慢
       action: "立即分析为何慢"
-      
+
     speedup_below_expectation:
       threshold_pct: 5  # 预期加速的最小值
       action: "分析为何无效，考虑 refine/split"
-      
+
     success:
       action: "可继续跑 1-2 轮尝试更优，但不超过 max_rounds_per_strategy=3"
 ```
@@ -74,13 +74,13 @@ Dispatcher polling logic to check runner progress every 60 seconds.
 ```yaml
 dispatcher_monitoring:
   polling_interval: 60s  # 每 60s 检查 runner 进度
-  
+
   check_events:
     - "读取 events.jsonl"
     - "检测 eval_result 类型事件"
     - "检测 stage_change 类型事件（build→test→bench）"
     - "立即根据结果做决策"
-  
+
   do_not:
     - "❌ 不要等待整个 runner 完成（20轮）才分析"
     - "❌ 不要让 runner 继续迭代已知失败的方向"
@@ -100,7 +100,7 @@ Strategy format using design-document style to prevent misinterpretation.
 ```yaml
 strategy_format_v2:
   output_format: "design_doc_style"
-  
+
   required_sections:
     "1_已有模式与变更":
       existing_patterns:
@@ -111,30 +111,30 @@ strategy_format_v2:
         must_have: "【变更】marker"
         description: "明确标记与 baseline 的差异点"
       expected_speedup_pct: "number"
-      
+
     "2_参数变更表":
       format: "table"
       columns: ["parameter", "baseline", "v1.1", "unit", "remark", "constraint"]
       description: "参数表格必须包含 constraint 字段防止超出约束"
-      
+
     "3_结构变更模式":
       format: "abstract_pattern"
       pseudo_code: "optional but recommended"
       description: "结构变更的通用模式描述（不含具体行号）"
-      
+
     "4_反模式":
       format: "list"
       required_fields: ["pattern", "reason", "metrics"]
       description: "错误实现方式 + 原因 + 性能影响"
-      
+
     "5_硬件约束表":
       format: "table"
       columns: ["resource", "capacity", "baseline_usage", "v1.1_usage", "constraint"]
-      
+
     "6_协同建议":
       独立性声明: "本策略可独立执行"
       synergistic_with: ["strategy_ids"]  # 不强制
-      
+
     "7_验证要点":
       compile_check: ["验证项列表"]
       accuracy_check: ["验证项列表"]
@@ -161,7 +161,7 @@ Anti-pattern knowledge base with maturity upgrade mechanism.
 ```yaml
 anti_pattern_registry:
   storage_path: ".ksearch/anti_patterns.json"
-  
+
   structure:
     id: "AP-XXX"
     pattern: "通用描述（不含具体算子名）"
@@ -173,7 +173,7 @@ anti_pattern_registry:
     detection_signs: ["如何识别"]
     prevention: ["如何避免"]
     performance_impact: "量化描述"
-  
+
   maturity_levels:
     tentative:
       hit_count: "1-2"
@@ -187,12 +187,12 @@ anti_pattern_registry:
       hit_count: ">=5"
       priority: "高（强制预检查）"
       action: "强制注入 + Dispatcher 决策表预检查"
-  
+
   usage:
     - "Phase 1: 策略提取时注入相关反模式到策略描述"
     - "Phase 4b: 分析失败时匹配已有反模式"
     - "Phase 5a: Refine 时添加新发现的反模式"
-  
+
   recording_trigger:
     - "Phase 4b: compile_fail 分析"
     - "Phase 4b: accuracy_fail 分析"
@@ -216,17 +216,17 @@ Single-NPU parallel scheduling - start next runner while current runner is in be
 ```yaml
 single_npu_strategy:
   description: "即使单卡 NPU，也提前启动下一个 runner"
-  
+
   mechanism:
     - "Runner 在 build/test 阶段不占用 NPU（编译、单元测试）"
     - "只有 bench 阶段需要独占 NPU（性能测试）"
     - "提前启动的 runner 自动排队等待 bench 阶段"
-  
+
   implementation:
     - "当前 runner 进入 bench 阶段时 → 启动下一个 runner"
     - "下一个 runner 使用不同的 artifacts_dir（如 .ksearch-s2-v3）"
     - "使用相同的 KSEARCH_DEVICE_ID（排队机制由 K-Search 内部管理）"
-  
+
   timing:
     before: |
       s6:  [build→test→bench★占用NPU] → [完成] → 等待 → s2v3: [build→test→bench★]
@@ -235,7 +235,7 @@ single_npu_strategy:
       s6:  [build→test→bench★占用NPU] → [完成]
       s2v3: [build→test并行] → [等待NPU] → [bench] → [完成]
                                 ↑ s6完成后无缝衔接
-  
+
   benefit:
     - "减少总等待时间"
     - "build/test 阶段并行执行"
@@ -256,23 +256,23 @@ NPU device binding mechanism ensuring session-level and strategy-level consisten
 ```yaml
 npu_device_binding:
   mechanism: "环境变量 KSEARCH_DEVICE_ID"
-  
+
   binding_rule:
     - "每个 runner subagent 启动时设置固定的 KSEARCH_DEVICE_ID"
     - "build/test/bench 全流程使用同一设备 ID"
     - "环境变量在 runner subagent 进程内传递给所有子进程"
-  
+
   consistency_levels:
     session_level:
       scope: "单次 runner 执行内"
       purpose: "baseline vs optimized 在同一设备测试"
       implementation: "KSEARCH_DEVICE_ID 环境变量"
-      
+
     strategy_level:
       scope: "跨多次 runner（v0/v1/v2/v3）"
       purpose: "同一策略所有版本在同一设备测试，版本间可比"
       implementation: "state.strategies[{id}].assigned_device 字段"
-  
+
   device_allocation:
     single_npu: "所有 runner 使用 KSEARCH_DEVICE_ID=0"
     multi_npu: "不同 runner 分配不同 ID (0, 1, 2, ...)"
@@ -293,31 +293,31 @@ Environment validation before starting first runner.
 ```yaml
 pre_run_checks:
   description: "在启动 runner 前验证执行环境"
-  
+
   required_files:
     - path: "ksearch_build.sh"
       purpose: "编译 kernel"
       permission: "+x (executable)"
-      
+
     - path: "ksearch_test.sh"
       purpose: "单元测试"
       permission: "+x (executable)"
-      
+
     - path: "ksearch_bench.sh"
       purpose: "性能测试"
       permission: "+x (executable)"
-      
+
   required_env_vars:
     - "BASELINE_MS: baseline 性能参考值（必需）"
-    
+
   on_failure:
     missing_files:
       action: "create from template OR copy from reference task"
       template_path: "/mnt/workspace/cv_agent/tile2asc/templates/"
-      
+
     missing_permission:
       action: "chmod +x {file_path}"
-      
+
     missing_env_vars:
       action: "abort with error message"
       message: "Required env var {var_name} not set. Please set before running."
@@ -337,21 +337,21 @@ Mandatory strategy file passing to prevent World Model from generating its own d
 ```yaml
 mandatory_strategy_params:
   description: "强制传递策略参数给 World Model，防止其自行生成决策"
-  
+
   params:
     - param: "--strategy-file {strategy_file_path}"
       purpose: "指定策略 catalog 文件路径"
       required: true
-      
+
     - param: "--strategy-id {strategy_id}"
       purpose: "指定要执行的策略 ID"
       required: true
-      
+
   validation:
     - "检查 run_meta.json 中 strategy_file 字段是否非空"
     - "检查 events.jsonl 中 action_selected 是否包含策略 ID"
     - "如果 strategy_file 为空 → 标记为 'strategy_not_passed' 错误"
-    
+
   case_study:
     problem: "s2 v1 运行失败，World Model 自行生成决策树而非使用策略"
     reason: "没有使用 --strategy-file 参数传递策略给 World Model"
@@ -372,25 +372,25 @@ Validate implementation parameters against strategy constraints.
 ```yaml
 parameter_table_validation:
   description: "验证实现后的参数值是否符合策略参数表格约束"
-  
+
   trigger: "Round 1 完成后，Dispatcher 检查 result JSON"
-  
+
   steps:
     - "读取策略的 '2_参数变更表' 章节"
     - "解析 diff.patch 或 solution_path 中的参数修改"
     - "比较实际修改值 vs 策略约束值"
     - "如果超出约束 → 标记 'parameter_violation' 错误"
-    
+
   validation_rules:
     - "如果策略指定 s2BaseSize=512 → 实现不应超过 512"
     - "如果策略指定 max_optimization_points=3 → 实现不应超过 3"
     - "数值参数必须有明确的 constraint 字段"
-    
+
   on_violation:
     action: "立即分析，不上报 success"
     reason: "Implementation direction is wrong (parameter {name}={actual} exceeds constraint {expected})"
     mark_status: "parameter_violation"
-    
+
   case_study:
     problem: "s6 v0 失败，性能变差 3x"
     strategy_constraint: "s2BaseSize=512, constraint: max=512"
@@ -412,33 +412,33 @@ Mandatory refine after analyzer completes - prevent skipping without retry.
 ```yaml
 mandatory_refine_rule:
   description: "分析完成后，必须尝试 refine 并重试（除非达到最大重试次数）"
-  
+
   trigger: "Analyzer subagent 完成并返回 root_cause + suggestion"
-  
+
   rules:
     - condition: "root_cause == 'implementation_mismatch'"
       action: "MANDATORY: Spawn Refiner subagent"
       max_skip_attempts: 1
-      
+
     - condition: "root_cause == 'strategy_misinterpretation'"
       action: "Refine strategy + add existing_patterns + add anti-patterns"
       retry_with_refined: true
-      
+
     - condition: "root_cause == 'parameter_violation'"
       action: "Refine strategy with explicit parameter constraints"
       retry_with_refined: true
-      
+
     - condition: "matched_anti_pattern != null"
       action: "Refine strategy to include matched anti-pattern in '4_反模式'"
       retry_with_refined: true
-      
+
   max_refine_attempts: 3
-  
+
   only_skip_when:
     - "refine_attempts >= max_refine_attempts"
     - "root_cause == 'environment_fail' AND not fixable"
     - "root_cause == 'hardware_constraint' AND cannot be satisfied"
-    
+
   case_study:
     wrong_path: "s2_v2_fail → analyze → ❌ direct_skip → pick_s6"
     correct_path: "s2_v2_fail → analyze → refine → retry_s2_v3 → if fail → refine → retry_s2_v4 → if refine_attempts>=3 → skip"
@@ -682,7 +682,7 @@ Locate the "CRITICAL EXTRACTION RULES:" section and replace/add:
   CRITICAL EXTRACTION RULES:
 
 + 0. STRATEGY FORMAT V2 — Use design-document style format.
-+    
++
 +    Each strategy MUST contain these sections:
 +    - "1_已有模式与变更": existing_patterns (generic, no specific code) + optimization_delta with 【变更】marker
 +    - "2_参数变更表": parameter table with constraint column
@@ -693,16 +693,16 @@ Locate the "CRITICAL EXTRACTION RULES:" section and replace/add:
 +    - "7_验证要点": compile/accuracy/performance checks
 
   1. GRANULARITY BALANCE — Strategies should be sized appropriately...
-  
+
   2. GENERALITY — Strategies must be operator-agnostic and portable.
      - NEVER mention specific operator names (e.g. flash_attention, multi_query_attention)
      - NEVER mention specific file names or paths
      - NEVER mention specific variable names from the source code
 +    - Use GENERIC pattern names: "Outer loop accumulation pattern", "Init flag pattern"
-  
+
   3. SELF-CONTAINED — Each strategy text must be understandable without reading the source document.
 +    Include existing_patterns section to describe what baseline already has.
-  
+
 - 4. DEPENDENCY DECLARATION — If strategy depends on or benefits from another strategy, declare it.
 -   - depends_on: list of strategy IDs that must be applied first (optional)
 -   - synergistic_with: list of strategy IDs that benefit when applied together (optional)
@@ -710,9 +710,9 @@ Locate the "CRITICAL EXTRACTION RULES:" section and replace/add:
 +   - Remove depends_on/prerequisite fields
 +   - If optimization A depends on optimization B → merge into one strategy
 +   - synergistic_with: suggestion for combination, not mandatory
-  
+
 + 5. ANTI-PATTERN INJECTION — Inject relevant anti-patterns from registry.
-+    
++
 +    Before extraction, read .ksearch/anti_patterns.json.
 +    For each strategy:
 +    1. Identify strategy category (memory/compute/pipeline/tiling/sync)
@@ -791,13 +791,13 @@ Locate the "Execution steps:" section and modify:
 + Run K-Search optimization for {operator_name} with a single strategy.
 
 + ⚠️ SINGLE-Round Execution Mode (v2.0):
-+ 
++
 + This is CRITICAL: Use --max-opt-rounds 1 (NOT {max_rounds}).
-+ 
++
 + Do NOT let K-Search run multiple rounds without result check.
 + After Round 1:
 +   - If compile_fail → STOP, report result immediately
-+   - If accuracy_fail → STOP, report result immediately  
++   - If accuracy_fail → STOP, report result immediately
 +   - If speedup < 1.0 → STOP, report "为什么慢"
 +   - If success → can optionally run 1-2 more rounds (max 3 total)
 
@@ -820,26 +820,26 @@ Add before Execution steps:
 
 ```diff
 + ⚠️ STRATEGY FILE MANDATORY (v2.0):
-+ 
++
 + The following parameters are REQUIRED:
 +   --strategy-file {strategy_file_path}  ← Strategy catalog file
 +   --strategy-id {strategy_id}           ← Which strategy to apply
-+ 
++
 + WITHOUT these, World Model will generate its own decisions → WRONG direction.
-+ 
++
 + 【案例教训】s2 v1 失败：未传 --strategy-file，World Model 自行生成决策树
 
 + ⚠️ PARAMETER TABLE CONSTRAINT (v2.0):
-+ 
++
 + Strategy contains '2_参数变更表' with explicit constraints.
 + When implementing:
 +   1. Use EXACT values from 'v1.1' column
 +   2. Respect 'constraint' field (e.g., "max=512" → NOT 1024)
-+ 
++
 + After Round 1, verify:
 +   grep -E "mBaseSize|s2BaseSize" diff.patch
 +   Compare against parameter table constraints
-+ 
++
 + 【案例教训】s6 v0：s2BaseSize=1024 (超出约束512) → 3x slower
 ```
 
@@ -976,26 +976,26 @@ Read lines 337-365 to find Refiner prompt template.
 
 ```diff
 + ⚠️ MANDATORY REFINE RULE (v2.0):
-+ 
++
 + You MUST refine the strategy based on analyzer feedback.
 + Do NOT suggest skipping without attempting refine.
-+ 
++
 + Refine MUST include:
 +   1. Update '1_已有模式与变更' based on root_cause
 +   2. Add new anti-patterns to '4_反模式' based on matched_anti_pattern
 +   3. Update parameter constraints if parameter_violation
 +   4. Keep strategy GENERIC (no specific operator/file/variable names)
-+ 
++
 + 【案例教训】s2 v2 分析后直接跳过 → 浪费分析成果
 
   Refine this optimization strategy based on feedback.
-  
+
   Original strategy:
   {original_strategy}
-  
+
   Feedback:
   {feedback_json}
-  
+
   Requirements:
   - Keep the core optimization intent
   - Add constraints to avoid the identified failure
@@ -1128,23 +1128,23 @@ The dispatcher maintains a state file at `{artifacts_dir}/strategy_optimizer_sta
       "attempts": 2,
       "best_speedup": 1.3,
       "refine_attempts": 1,
-      
+
       "version_history": [
         {"version": "v0", "device_id": 0, "status": "compile_fail", "speedup": null, "analysis_path": null},
         {"version": "v1", "device_id": 0, "status": "success", "speedup": 1.3, "refined_from": null}
       ],
-      
+
       "analysis_history": [
         {"version": "v0", "root_cause": "compile_error", "matched_anti_pattern": null, "analysis_path": "..."}
       ],
-      
+
       "refined_versions": [
         {"version": "v1", "refinement_reason": "add constraint", "changes": ["Added parameter constraint"]}
       ],
-      
+
       "anti_patterns_encountered": ["AP-001"],
       "lessons_learned": ["必须传递 --strategy-file"],
-      
+
       "size_signal_history": ["too_large", "ok"],
       "optimization_points_count": 2,
       "failure_reasons": ["compile: undefined symbol..."],
@@ -1152,19 +1152,19 @@ The dispatcher maintains a state file at `{artifacts_dir}/strategy_optimizer_sta
       "combined_from": null
     }
   ],
-  
+
   "devices": [
     {"id": 0, "stage": "idle|build|test|bench", "current_strategy": "s6", "current_runner": "runner-1"}
   ],
-  
+
   "round_tracking": {
     "current_round": 1,
     "max_rounds_per_strategy": 3,
     "rounds_without_progress": 0
   },
-  
+
   "pre_check_warnings": ["s2 triggers AP-001 detection_signs"],
-  
+
   "current_strategy_idx": 3,
   "total_strategies": 6,
   "cumulative_best_speedup": 1.5,

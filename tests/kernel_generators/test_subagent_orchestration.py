@@ -7,6 +7,7 @@ from k_search.kernel_generators.claude_agent_project_editor import ClaudeProject
 from k_search.kernel_generators.subagent_orchestration import (
     SubagentFlowConfig,
     SubagentStageConfig,
+    filter_stages_after_restore,
     load_default_subagent_flow,
     load_subagent_flows,
     load_subagent_flow,
@@ -313,3 +314,176 @@ def test_run_configured_subagent_flow_fails_when_required_file_missing(tmp_path)
             base_prompt="BASE",
             flow=flow,
         )
+
+
+def test_run_configured_subagent_flow_saves_stage_checkpoints_in_order(tmp_path):
+    flow = SubagentFlowConfig(
+        name="test-flow",
+        description="Test flow.",
+        stages=(
+            SubagentStageConfig(
+                name="designer",
+                agent="designer",
+                instruction="Create ASCENDC_DESIGN.md.",
+                required_files=("ASCENDC_DESIGN.md",),
+            ),
+            SubagentStageConfig(
+                name="reviewer",
+                agent="reviewer",
+                instruction="Create REVIEW_NOTES.md.",
+                required_files=("REVIEW_NOTES.md",),
+            ),
+        ),
+    )
+
+    class StageCheckpointRecorder:
+        def __init__(self):
+            self.calls = []
+
+        def save_stage_start(self, **kwargs):
+            self.calls.append(("start", kwargs["stage"].name, kwargs["stage_index"], kwargs["round_num"], kwargs["attempt_idx"]))
+            return tmp_path / "start_manifest.json"
+
+        def save_stage_completed(self, **kwargs):
+            self.calls.append(("completed", kwargs["stage"].name, kwargs["stage_index"], kwargs["round_num"], kwargs["attempt_idx"]))
+            return tmp_path / "completed_manifest.json"
+
+    class SessionClient:
+        def open_session(self, *, project_dir, telemetry_recorder=None):
+            return SimpleNamespace(project_dir=Path(project_dir), _closed=False)
+
+        def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+            root = Path(session.project_dir)
+            if "Stage 1/2: designer" in prompt:
+                (root / "ASCENDC_DESIGN.md").write_text("# design\n", encoding="utf-8")
+                text = "designer done"
+            elif "Stage 2/2: reviewer" in prompt:
+                (root / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
+                text = "reviewer done"
+            else:
+                raise AssertionError(f"unexpected prompt: {prompt}")
+            return ClaudeProjectEditResult(
+                text=text,
+                transcript=text,
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+        def close_session(self, session):
+            session._closed = True
+
+    recorder = StageCheckpointRecorder()
+
+    run_configured_subagent_flow(
+        editor_client=SessionClient(),
+        project_dir=tmp_path,
+        base_prompt="BASE",
+        flow=flow,
+        stage_checkpoint_manager=recorder,
+        checkpoint_task=SimpleNamespace(name="task"),
+        round_num=4,
+        attempt_idx=2,
+        runtime_state={"attempt": {"flow_name": "test-flow"}},
+    )
+
+    assert recorder.calls == [
+        ("start", "designer", 1, 4, 2),
+        ("completed", "designer", 1, 4, 2),
+        ("start", "reviewer", 2, 4, 2),
+        ("completed", "reviewer", 2, 4, 2),
+    ]
+
+
+def test_filter_stages_after_restore_skips_completed_and_starts_at_next_pending(tmp_path):
+    (tmp_path / "CODE_MAP.md").write_text("# map\n", encoding="utf-8")
+    (tmp_path / "ASCENDC_DESIGN.md").write_text("# design\n", encoding="utf-8")
+    flow = SubagentFlowConfig(
+        name="test-flow",
+        description="Test flow.",
+        stages=(
+            SubagentStageConfig(
+                name="code-reader",
+                agent="code-reader",
+                instruction="Create CODE_MAP.md.",
+                required_files=("CODE_MAP.md",),
+            ),
+            SubagentStageConfig(
+                name="designer",
+                agent="designer",
+                instruction="Create ASCENDC_DESIGN.md.",
+                required_files=("ASCENDC_DESIGN.md",),
+            ),
+            SubagentStageConfig(
+                name="codegen",
+                agent="codegen",
+                instruction="Create implementation.",
+                required_files=("IMPLEMENTATION_HANDOFF.md",),
+            ),
+            SubagentStageConfig(
+                name="reviewer",
+                agent="reviewer",
+                instruction="Review.",
+                required_files=("REVIEW_NOTES.md",),
+            ),
+        ),
+    )
+    restored_state = {
+        "stages": [
+            {"index": 1, "name": "code-reader", "status": "completed", "required_files": ["CODE_MAP.md"]},
+            {"index": 2, "name": "designer", "status": "completed", "required_files": ["ASCENDC_DESIGN.md"]},
+            {"index": 3, "name": "codegen", "status": "pending", "required_files": ["IMPLEMENTATION_HANDOFF.md"]},
+            {"index": 4, "name": "reviewer", "status": "pending", "required_files": ["REVIEW_NOTES.md"]},
+        ]
+    }
+
+    active = filter_stages_after_restore(
+        active_stages=list(flow.stages),
+        restored_stage_state=restored_state,
+        project_root=tmp_path,
+    )
+
+    assert [stage.name for stage in active] == ["codegen", "reviewer"]
+
+
+def test_filter_stages_after_restore_reruns_running_stage(tmp_path):
+    (tmp_path / "CODE_MAP.md").write_text("# map\n", encoding="utf-8")
+    flow = SubagentFlowConfig(
+        name="test-flow",
+        description="Test flow.",
+        stages=(
+            SubagentStageConfig(
+                name="code-reader",
+                agent="code-reader",
+                instruction="Create CODE_MAP.md.",
+                required_files=("CODE_MAP.md",),
+            ),
+            SubagentStageConfig(
+                name="designer",
+                agent="designer",
+                instruction="Create ASCENDC_DESIGN.md.",
+                required_files=("ASCENDC_DESIGN.md",),
+            ),
+            SubagentStageConfig(
+                name="codegen",
+                agent="codegen",
+                instruction="Create implementation.",
+                required_files=("IMPLEMENTATION_HANDOFF.md",),
+            ),
+        ),
+    )
+    restored_state = {
+        "stages": [
+            {"index": 1, "name": "code-reader", "status": "completed", "required_files": ["CODE_MAP.md"]},
+            {"index": 2, "name": "designer", "status": "running", "required_files": ["ASCENDC_DESIGN.md"]},
+            {"index": 3, "name": "codegen", "status": "pending", "required_files": ["IMPLEMENTATION_HANDOFF.md"]},
+        ]
+    }
+
+    active = filter_stages_after_restore(
+        active_stages=list(flow.stages),
+        restored_stage_state=restored_state,
+        project_root=tmp_path,
+    )
+
+    assert [stage.name for stage in active] == ["designer", "codegen"]

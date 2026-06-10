@@ -3,6 +3,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,7 +12,10 @@ from k_search.kernel_generators.ascendc_agentic_codegen import (
     AscendCAgenticCodegenRunner,
     AscendCAgenticPromptBuilder,
 )
+from k_search.kernel_generators.checkpoint_v3 import StageCheckpointConfig
+from k_search.kernel_generators.checkpoint_v3 import StageCheckpointManager
 from k_search.kernel_generators.claude_agent_project_editor import ClaudeProjectEditResult
+from k_search.kernel_generators.subagent_orchestration import load_subagent_flows
 from k_search.tasks.ascendc_task import AscendCTask
 from k_search.tasks.task_base import BuildSpec, Solution, SourceFile, SupportedLanguages
 
@@ -1824,6 +1828,185 @@ def test_continue_fix_uses_native_prompt_and_run_scoped_artifacts(tmp_path, monk
     assert str(
         tmp_path / "artifacts" / "x" / "task-native-continue" / "runs" / "native-continue" / "artifacts"
     ) in second.artifact_paths["manifest_path"]
+
+
+def test_runner_writes_checkpoint_v3_stage_boundaries(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    monkeypatch.setenv("KSEARCH_TASK_ID", "task-checkpoint-v3")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(
+        task_path=task_dir,
+        definition_name="x",
+        artifacts_dir=str(tmp_path / "artifacts"),
+        build_cmd=_py_cmd("print('build ok')"),
+        test_cmd=_py_cmd("print('correctness ok')"),
+        bench_cmd=_py_cmd("print('latency_ms=1.0')"),
+        reference_latency_ms=2.0,
+        timeout_seconds=30,
+    )
+    client = NativeSessionClient()
+    runner = AscendCAgenticCodegenRunner(
+        model_name="claude",
+        editor_client=client,
+        stage_checkpoint_config=StageCheckpointConfig(enabled=True),
+    )
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec",
+            action_text="change beta",
+            trace_logs="",
+            perf_summary="",
+            target_gpu="ascend_910b",
+            round_num=2,
+            attempt_idx=1,
+            mode="action",
+            run_id="checkpoint-v3-run",
+            task_name="x",
+        ),
+        base_solution=None,
+    )
+
+    checkpoints_dir = (
+        tmp_path
+        / "artifacts"
+        / "x"
+        / "task-checkpoint-v3"
+        / "runs"
+        / "checkpoint-v3-run"
+        / "artifacts"
+        / "checkpoints"
+    )
+    latest = json.loads((checkpoints_dir / "latest.json").read_text(encoding="utf-8"))
+    manifest_path = checkpoints_dir / latest["latest_checkpoint_path"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    stage_state = json.loads((manifest_path.parent / "stage_state.json").read_text(encoding="utf-8"))
+
+    assert result.eval_result.status == "passed"
+    assert manifest["checkpoint_kind"] == "stage_completed"
+    assert manifest["position"]["last_completed_stage_name"] == "reviewer"
+    assert manifest["position"]["next_stage_index"] is None
+    assert [item["status"] for item in stage_state["stages"]] == ["completed", "completed", "completed", "completed"]
+    assert (manifest_path.parent / "stage" / "handoff" / "REVIEW_NOTES.md").is_file()
+
+
+def test_runner_resumes_checkpoint_v3_from_designer_completed(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "0")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    monkeypatch.setenv("KSEARCH_TASK_ID", "task-checkpoint-v3-resume")
+    checkpoint_project = tmp_path / "checkpoint_project"
+    (checkpoint_project / "kernel").mkdir(parents=True)
+    (checkpoint_project / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    (checkpoint_project / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
+    (checkpoint_project / "ASCENDC_DESIGN.md").write_text("# ASCENDC_DESIGN\nuse uppercase beta\n", encoding="utf-8")
+    flow = load_subagent_flows().get("initial_codegen")
+    manager = StageCheckpointManager(
+        artifacts_dir=tmp_path / "previous_artifacts",
+        task_name="x",
+        task_id="previous-task",
+        run_id="previous-run",
+        config=StageCheckpointConfig(enabled=True),
+    )
+    designer_manifest = manager.save_stage_completed(
+        task=SimpleNamespace(name="x", definition_name="x", task_path=str(checkpoint_project)),
+        project_dir=checkpoint_project,
+        flow=flow,
+        stage=flow.stages[1],
+        stage_index=2,
+        round_num=2,
+        attempt_idx=1,
+        prompt="designer prompt",
+        result=ClaudeProjectEditResult(
+            text="designer done",
+            transcript="designer done",
+            prompt="designer prompt",
+            prompt_chars=len("designer prompt"),
+            prompt_lines=1,
+        ),
+        session=None,
+        telemetry_recorder=None,
+        runtime_state={},
+    )
+
+    class ResumeSessionClient(NativeSessionClient):
+        def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+            self.prompts.append(prompt)
+            root = Path(session.project_dir)
+            if prompt.startswith("Stage 1/2: codegen"):
+                assert (root / "CODE_MAP.md").is_file()
+                assert (root / "ASCENDC_DESIGN.md").is_file()
+                (root / "IMPLEMENTATION_EXECUTION_PLAN.md").write_text(
+                    "# IMPLEMENTATION_EXECUTION_PLAN\nChange beta to BETA.\n",
+                    encoding="utf-8",
+                )
+                (root / "IMPLEMENTATION_HANDOFF.md").write_text(
+                    "# IMPLEMENTATION_HANDOFF\nChanged kernel/foo.h.\n",
+                    encoding="utf-8",
+                )
+                (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+                text = "codegen done"
+            elif prompt.startswith("Stage 2/2: reviewer"):
+                (root / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
+                text = "reviewer done"
+            else:
+                raise AssertionError(f"unexpected prompt: {prompt.splitlines()[0]}")
+            return ClaudeProjectEditResult(
+                text=text,
+                transcript=text,
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(
+        task_path=task_dir,
+        definition_name="x",
+        artifacts_dir=str(tmp_path / "artifacts"),
+        build_cmd=_py_cmd("print('build ok')"),
+        test_cmd=_py_cmd("print('correctness ok')"),
+        bench_cmd=_py_cmd("print('latency_ms=1.0')"),
+        reference_latency_ms=2.0,
+        timeout_seconds=30,
+    )
+    client = ResumeSessionClient()
+    runner = AscendCAgenticCodegenRunner(
+        model_name="claude",
+        editor_client=client,
+        stage_checkpoint_config=StageCheckpointConfig(
+            enabled=True,
+            resume_from=str(designer_manifest),
+        ),
+    )
+
+    result = runner.run(
+        task=task,
+        request=AscendCAgenticCodegenRequest(
+            definition_text="spec",
+            action_text="resume same action",
+            trace_logs="",
+            perf_summary="",
+            target_gpu="ascend_910b",
+            round_num=2,
+            attempt_idx=1,
+            mode="action",
+            run_id="checkpoint-v3-resume-run",
+            task_name="x",
+        ),
+        base_solution=None,
+    )
+
+    assert result.eval_result.status == "passed"
+    assert [prompt.splitlines()[0] for prompt in client.prompts] == [
+        "Stage 1/2: codegen",
+        "Stage 2/2: reviewer",
+    ]
 
 
 def test_continue_improve_uses_codegen_flow_without_bug_fixer(tmp_path, monkeypatch):

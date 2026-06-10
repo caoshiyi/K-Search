@@ -13,6 +13,7 @@ from generate_kernels_and_eval import (
     generate_and_evaluate,
     main,
 )
+from k_search.kernel_generators.checkpoint_v3 import StageCheckpointConfig
 
 
 def test_resolve_llm_config_defaults_to_openai_and_reads_env_key(monkeypatch):
@@ -191,6 +192,104 @@ def test_generate_and_evaluate_saves_solution_under_explicit_run_id(tmp_path, mo
         )
     )
     assert len(saved_solutions) == 1
+
+
+def test_stage_checkpoint_config_from_args_requires_world_model():
+    args = SimpleNamespace(
+        checkpoint_v3=True,
+        task_source="ascendc",
+        language="ascendc",
+        world_model=False,
+        checkpoint_resume_claude_session=False,
+        checkpoint_claude_session_required=False,
+        checkpoint_subagent_resume=False,
+        checkpoint_require_subagent_agent_id=False,
+        checkpoint_enable_claude_file_checkpointing=False,
+        checkpoint_session_store_kind="none",
+        checkpoint_session_store_config=None,
+        checkpoint_resume_stage_policy="next-pending",
+        checkpoint_file_state_source="project-snapshot",
+    )
+
+    with pytest.raises(ValueError, match="--world-model"):
+        cli._stage_checkpoint_config_from_args(args, llm_provider="claude-agent")
+
+
+def test_stage_checkpoint_config_rejects_session_store_with_file_checkpointing():
+    args = SimpleNamespace(
+        checkpoint_v3=True,
+        task_source="ascendc",
+        language="ascendc",
+        world_model=True,
+        checkpoint_resume_claude_session=True,
+        checkpoint_claude_session_required=False,
+        checkpoint_subagent_resume=False,
+        checkpoint_require_subagent_agent_id=False,
+        checkpoint_enable_claude_file_checkpointing=True,
+        checkpoint_session_store_kind="custom",
+        checkpoint_session_store_config="store.json",
+        checkpoint_resume_stage_policy="next-pending",
+        checkpoint_file_state_source="project-snapshot",
+    )
+
+    with pytest.raises(ValueError, match="SessionStore cannot be combined"):
+        cli._stage_checkpoint_config_from_args(args, llm_provider="claude-agent")
+
+
+def test_generate_and_evaluate_passes_stage_checkpoint_config_to_world_model_generator(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_TASK_ID", "checkpoint-task")
+    seen = {}
+
+    class FakeTask:
+        name = "checkpoint_task"
+
+        def get_config_for_logging(self):
+            return {}
+
+        def run_final_evaluation(self, *, solutions, config, dump_traces, workload_limit):
+            return SimpleNamespace()
+
+    class FakeWorldModelGenerator:
+        def __init__(self, **kwargs):
+            seen["generator_kwargs"] = kwargs
+
+        def generate(
+            self,
+            *,
+            task,
+            max_opt_rounds,
+            wm_stagnation_window,
+            continue_from_solution=None,
+            continue_from_world_model=None,
+            continue_from_run=None,
+            run_id=None,
+        ):
+            return SimpleNamespace(name="fake_solution", description="")
+
+    monkeypatch.setattr(
+        "k_search.kernel_generators.kernel_generator_world_model.WorldModelKernelGeneratorWithBaseline",
+        FakeWorldModelGenerator,
+    )
+    config = StageCheckpointConfig(enabled=True)
+
+    generate_and_evaluate(
+        FakeTask(),
+        model_name="fake",
+        base_url=None,
+        api_key=None,
+        language="ascendc",
+        target_gpu="ascend_910b",
+        max_opt_rounds=1,
+        save_results=False,
+        save_solutions=False,
+        llm_provider="claude-agent",
+        run_id="checkpoint-run",
+        artifacts_dir=str(tmp_path / "artifacts"),
+        enable_world_model=True,
+        stage_checkpoint_config=config,
+    )
+
+    assert seen["generator_kwargs"]["stage_checkpoint_config"] is config
 
 
 def test_main_pins_task_id_when_absent(tmp_path, monkeypatch):

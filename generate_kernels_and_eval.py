@@ -31,6 +31,40 @@ def _resolve_llm_config_from_args(args: Any) -> tuple[str, Optional[str]]:
         )
     return llm_provider, api_key
 
+
+def _stage_checkpoint_config_from_args(args: Any, *, llm_provider: str) -> Any:
+    from k_search.kernel_generators.checkpoint_v3 import (
+        StageCheckpointConfig,
+        validate_stage_checkpoint_config,
+    )
+
+    config = StageCheckpointConfig(
+        enabled=bool(getattr(args, "checkpoint_v3", False) or getattr(args, "resume_from_checkpoint", None)),
+        resume_from=(
+            str(getattr(args, "resume_from_checkpoint", "") or "").strip()
+            or None
+        ),
+        save_stage_start=bool(getattr(args, "checkpoint_stage_start", True)),
+        save_stage_completed=bool(getattr(args, "checkpoint_stage_boundary", True)),
+        resume_claude_session=bool(getattr(args, "checkpoint_resume_claude_session", False)),
+        claude_session_required=bool(getattr(args, "checkpoint_claude_session_required", False)),
+        subagent_resume=bool(getattr(args, "checkpoint_subagent_resume", False)),
+        require_subagent_agent_id=bool(getattr(args, "checkpoint_require_subagent_agent_id", False)),
+        enable_claude_file_checkpointing=bool(getattr(args, "checkpoint_enable_claude_file_checkpointing", False)),
+        session_store_kind=str(getattr(args, "checkpoint_session_store_kind", "none") or "none"),
+        session_store_config=getattr(args, "checkpoint_session_store_config", None),
+        resume_stage_policy=getattr(args, "checkpoint_resume_stage_policy", "next-pending"),
+        file_state_source=getattr(args, "checkpoint_file_state_source", "project-snapshot"),
+    )
+    validate_stage_checkpoint_config(
+        config,
+        task_source=str(getattr(args, "task_source", "") or ""),
+        language=str(getattr(args, "language", "") or ""),
+        llm_provider=llm_provider,
+        world_model=bool(getattr(args, "world_model", False)),
+    )
+    return config
+
 def _persist_ksearch_solution(
     solution: Any, *, definition_name: str, artifacts_dir: Optional[str], run_id: Optional[str] = None
 ) -> Optional[Path]:
@@ -152,6 +186,7 @@ def generate_and_evaluate(
     # Strategy injection
     strategy_file: Optional[str] = None,
     strategy_form: Optional[str] = None,
+    stage_checkpoint_config: Any | None = None,
 ) -> None:
     """
     Generate exactly one solution for the task, then run final evaluation.
@@ -217,6 +252,7 @@ def generate_and_evaluate(
         "continue_from_run": continue_from_run,
         "strategy_file": strategy_file,
         "strategy_form": strategy_form,
+        "checkpoint_v3": bool(getattr(stage_checkpoint_config, "enabled", False)),
         "status": "running",
     }
     try:
@@ -305,6 +341,7 @@ def generate_and_evaluate(
             llm_provider=llm_provider,
             strategy_file=strategy_file,
             strategy_form=strategy_form,
+            stage_checkpoint_config=stage_checkpoint_config,
         )
     else:
         # Non-world-model mode: baseline-style generator (task-driven).
@@ -615,6 +652,21 @@ def main():
         ),
     )
 
+    # Checkpoint V3 options
+    parser.add_argument("--checkpoint-v3", action="store_true", help="Enable V3 stage-boundary checkpoints for AscendC Claude world-model runs")
+    parser.add_argument("--resume-from-checkpoint", default=None, help="Resume from a V3 checkpoint ref, manifest path, checkpoint directory, or 'latest'")
+    parser.add_argument("--checkpoint-stage-boundary", action=argparse.BooleanOptionalAction, default=True, help="Save stage_completed checkpoints")
+    parser.add_argument("--checkpoint-stage-start", action=argparse.BooleanOptionalAction, default=True, help="Save stage_start checkpoints")
+    parser.add_argument("--checkpoint-resume-claude-session", action="store_true", help="Attempt best-effort Claude session resume when restoring a V3 checkpoint")
+    parser.add_argument("--checkpoint-claude-session-required", action="store_true", help="Fail restore if Claude session resume fails")
+    parser.add_argument("--checkpoint-subagent-resume", action="store_true", help="Enable best-effort completed subagent follow-up resume metadata")
+    parser.add_argument("--checkpoint-require-subagent-agent-id", action="store_true", help="Require captured subagent agentId for strict subagent resume debugging")
+    parser.add_argument("--checkpoint-enable-claude-file-checkpointing", action="store_true", help="Enable Claude SDK file checkpoint UUID capture for local debugging")
+    parser.add_argument("--checkpoint-session-store-kind", choices=["none", "custom"], default="none", help="Optional Claude SessionStore kind")
+    parser.add_argument("--checkpoint-session-store-config", default=None, help="Config path for a custom Claude SessionStore adapter")
+    parser.add_argument("--checkpoint-resume-stage-policy", choices=["next-pending"], default="next-pending")
+    parser.add_argument("--checkpoint-file-state-source", choices=["project-snapshot"], default="project-snapshot")
+
     # Strategy injection options
     parser.add_argument(
         "--strategy-file",
@@ -669,6 +721,7 @@ def main():
             args.language = "ascendc"
 
     llm_provider, api_key = _resolve_llm_config_from_args(args)
+    stage_checkpoint_config = _stage_checkpoint_config_from_args(args, llm_provider=llm_provider)
 
     task = _build_task_from_args(args)
 
@@ -695,6 +748,7 @@ def main():
         run_name=args.run_name,
         strategy_file=args.strategy_file,
         strategy_form=args.strategy_form,
+        stage_checkpoint_config=stage_checkpoint_config,
     )
 
 

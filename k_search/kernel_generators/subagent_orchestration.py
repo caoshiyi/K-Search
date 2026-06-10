@@ -246,10 +246,31 @@ def run_configured_subagent_flow(
     close_session_on_exit: bool = True,
     stage_prompt_sink: Any | None = None,
     prompt_hygiene_known_paths: list[str | Path] | tuple[str | Path, ...] | None = None,
+    stage_checkpoint_manager: Any | None = None,
+    restored_stage_state: dict[str, Any] | None = None,
+    checkpoint_task: Any | None = None,
+    round_num: int | None = None,
+    attempt_idx: int | None = None,
+    runtime_state: dict[str, Any] | None = None,
 ) -> ClaudeProjectEditResult:
     project_root = Path(project_dir).expanduser().resolve()
     active_stages = [stage for stage in flow.stages if _should_run_stage(stage, project_root)]
+    restored_filter_applied = restored_stage_state is not None
+    if restored_stage_state is not None:
+        active_stages = filter_stages_after_restore(
+            active_stages=active_stages,
+            restored_stage_state=restored_stage_state,
+            project_root=project_root,
+        )
     if not active_stages:
+        if restored_filter_applied:
+            return ClaudeProjectEditResult(
+                text="stage checkpoint restore: no pending subagent stages",
+                transcript="",
+                prompt=str(base_prompt or ""),
+                prompt_chars=len(str(base_prompt or "")),
+                prompt_lines=(str(base_prompt or "").count("\n") + 1 if base_prompt else 0),
+            )
         raise RuntimeError(f"subagent flow {flow.name!r} has no active stages")
 
     owns_session = session is None
@@ -260,6 +281,7 @@ def run_configured_subagent_flow(
     try:
         for index, stage in enumerate(active_stages, start=1):
             _validate_stage_agent_is_in_flow(flow, stage)
+            flow_stage_index = _flow_stage_index(flow, stage)
             prompt = render_subagent_stage_prompt(
                 flow=flow,
                 stage=stage,
@@ -273,6 +295,19 @@ def run_configured_subagent_flow(
             )
             if stage_prompt_sink is not None:
                 stage_prompt_sink.write(index=index, stage=stage, prompt=prompt, hygiene=hygiene)
+            if stage_checkpoint_manager is not None:
+                stage_checkpoint_manager.save_stage_start(
+                    task=checkpoint_task,
+                    project_dir=project_root,
+                    flow=flow,
+                    stage=stage,
+                    stage_index=flow_stage_index,
+                    round_num=round_num if round_num is not None else 0,
+                    attempt_idx=attempt_idx if attempt_idx is not None else 0,
+                    prompt=prompt,
+                    session=session,
+                    runtime_state=runtime_state or {},
+                )
             event_start = len(getattr(telemetry_recorder, "events", []) or [])
             result = editor_client.send_prompt(
                 session,
@@ -286,6 +321,21 @@ def run_configured_subagent_flow(
                 event_start=event_start,
                 require_agent_tool_use=bool(getattr(editor_client, "require_agent_tool_use", False)),
             )
+            if stage_checkpoint_manager is not None:
+                stage_checkpoint_manager.save_stage_completed(
+                    task=checkpoint_task,
+                    project_dir=project_root,
+                    flow=flow,
+                    stage=stage,
+                    stage_index=flow_stage_index,
+                    round_num=round_num if round_num is not None else 0,
+                    attempt_idx=attempt_idx if attempt_idx is not None else 0,
+                    prompt=prompt,
+                    result=result,
+                    session=session,
+                    telemetry_recorder=telemetry_recorder,
+                    runtime_state=runtime_state or {},
+                )
             stage_results.append(result)
             transcript = _merge_transcript(transcript, result.transcript)
     finally:
@@ -311,6 +361,67 @@ def _should_run_stage(stage: SubagentStageConfig, project_root: Path) -> bool:
     if not stage.run_when_missing_files:
         return True
     return any(not (project_root / path).is_file() for path in stage.run_when_missing_files)
+
+
+def filter_stages_after_restore(
+    *,
+    active_stages: list[SubagentStageConfig],
+    restored_stage_state: dict[str, Any],
+    project_root: str | Path,
+    policy: str = "next-pending",
+) -> list[SubagentStageConfig]:
+    if policy != "next-pending":
+        raise ValueError("only next-pending stage restore policy is supported")
+    if not isinstance(restored_stage_state, dict):
+        return list(active_stages)
+
+    root = Path(project_root).expanduser().resolve()
+    state_records = [
+        item
+        for item in list(restored_stage_state.get("stages") or [])
+        if isinstance(item, dict)
+    ]
+    state_records.sort(key=lambda item: int(item.get("index") or 0))
+    start_state: dict[str, Any] | None = None
+    for item in state_records:
+        status = str(item.get("status") or "pending").strip().lower()
+        if status == "skipped":
+            continue
+        if status == "completed":
+            required = [str(path) for path in list(item.get("required_files") or []) if str(path).strip()]
+            missing = [path for path in required if not (root / path).is_file()]
+            if missing:
+                start_state = item
+                break
+            continue
+        start_state = item
+        break
+
+    if start_state is None:
+        return []
+
+    start_name = _normalize_stage_name(start_state.get("name"))
+    start_agent = str(start_state.get("agent") or "").strip()
+    active = list(active_stages)
+    for index, stage in enumerate(active):
+        if _normalize_stage_name(stage.name) == start_name:
+            return active[index:]
+        if start_agent and str(stage.agent or "").strip() == start_agent:
+            return active[index:]
+    return []
+
+
+def _normalize_stage_name(value: Any) -> str:
+    return str(value or "").strip().replace("_", "-")
+
+
+def _flow_stage_index(flow: SubagentFlowConfig, stage: SubagentStageConfig) -> int:
+    for index, candidate in enumerate(flow.stages, start=1):
+        if candidate is stage:
+            return index
+        if candidate.name == stage.name and candidate.agent == stage.agent:
+            return index
+    return 0
 
 
 def _require_stage_files(project_root: Path, stage: SubagentStageConfig) -> None:

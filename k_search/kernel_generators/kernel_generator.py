@@ -47,6 +47,7 @@ class KernelGenerator:
         reasoning_effort: str = "medium",  # only used for openai-compatible reasoning models
         llm_provider: str = "openai",
         llm_client: Optional[LLMClient] = None,
+        stage_checkpoint_config: Any | None = None,
     ):
         """
         Args:
@@ -64,6 +65,7 @@ class KernelGenerator:
         self.target_gpu = target_gpu
         self.reasoning_effort = reasoning_effort
         self.llm_provider = normalize_llm_provider(llm_provider)
+        self._stage_checkpoint_config = stage_checkpoint_config
         self.llm_client = llm_client or build_llm_client(
             llm_provider=self.llm_provider,
             model_name=self.model_name,
@@ -394,7 +396,10 @@ class KernelGenerator:
     def _agentic_runner(self) -> AscendCAgenticCodegenRunner:
         runner = getattr(self, "_ascendc_agentic_runner", None)
         if runner is None:
-            runner = AscendCAgenticCodegenRunner(model_name=str(self.model_name))
+            runner = AscendCAgenticCodegenRunner(
+                model_name=str(self.model_name),
+                stage_checkpoint_config=getattr(self, "_stage_checkpoint_config", None),
+            )
             self._ascendc_agentic_runner = runner
         return runner
 

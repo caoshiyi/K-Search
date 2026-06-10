@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -156,6 +157,62 @@ def _agent_name_allowed(observed: str, allowed_agents: set[str]) -> bool:
         if name == expected or name.endswith(":" + expected) or name.endswith("/" + expected):
             return True
     return False
+
+
+def extract_agent_id_from_tool_result(block: Any) -> str | None:
+    content: Any
+    if isinstance(block, dict):
+        content = block.get("content")
+    else:
+        content = getattr(block, "content", None)
+    parts = content if isinstance(content, list) else [content]
+    for part in parts:
+        if isinstance(part, dict):
+            text = part.get("text")
+        else:
+            text = getattr(part, "text", None)
+            if text is None:
+                text = str(part or "")
+        match = re.search(r"agentId:\s*([\w.-]+)", str(text or ""))
+        if match:
+            return match.group(1)
+    return None
+
+
+def _message_content_blocks(message: Any) -> list[Any]:
+    if isinstance(message, dict):
+        content = message.get("content")
+    else:
+        content = getattr(message, "content", None)
+    if isinstance(content, list):
+        return list(content)
+    if content is None:
+        return []
+    return [content]
+
+
+def _capture_checkpoint_metadata(
+    message: Any,
+    *,
+    user_message_uuids: list[str],
+    subagent_agent_ids: list[str],
+    subagent_invocations: list[dict[str, Any]],
+) -> None:
+    uuid_value = getattr(message, "uuid", None)
+    if isinstance(message, dict):
+        uuid_value = message.get("uuid", uuid_value)
+    if isinstance(uuid_value, str) and uuid_value.strip() and uuid_value not in user_message_uuids:
+        user_message_uuids.append(uuid_value.strip())
+
+    for block in _message_content_blocks(message):
+        agent_id = extract_agent_id_from_tool_result(block)
+        if not agent_id:
+            continue
+        if agent_id not in subagent_agent_ids:
+            subagent_agent_ids.append(agent_id)
+        invocation = {"agent_id": agent_id}
+        if invocation not in subagent_invocations:
+            subagent_invocations.append(invocation)
 
 
 def _resolve_tool_path_under_root(project_root: Path, raw_path: str) -> Path:
@@ -312,6 +369,10 @@ class ClaudeProjectEditResult:
     model_usage: dict[str, Any] | None = None
     num_turns: int | None = None
     duration_ms: int | None = None
+    file_checkpoint_uuid: str | None = None
+    user_message_uuids: list[str] | None = None
+    subagent_agent_ids: list[str] | None = None
+    subagent_invocations: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -326,6 +387,12 @@ class ClaudeAgentProjectEditorClient:
     require_agent_tool_use: bool = True
     thinking_enabled: bool = field(default_factory=_default_claude_agent_thinking_enabled)
     timeout_seconds: float = field(default_factory=_default_claude_agent_timeout_seconds)
+    resume_session_id: str | None = None
+    continue_conversation: bool = False
+    fork_session: bool = False
+    enable_file_checkpointing: bool = False
+    session_store: Any | None = None
+    session_store_flush: str = "batched"
 
     def _build_options_kwargs(self, project_root: Path) -> dict[str, Any]:
         native_agent_names = list(self.native_agents)
@@ -366,6 +433,20 @@ class ClaudeAgentProjectEditorClient:
             options_kwargs["max_turns"] = self.max_turns
         if not self.thinking_enabled:
             options_kwargs["thinking"] = {"type": "disabled"}
+        if self.resume_session_id:
+            options_kwargs["resume"] = str(self.resume_session_id)
+        if self.continue_conversation:
+            options_kwargs["continue_conversation"] = True
+        if self.fork_session:
+            options_kwargs["fork_session"] = True
+        if self.enable_file_checkpointing:
+            options_kwargs["enable_file_checkpointing"] = True
+            extra_args = dict(options_kwargs.get("extra_args") or {})
+            extra_args["replay-user-messages"] = None
+            options_kwargs["extra_args"] = extra_args
+        if self.session_store is not None:
+            options_kwargs["session_store"] = self.session_store
+            options_kwargs["session_store_flush"] = self.session_store_flush
         return options_kwargs
 
     def edit_project(self, *, project_dir: str | Path, prompt: str, telemetry_recorder: TelemetryRecorder | None = None) -> ClaudeProjectEditResult:
@@ -390,6 +471,9 @@ class ClaudeAgentProjectEditorClient:
             options = claude_agent_sdk.ClaudeAgentOptions(**options_kwargs)
             chunks: list[str] = []
             final_text = ""
+            user_message_uuids: list[str] = []
+            subagent_agent_ids: list[str] = []
+            subagent_invocations: list[dict[str, Any]] = []
             try:
                 async with claude_agent_sdk.ClaudeSDKClient(options=options) as client:
                     recorder.emit(
@@ -402,6 +486,12 @@ class ClaudeAgentProjectEditorClient:
                     await client.query(prompt_text)
                     result_event: TelemetryEvent | None = None
                     async for message in client.receive_response():
+                        _capture_checkpoint_metadata(
+                            message,
+                            user_message_uuids=user_message_uuids,
+                            subagent_agent_ids=subagent_agent_ids,
+                            subagent_invocations=subagent_invocations,
+                        )
                         for event in event_from_claude_message(message):
                             event.provider = event.provider or "claude-agent"
                             event.model_name = event.model_name or self.model_name
@@ -463,6 +553,10 @@ class ClaudeAgentProjectEditorClient:
                 model_usage=result_event.model_usage if result_event else None,
                 num_turns=result_event.num_turns if result_event else None,
                 duration_ms=result_event.duration_ms if result_event else None,
+                file_checkpoint_uuid=user_message_uuids[0] if user_message_uuids else None,
+                user_message_uuids=user_message_uuids,
+                subagent_agent_ids=subagent_agent_ids,
+                subagent_invocations=subagent_invocations,
             )
 
         try:
@@ -610,9 +704,18 @@ class ClaudeAgentProjectEditorClient:
             chunks: list[str] = list(session.chunks)
             final_text = ""
             result_event: TelemetryEvent | None = None
+            user_message_uuids: list[str] = []
+            subagent_agent_ids: list[str] = []
+            subagent_invocations: list[dict[str, Any]] = []
 
             await session.client.query(prompt_text)
             async for message in session.client.receive_response():
+                _capture_checkpoint_metadata(
+                    message,
+                    user_message_uuids=user_message_uuids,
+                    subagent_agent_ids=subagent_agent_ids,
+                    subagent_invocations=subagent_invocations,
+                )
                 for event in event_from_claude_message(message):
                     event.provider = event.provider or "claude-agent"
                     event.model_name = event.model_name or session.model_name
@@ -650,6 +753,10 @@ class ClaudeAgentProjectEditorClient:
                 model_usage=result_event.model_usage if result_event else None,
                 num_turns=result_event.num_turns if result_event else None,
                 duration_ms=result_event.duration_ms if result_event else None,
+                file_checkpoint_uuid=user_message_uuids[0] if user_message_uuids else None,
+                user_message_uuids=user_message_uuids,
+                subagent_agent_ids=subagent_agent_ids,
+                subagent_invocations=subagent_invocations,
             )
 
         try:

@@ -28,6 +28,10 @@ from k_search.kernel_generators.claude_agent_project_editor import (
     ClaudeProjectEditResult,
     ClaudeProjectEditorSession,
 )
+from k_search.kernel_generators.checkpoint_v3 import (
+    StageCheckpointConfig,
+    StageCheckpointManager,
+)
 from k_search.kernel_generators.project_snapshot import ProjectSnapshot, create_project_snapshot
 from k_search.kernel_generators.stage_prompt_artifacts import StagePromptSink
 from k_search.kernel_generators.runtime_artifacts import (
@@ -54,6 +58,7 @@ from k_search.telemetry.context import TelemetryContext
 from k_search.telemetry.recorder import build_file_recorder
 from k_search.utils.path_sanitize import sanitize_worktree_paths
 from k_search.utils.paths import get_ksearch_artifacts_dir, get_ksearch_worktrees_dir, get_run_id
+from k_search.utils.paths import get_task_id
 
 
 logger = logging.getLogger(__name__)
@@ -314,6 +319,31 @@ def _edit_project_with_optional_telemetry(
         if "telemetry_recorder" not in str(exc):
             raise
         return editor_client.edit_project(project_dir=project_dir, prompt=prompt)
+
+
+def _overlay_restored_project_into_worktree(*, restored_project_dir: Path, worktree_project_dir: Path) -> None:
+    restored = Path(restored_project_dir).expanduser().resolve()
+    worktree = Path(worktree_project_dir).expanduser().resolve()
+    if not restored.is_dir():
+        raise FileNotFoundError(f"restored checkpoint project directory not found: {restored}")
+    worktree.mkdir(parents=True, exist_ok=True)
+    for child in list(worktree.iterdir()):
+        if child.name == ".git":
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    for src in sorted(restored.iterdir()):
+        if src.name == ".git":
+            continue
+        dst = worktree / src.name
+        if src.is_dir() and not src.is_symlink():
+            shutil.copytree(src, dst, symlinks=True)
+        elif src.is_symlink():
+            os.symlink(os.readlink(src), dst)
+        else:
+            shutil.copy2(src, dst)
 
 
 def _is_native_handoff_path(path: str) -> bool:
@@ -1095,6 +1125,8 @@ class AscendCAgenticCycle:
         self.last_edit_result: ClaudeProjectEditResult | None = None
         self.code_map_reuse_manifest: dict[str, Any] = {"reused": False, "reason": "not_checked"}
         self.last_stage_prompt_records: list[dict[str, Any]] = []
+        self.stage_checkpoint_manager: StageCheckpointManager | None = None
+        self.restored_stage_state: dict[str, Any] | None = None
         self._closed = False
         self._initial_has_run = False
 
@@ -1150,6 +1182,31 @@ class AscendCAgenticCycle:
                 self.editor_session = self.runner.editor_client.open_session(
                     project_dir=self.wt_session.project_dir,
                 )
+            checkpoint_config = self.runner.stage_checkpoint_config
+            if checkpoint_config is not None and checkpoint_config.enabled:
+                self.stage_checkpoint_manager = StageCheckpointManager(
+                    artifacts_dir=get_ksearch_artifacts_dir(
+                        base_dir=getattr(self.task, "artifacts_dir", None),
+                        task_name=self.task_name,
+                        run_id=self.run_id,
+                    ),
+                    task_name=self.task_name,
+                    task_id=get_task_id(),
+                    run_id=self.run_id,
+                    config=checkpoint_config,
+                )
+                if checkpoint_config.resume_from:
+                    restored = self.stage_checkpoint_manager.restore(
+                        checkpoint_config.resume_from,
+                        target_run_id=self.run_id,
+                    )
+                    _overlay_restored_project_into_worktree(
+                        restored_project_dir=restored.restored_project_dir,
+                        worktree_project_dir=self.wt_session.project_dir,
+                    )
+                    _materialize_native_assets_baseline(self.wt_session)
+                    self.restored_stage_state = restored.stage_state
+                    self.has_code_map = (self.wt_session.project_dir / CODE_MAP.filename).is_file()
         except BaseException:
             self.close()
             raise
@@ -1279,6 +1336,8 @@ class AscendCAgenticCycle:
     ) -> ClaudeProjectEditResult:
         assert self.wt_session is not None
         if supports_configured_subagent_flow(self.runner.editor_client):
+            restored_stage_state = self.restored_stage_state
+            self.restored_stage_state = None
             return run_configured_subagent_flow(
                 editor_client=self.runner.editor_client,
                 project_dir=self.wt_session.project_dir,
@@ -1289,6 +1348,25 @@ class AscendCAgenticCycle:
                 close_session_on_exit=False,
                 stage_prompt_sink=stage_prompt_sink,
                 prompt_hygiene_known_paths=[getattr(self.task, "task_path", "")],
+                stage_checkpoint_manager=self.stage_checkpoint_manager,
+                restored_stage_state=restored_stage_state,
+                checkpoint_task=self.task,
+                round_num=self.request.round_num,
+                attempt_idx=self.request.attempt_idx,
+                runtime_state={
+                    "position": {
+                        "round_num": self.request.round_num,
+                        "attempt_idx": self.request.attempt_idx,
+                    },
+                    "action": {
+                        "action_node_id": self.request.action_node_id,
+                        "parent_candidate_id": self.request.parent_candidate_id,
+                    },
+                    "attempt": {
+                        "mode": self.request.mode,
+                        "flow_name": flow.name,
+                    },
+                },
             )
         return _edit_project_with_optional_telemetry(
             self.runner.editor_client,
@@ -1710,9 +1788,14 @@ class AscendCAgenticCodegenRunner:
         subagent_flow: SubagentFlowConfig | None = None,
         repair_subagent_flow: SubagentFlowConfig | None = None,
         improve_subagent_flow: SubagentFlowConfig | None = None,
+        stage_checkpoint_config: StageCheckpointConfig | None = None,
     ) -> None:
         self.model_name = str(model_name)
         self.editor_client = editor_client or ClaudeAgentProjectEditorClient(model_name=self.model_name)
+        self.stage_checkpoint_config = stage_checkpoint_config
+        if stage_checkpoint_config is not None:
+            if hasattr(self.editor_client, "enable_file_checkpointing"):
+                self.editor_client.enable_file_checkpointing = bool(stage_checkpoint_config.enable_claude_file_checkpointing)
         self.reader_editor_client = reader_editor_client
         self.prompt_builder = prompt_builder or AscendCAgenticPromptBuilder()
         flow_set = load_subagent_flows()

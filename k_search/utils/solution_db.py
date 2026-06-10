@@ -92,4 +92,7 @@ class SolutionDB:
     def get(self, solution_id: str) -> Optional[SolutionRecord]:
         return self._records.get(solution_id)
 
+    @property
+    def jsonl_path(self) -> Optional[Path]:
+        return self._jsonl_path
 

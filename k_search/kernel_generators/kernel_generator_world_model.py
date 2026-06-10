@@ -14,6 +14,7 @@ from typing import Any, Optional
 from pathlib import Path
 
 from k_search.kernel_generators.ascendc_agentic_codegen import AscendCAgenticCodegenRequest
+from k_search.kernel_generators.checkpoint import CheckpointConfig, CheckpointManager, RestoredCheckpoint
 from k_search.kernel_generators.kernel_generator import KernelGenerator
 from k_search.kernel_generators.llm_clients import LLMProviderFatalError, llm_log_context
 from k_search.tasks.task_base import code_from_solution
@@ -39,7 +40,7 @@ from k_search.kernel_generators.world_model import (
     render_world_model_status,
 )
 from k_search.utils.solution_db import SolutionDB
-from k_search.utils.paths import get_ksearch_artifacts_dir, get_run_id, get_run_logs_dir
+from k_search.utils.paths import get_ksearch_artifacts_dir, get_run_id, get_run_logs_dir, get_task_id
 from k_search.telemetry.narrative import RunNarrativeLogger
 
 
@@ -834,6 +835,30 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             raise ValueError(f"Invalid world model JSON (could not parse/normalize): {p}")
         self._wm.set(str(getattr(task, "name", "") or ""), dump_world_model_obj(obj))
 
+    def _restore_world_model_from_checkpoint(self, *, task: Any, restored: RestoredCheckpoint) -> None:
+        raw_wm = Path(restored.world_model_path).read_text(encoding="utf-8")
+        obj = load_world_model_obj(raw_wm or "")
+        if obj is None:
+            raise ValueError(f"Invalid checkpoint world model JSON: {restored.world_model_path}")
+        self._wm.set(str(getattr(task, "name", "") or ""), raw_wm)
+
+    def _save_cycle_checkpoint_if_enabled(self, **kwargs: Any) -> None:
+        cfg = getattr(self, "_checkpoint_config", CheckpointConfig())
+        if self._checkpoint_manager is None:
+            return
+        if not (bool(cfg.enabled) or bool(cfg.resume_from)):
+            return
+        if str(cfg.every or "cycle") != "cycle":
+            raise NotImplementedError("V1 checkpointing supports only checkpoint_every='cycle'")
+        self._checkpoint_manager.save_cycle_checkpoint(
+            **kwargs,
+            llm_provider=str(getattr(self, "llm_provider", "") or ""),
+            model_name=str(getattr(self, "model_name", "") or ""),
+            language=str(self.language),
+            target_gpu=str(self.target_gpu),
+            resume_mode=str(cfg.resume_mode or "new-run"),
+        )
+
     def __init__(
         self,
         *args,
@@ -845,6 +870,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         # Strategy injection: load external strategy catalog and seed WM with strategy-derived nodes.
         strategy_file: str | None = None,
         strategy_form: str | None = None,
+        checkpoint_config: CheckpointConfig | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -852,6 +878,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         self._artifacts_dir = artifacts_dir
         self._strategy_file = strategy_file
         self._strategy_form = strategy_form
+        self._checkpoint_config = checkpoint_config or CheckpointConfig()
+        self._checkpoint_manager: CheckpointManager | None = None
+        self._restored_checkpoint: RestoredCheckpoint | None = None
 
         # Load strategy catalog if provided.
         self._strategy_catalog: list[Any] | None = None
@@ -927,6 +956,38 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         # Store run_id in task for downstream artifact and telemetry lineage.
         setattr(task, "_ksearch_run_id", effective_run_id)
 
+        checkpoint_resume = str(self._checkpoint_config.resume_from or "").strip()
+        restored_checkpoint: RestoredCheckpoint | None = None
+        if bool(self._checkpoint_config.enabled) or checkpoint_resume:
+            if str(self._checkpoint_config.every or "cycle") != "cycle":
+                raise NotImplementedError("V1 checkpointing supports only checkpoint_every='cycle'")
+            self._checkpoint_manager = CheckpointManager(
+                artifacts_dir=self._artifacts_dir,
+                task_name=str(getattr(task, "name", "") or ""),
+                task_id=get_task_id(),
+                run_id=effective_run_id,
+                config=self._checkpoint_config,
+            )
+            if checkpoint_resume:
+                ref = self._checkpoint_manager.resolve(
+                    checkpoint_resume,
+                    policy=self._checkpoint_config.resume_policy,
+                )
+                restored_checkpoint = self._checkpoint_manager.restore_to_run(
+                    ref,
+                    target_run_id=effective_run_id,
+                )
+                self._restored_checkpoint = restored_checkpoint
+                self._restore_world_model_from_checkpoint(task=task, restored=restored_checkpoint)
+                if continue_from_solution:
+                    _emit_msg = "--resume-from-checkpoint specified; ignoring continue_from_solution"
+                    print(f"[WARN] {_emit_msg}", flush=True)
+                    continue_from_solution = None
+                if continue_from_world_model:
+                    _emit_msg = "--resume-from-checkpoint specified; ignoring continue_from_world_model"
+                    print(f"[WARN] {_emit_msg}", flush=True)
+                    continue_from_world_model = None
+
         def _stage(msg: str) -> None:
             m = (msg or "").strip()
             if not m:
@@ -986,15 +1047,18 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         if self._solution_db is None:
             _stage("init SolutionDB")
             try:
-                db_path = (
-                    get_ksearch_artifacts_dir(
-                        base_dir=self._artifacts_dir,
-                        task_name=str(getattr(task, "name", "") or ""),
-                        run_id=effective_run_id,
+                if restored_checkpoint is not None and restored_checkpoint.solution_db_path is not None:
+                    db_path = restored_checkpoint.solution_db_path
+                else:
+                    db_path = (
+                        get_ksearch_artifacts_dir(
+                            base_dir=self._artifacts_dir,
+                            task_name=str(getattr(task, "name", "") or ""),
+                            run_id=effective_run_id,
+                        )
+                        / "world_model"
+                        / "solution_db.jsonl"
                     )
-                    / "world_model"
-                    / "solution_db.jsonl"
-                )
             except Exception:
                 db_path = get_ksearch_artifacts_dir(base_dir=self._artifacts_dir, task_name=None) / "world_model" / "solution_db.jsonl"
             self._solution_db = SolutionDB(
@@ -1018,7 +1082,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
 
         # Optional: resume world model from a JSON snapshot on disk.
         wm_ref = str(continue_from_world_model or "").strip()
-        if wm_ref:
+        if wm_ref and restored_checkpoint is None:
             self._resume_world_model_from_snapshot(task=task, ref=wm_ref, run_id=effective_run_id)
             _emit(render_world_model_status(self._wm.get(task.name)))
             self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
@@ -1032,7 +1096,16 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         # Seed initial code
         current_code = None
         current_raw_code = None
-        if continue_from_solution:
+        if restored_checkpoint is not None:
+            _stage(f"resume from checkpoint={restored_checkpoint.checkpoint_id}")
+            if restored_checkpoint.current_solution is not None:
+                current_code, current_raw_code = code_from_solution(
+                    self.language,
+                    restored_checkpoint.current_solution,
+                )
+            self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
+            _emit(render_world_model_status(self._wm.get(task.name)))
+        elif continue_from_solution:
             _stage(f"resume from solution={continue_from_solution}")
             base_sol = task.get_solution(continue_from_solution)
             if base_sol is None:
@@ -1149,6 +1222,10 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             max_dai=max_dai,
             initial_raw_code=(current_raw_code if isinstance(current_raw_code, str) else None),
             run_id=effective_run_id,
+            start_round=(restored_checkpoint.start_round if restored_checkpoint is not None else 1),
+            restored_best_solution=(restored_checkpoint.best_solution if restored_checkpoint is not None else None),
+            restored_best_eval=(restored_checkpoint.best_eval if restored_checkpoint is not None else None),
+            restored_best_score=(restored_checkpoint.best_score if restored_checkpoint is not None else None),
         )
         # (legacy loop removed; v2 runs all optimization rounds)
 
@@ -1161,6 +1238,10 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         max_dai: int,
         initial_raw_code: Optional[str] = None,
         run_id: Optional[str] = None,
+        start_round: int = 1,
+        restored_best_solution: Optional[Any] = None,
+        restored_best_eval: Optional[EvalResult] = None,
+        restored_best_score: Optional[float] = None,
     ) -> Any:
         """
         Simpler state machine:
@@ -1265,17 +1346,17 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 return str(code)
             return str(raw or "")
 
-        best_solution: Optional[Any] = None
-        best_eval: Optional[EvalResult] = None
-        best_score: float = -1.0
+        best_solution: Optional[Any] = restored_best_solution
+        best_eval: Optional[EvalResult] = restored_best_eval
+        best_score: float = float(restored_best_score) if restored_best_score is not None else -1.0
 
         current_raw_code: Any = str(initial_raw_code or "")
-        last_solution: Optional[Any] = None
+        last_solution: Optional[Any] = restored_best_solution
 
         # Walk action cycles. Each cycle keeps trying the SAME chosen action node until:
         # - we see no improvements for `stagnation_window` consecutive rounds, OR
         # - we hit max_opt_rounds.
-        cycle_start_round = 1
+        cycle_start_round = int(start_round or 1)
         while cycle_start_round <= max_opt_rounds:
             try:
                 stagnation_window = int(wm_stagnation_window)
@@ -1461,6 +1542,8 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             cycle_best_manifest_path: str | None = None
             cycle_best_changed_paths: list[str] = []
             cycle_best_diff_summary: str = ""
+            cycle_best_project_snapshot: Any | None = None
+            cycle_best_session_id: str | None = None
             # Multi-turn SDK session/worktree owner for agentic AscendC (cycle-level).
             agentic_cycle_cm: Any = None
             agentic_cycle: Any = None
@@ -1745,6 +1828,8 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                     )
                                     cycle_best_changed_paths = list(result.changed_paths or [])
                                     cycle_best_diff_summary = str(result.diff_text or "")[:4000]
+                                    cycle_best_project_snapshot = getattr(result, "project_snapshot", None)
+                                    cycle_best_session_id = getattr(result, "session_id", None)
                                     no_improve_streak = 0
                                 else:
                                     no_improve_streak += 1
@@ -2200,6 +2285,43 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         )
                 except Exception:
                     pass
+                self._save_cycle_checkpoint_if_enabled(
+                    task=task,
+                    round_index=cycle_best_round,
+                    cycle_start_round=cycle_start_round,
+                    action_node_id=str(chosen_leaf or ""),
+                    next_round=cycle_start_round + max(1, rounds_consumed),
+                    world_model_json=self._wm.get(task.name),
+                    solution_db_path=(self._solution_db.jsonl_path if self._solution_db is not None else None),
+                    best_solution=best_solution,
+                    best_eval=best_eval,
+                    best_score=best_score,
+                    current_solution=cycle_best_solution,
+                    current_eval=cycle_best_eval,
+                    cycle_best_solution=cycle_best_solution,
+                    cycle_best_eval=cycle_best_eval,
+                    cycle_best_score=cycle_best_score,
+                    candidate_manifest_path=cycle_best_manifest_path,
+                    candidate_diff=cycle_best_diff_summary,
+                    project_snapshot=cycle_best_project_snapshot,
+                    claude_session={
+                        "schema_version": 1,
+                        "session_id": cycle_best_session_id,
+                        "cwd": None,
+                        "resume_supported": bool(cycle_best_session_id),
+                        "file_checkpointing_enabled": False,
+                        "session_store_enabled": False,
+                        "session_store_kind": None,
+                        "notes": "Claude state is auxiliary; K-Search manifest is authoritative.",
+                    },
+                    max_opt_rounds=max_opt_rounds,
+                    wm_stagnation_window=wm_stagnation_window,
+                    wm_max_difficulty=getattr(
+                        getattr(getattr(self._wm, "_cfg", None), "selection_policy", None),
+                        "max_difficulty_1_to_5",
+                        None,
+                    ),
+                )
             else:
                 _stage("cycle end: no PASSED solution; mark action too hard")
                 try:
@@ -2247,6 +2369,29 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     raise
                 except Exception as exc:
                     _emit(f"[WARN] world model too-hard update failed: {type(exc).__name__}: {exc}")
+                self._save_cycle_checkpoint_if_enabled(
+                    task=task,
+                    round_index=cycle_start_round + max(0, rounds_consumed - 1),
+                    cycle_start_round=cycle_start_round,
+                    action_node_id=str(chosen_leaf or ""),
+                    next_round=cycle_start_round + max(1, rounds_consumed),
+                    world_model_json=self._wm.get(task.name),
+                    solution_db_path=(self._solution_db.jsonl_path if self._solution_db is not None else None),
+                    best_solution=best_solution,
+                    best_eval=best_eval,
+                    best_score=best_score,
+                    current_solution=last_solution,
+                    current_eval=round_eval,
+                    last_solution=last_solution,
+                    last_eval=last_eval,
+                    max_opt_rounds=max_opt_rounds,
+                    wm_stagnation_window=wm_stagnation_window,
+                    wm_max_difficulty=getattr(
+                        getattr(getattr(self._wm, "_cfg", None), "selection_policy", None),
+                        "max_difficulty_1_to_5",
+                        None,
+                    ),
+                )
 
             cycle_start_round += max(1, rounds_consumed)
 

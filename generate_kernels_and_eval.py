@@ -32,18 +32,64 @@ def _resolve_llm_config_from_args(args: Any) -> tuple[str, Optional[str]]:
     return llm_provider, api_key
 
 
+def _checkpoint_requested(args: Any) -> bool:
+    return bool(
+        getattr(args, "checkpoint_enable", False)
+        or getattr(args, "checkpoint_v3", False)
+        or getattr(args, "resume_from_checkpoint", None)
+    )
+
+
+def _validate_checkpoint_args(args: Any, *, llm_provider: str) -> None:
+    if not _checkpoint_requested(args):
+        return
+    if not bool(getattr(args, "world_model", False)):
+        raise ValueError("checkpoint requires --world-model")
+    if str(llm_provider or "").strip() != "claude-agent":
+        raise ValueError("checkpoint currently supports only --llm-provider claude-agent")
+    if str(getattr(args, "language", "") or "").strip().lower() != "ascendc":
+        raise ValueError("checkpoint currently supports only --language ascendc")
+    if str(getattr(args, "task_source", "") or "").strip().lower() != "ascendc":
+        raise ValueError("checkpoint currently supports only --task-source ascendc")
+
+
+def _build_checkpoint_config_from_args(args: Any) -> Any:
+    from k_search.kernel_generators.checkpoint import CheckpointConfig
+
+    v3_enabled = bool(getattr(args, "checkpoint_v3", False))
+    return CheckpointConfig(
+        enabled=bool(getattr(args, "checkpoint_enable", False)),
+        every=str(getattr(args, "checkpoint_every", "cycle") or "cycle"),
+        checkpoint_dir=getattr(args, "checkpoint_dir", None),
+        keep=int(getattr(args, "checkpoint_keep", 5)),
+        resume_from=(None if v3_enabled else getattr(args, "resume_from_checkpoint", None)),
+        resume_mode=str(getattr(args, "resume_mode", "new-run") or "new-run"),
+        resume_policy=str(getattr(args, "resume_policy", "latest") or "latest"),
+        include_project_snapshot_payload=bool(getattr(args, "checkpoint_include_project_snapshot", True)),
+        enable_claude_file_checkpointing=bool(
+            getattr(args, "checkpoint_enable_claude_file_checkpointing", False)
+        ),
+        resume_claude_session=bool(getattr(args, "checkpoint_resume_claude_session", False)),
+        retry_failed_attempt=bool(getattr(args, "checkpoint_retry_failed_attempt", False)),
+    )
+
+
 def _stage_checkpoint_config_from_args(args: Any, *, llm_provider: str) -> Any:
     from k_search.kernel_generators.checkpoint_v3 import (
         StageCheckpointConfig,
         validate_stage_checkpoint_config,
     )
 
+    v3_enabled = bool(getattr(args, "checkpoint_v3", False))
+    v3_resume_from = (
+        str(getattr(args, "resume_from_checkpoint", "") or "").strip()
+        or None
+        if v3_enabled
+        else None
+    )
     config = StageCheckpointConfig(
-        enabled=bool(getattr(args, "checkpoint_v3", False) or getattr(args, "resume_from_checkpoint", None)),
-        resume_from=(
-            str(getattr(args, "resume_from_checkpoint", "") or "").strip()
-            or None
-        ),
+        enabled=v3_enabled,
+        resume_from=v3_resume_from,
         save_stage_start=bool(getattr(args, "checkpoint_stage_start", True)),
         save_stage_completed=bool(getattr(args, "checkpoint_stage_boundary", True)),
         resume_claude_session=bool(getattr(args, "checkpoint_resume_claude_session", False)),
@@ -187,6 +233,18 @@ def generate_and_evaluate(
     strategy_file: Optional[str] = None,
     strategy_form: Optional[str] = None,
     stage_checkpoint_config: Any | None = None,
+    # Checkpointing (AscendC + Claude Agent SDK + world model only)
+    checkpoint_enable: bool = False,
+    checkpoint_every: str = "cycle",
+    checkpoint_dir: Optional[str] = None,
+    checkpoint_keep: int = 5,
+    resume_from_checkpoint: Optional[str] = None,
+    resume_mode: str = "new-run",
+    resume_policy: str = "latest",
+    checkpoint_include_project_snapshot: bool = True,
+    checkpoint_enable_claude_file_checkpointing: bool = False,
+    checkpoint_resume_claude_session: bool = False,
+    checkpoint_retry_failed_attempt: bool = False,
 ) -> None:
     """
     Generate exactly one solution for the task, then run final evaluation.
@@ -250,6 +308,13 @@ def generate_and_evaluate(
         "continue_from_solution": continue_from_solution,
         "continue_from_world_model": continue_from_world_model,
         "continue_from_run": continue_from_run,
+        "checkpoint_enable": bool(checkpoint_enable),
+        "checkpoint_every": checkpoint_every,
+        "checkpoint_dir": checkpoint_dir,
+        "checkpoint_keep": int(checkpoint_keep),
+        "resume_from_checkpoint": resume_from_checkpoint,
+        "resume_mode": resume_mode,
+        "resume_policy": resume_policy,
         "strategy_file": strategy_file,
         "strategy_form": strategy_form,
         "checkpoint_v3": bool(getattr(stage_checkpoint_config, "enabled", False)),
@@ -329,6 +394,21 @@ def generate_and_evaluate(
     if enable_world_model:
         # World-model mode uses the WM generator (task-driven).
         from k_search.kernel_generators.kernel_generator_world_model import WorldModelKernelGeneratorWithBaseline
+        from k_search.kernel_generators.checkpoint import CheckpointConfig
+
+        checkpoint_config = CheckpointConfig(
+            enabled=bool(checkpoint_enable),
+            every=checkpoint_every,  # type: ignore[arg-type]
+            checkpoint_dir=checkpoint_dir,
+            keep=int(checkpoint_keep),
+            resume_from=resume_from_checkpoint,
+            resume_mode=resume_mode,  # type: ignore[arg-type]
+            resume_policy=resume_policy,  # type: ignore[arg-type]
+            include_project_snapshot_payload=bool(checkpoint_include_project_snapshot),
+            enable_claude_file_checkpointing=bool(checkpoint_enable_claude_file_checkpointing),
+            resume_claude_session=bool(checkpoint_resume_claude_session),
+            retry_failed_attempt=bool(checkpoint_retry_failed_attempt),
+        )
 
         generator = WorldModelKernelGeneratorWithBaseline(
             model_name=model_name,
@@ -342,6 +422,7 @@ def generate_and_evaluate(
             strategy_file=strategy_file,
             strategy_form=strategy_form,
             stage_checkpoint_config=stage_checkpoint_config,
+            checkpoint_config=checkpoint_config,
         )
     else:
         # Non-world-model mode: baseline-style generator (task-driven).
@@ -357,6 +438,14 @@ def generate_and_evaluate(
         )
 
     # Generate exactly one solution.
+    if resume_from_checkpoint:
+        if continue_from_solution:
+            print("[WARN] --resume-from-checkpoint specified; ignoring --continue-from-solution")
+            continue_from_solution = None
+        if continue_from_world_model:
+            print("[WARN] --resume-from-checkpoint specified; ignoring --continue-from-world-model")
+            continue_from_world_model = None
+
     if enable_world_model:
         solution = generator.generate(
             task=task,
@@ -598,6 +687,43 @@ def main():
         ),
     )
     parser.add_argument("--feedback-workloads", nargs="+", default=None, help="Explicit workload UUIDs to use for optimization feedback rounds")
+    parser.add_argument("--checkpoint-enable", action="store_true", help="Enable AscendC Claude Agent world-model checkpoints")
+    parser.add_argument(
+        "--checkpoint-every",
+        choices=["cycle", "attempt"],
+        default="cycle",
+        help="Checkpoint save boundary. V1 supports cycle; attempt is reserved for V2.",
+    )
+    parser.add_argument("--checkpoint-dir", default=None, help="Override checkpoint directory (default: run artifacts/checkpoints)")
+    parser.add_argument("--checkpoint-keep", type=int, default=5, help="Number of checkpoint directories to retain")
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        default=None,
+        help="Resume from checkpoint ref: latest, checkpoint id, or manifest path",
+    )
+    parser.add_argument("--resume-mode", choices=["same-run", "new-run"], default="new-run")
+    parser.add_argument("--resume-policy", choices=["latest", "stable"], default="latest")
+    parser.add_argument(
+        "--checkpoint-include-project-snapshot",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include project snapshot payload in checkpoints when available",
+    )
+    parser.add_argument(
+        "--checkpoint-enable-claude-file-checkpointing",
+        action="store_true",
+        help="Reserved V2 option: request Claude file checkpointing metadata when supported",
+    )
+    parser.add_argument(
+        "--checkpoint-resume-claude-session",
+        action="store_true",
+        help="Reserved V2 option: try to resume Claude session metadata when safe",
+    )
+    parser.add_argument(
+        "--checkpoint-retry-failed-attempt",
+        action="store_true",
+        help="Reserved V2 option for retrying a failed attempt after restore",
+    )
     # Nsight Compute
     parser.add_argument("--feedback-trace-policy", default="first", choices=["first", "random"], help="Policy for selecting feedback traces")
     parser.add_argument(
@@ -654,14 +780,11 @@ def main():
 
     # Checkpoint V3 options
     parser.add_argument("--checkpoint-v3", action="store_true", help="Enable V3 stage-boundary checkpoints for AscendC Claude world-model runs")
-    parser.add_argument("--resume-from-checkpoint", default=None, help="Resume from a V3 checkpoint ref, manifest path, checkpoint directory, or 'latest'")
     parser.add_argument("--checkpoint-stage-boundary", action=argparse.BooleanOptionalAction, default=True, help="Save stage_completed checkpoints")
     parser.add_argument("--checkpoint-stage-start", action=argparse.BooleanOptionalAction, default=True, help="Save stage_start checkpoints")
-    parser.add_argument("--checkpoint-resume-claude-session", action="store_true", help="Attempt best-effort Claude session resume when restoring a V3 checkpoint")
     parser.add_argument("--checkpoint-claude-session-required", action="store_true", help="Fail restore if Claude session resume fails")
     parser.add_argument("--checkpoint-subagent-resume", action="store_true", help="Enable best-effort completed subagent follow-up resume metadata")
     parser.add_argument("--checkpoint-require-subagent-agent-id", action="store_true", help="Require captured subagent agentId for strict subagent resume debugging")
-    parser.add_argument("--checkpoint-enable-claude-file-checkpointing", action="store_true", help="Enable Claude SDK file checkpoint UUID capture for local debugging")
     parser.add_argument("--checkpoint-session-store-kind", choices=["none", "custom"], default="none", help="Optional Claude SessionStore kind")
     parser.add_argument("--checkpoint-session-store-config", default=None, help="Config path for a custom Claude SessionStore adapter")
     parser.add_argument("--checkpoint-resume-stage-policy", choices=["next-pending"], default="next-pending")
@@ -721,6 +844,7 @@ def main():
             args.language = "ascendc"
 
     llm_provider, api_key = _resolve_llm_config_from_args(args)
+    _validate_checkpoint_args(args, llm_provider=llm_provider)
     stage_checkpoint_config = _stage_checkpoint_config_from_args(args, llm_provider=llm_provider)
 
     task = _build_task_from_args(args)
@@ -749,6 +873,17 @@ def main():
         strategy_file=args.strategy_file,
         strategy_form=args.strategy_form,
         stage_checkpoint_config=stage_checkpoint_config,
+        checkpoint_enable=args.checkpoint_enable,
+        checkpoint_every=args.checkpoint_every,
+        checkpoint_dir=args.checkpoint_dir,
+        checkpoint_keep=args.checkpoint_keep,
+        resume_from_checkpoint=args.resume_from_checkpoint,
+        resume_mode=args.resume_mode,
+        resume_policy=args.resume_policy,
+        checkpoint_include_project_snapshot=args.checkpoint_include_project_snapshot,
+        checkpoint_enable_claude_file_checkpointing=args.checkpoint_enable_claude_file_checkpointing,
+        checkpoint_resume_claude_session=args.checkpoint_resume_claude_session,
+        checkpoint_retry_failed_attempt=args.checkpoint_retry_failed_attempt,
     )
 
 

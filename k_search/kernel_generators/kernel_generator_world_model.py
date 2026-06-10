@@ -849,8 +849,25 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         if not (bool(cfg.enabled) or bool(cfg.resume_from)):
             return
         if str(cfg.every or "cycle") != "cycle":
-            raise NotImplementedError("V1 checkpointing supports only checkpoint_every='cycle'")
+            return
         self._checkpoint_manager.save_cycle_checkpoint(
+            **kwargs,
+            llm_provider=str(getattr(self, "llm_provider", "") or ""),
+            model_name=str(getattr(self, "model_name", "") or ""),
+            language=str(self.language),
+            target_gpu=str(self.target_gpu),
+            resume_mode=str(cfg.resume_mode or "new-run"),
+        )
+
+    def _save_attempt_checkpoint_if_enabled(self, **kwargs: Any) -> None:
+        cfg = getattr(self, "_checkpoint_config", CheckpointConfig())
+        if self._checkpoint_manager is None:
+            return
+        if not (bool(cfg.enabled) or bool(cfg.resume_from)):
+            return
+        if str(cfg.every or "cycle") != "attempt":
+            return
+        self._checkpoint_manager.save_attempt_checkpoint(
             **kwargs,
             llm_provider=str(getattr(self, "llm_provider", "") or ""),
             model_name=str(getattr(self, "model_name", "") or ""),
@@ -959,8 +976,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         checkpoint_resume = str(self._checkpoint_config.resume_from or "").strip()
         restored_checkpoint: RestoredCheckpoint | None = None
         if bool(self._checkpoint_config.enabled) or checkpoint_resume:
-            if str(self._checkpoint_config.every or "cycle") != "cycle":
-                raise NotImplementedError("V1 checkpointing supports only checkpoint_every='cycle'")
+            checkpoint_every = str(self._checkpoint_config.every or "cycle")
+            if checkpoint_every not in {"cycle", "attempt"}:
+                raise ValueError("--checkpoint-every must be 'cycle' or 'attempt'")
             self._checkpoint_manager = CheckpointManager(
                 artifacts_dir=self._artifacts_dir,
                 task_name=str(getattr(task, "name", "") or ""),
@@ -1840,6 +1858,50 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                     no_improve_over_base_streak = 0
                                 else:
                                     no_improve_over_base_streak += 1
+                            self._save_attempt_checkpoint_if_enabled(
+                                task=task,
+                                round_index=round_num,
+                                cycle_start_round=cycle_start_round,
+                                attempt_idx=attempt_idx,
+                                action_node_id=str(chosen_leaf or ""),
+                                next_round=round_num + 1,
+                                next_attempt_idx=attempt_idx + 1,
+                                world_model_json=self._wm.get(task.name),
+                                solution_db_path=(
+                                    self._solution_db.jsonl_path if self._solution_db is not None else None
+                                ),
+                                best_solution=best_solution,
+                                best_eval=best_eval,
+                                best_score=best_score,
+                                current_solution=solution,
+                                current_eval=round_eval,
+                                last_solution=last_solution,
+                                last_eval=last_eval,
+                                candidate_manifest_path=(
+                                    (result.artifact_paths or {}).get("manifest_path")
+                                    if isinstance(result.artifact_paths, dict)
+                                    else None
+                                ),
+                                candidate_diff=str(result.diff_text or ""),
+                                project_snapshot=getattr(result, "project_snapshot", None),
+                                claude_session={
+                                    "schema_version": 1,
+                                    "session_id": getattr(result, "session_id", None),
+                                    "cwd": None,
+                                    "resume_supported": bool(getattr(result, "session_id", None)),
+                                    "file_checkpointing_enabled": False,
+                                    "session_store_enabled": False,
+                                    "session_store_kind": None,
+                                    "notes": "Claude state is auxiliary; K-Search manifest is authoritative.",
+                                },
+                                max_opt_rounds=max_opt_rounds,
+                                wm_stagnation_window=wm_stagnation_window,
+                                wm_max_difficulty=getattr(
+                                    getattr(getattr(self._wm, "_cfg", None), "selection_policy", None),
+                                    "max_difficulty_1_to_5",
+                                    None,
+                                ),
+                            )
                             rounds_consumed += 1
                             if no_improve_streak >= stagnation_window or no_improve_over_base_streak >= stagnation_window:
                                 break
@@ -2168,6 +2230,32 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             no_improve_over_base_streak = 0
                         else:
                             no_improve_over_base_streak += 1
+
+                    self._save_attempt_checkpoint_if_enabled(
+                        task=task,
+                        round_index=round_num,
+                        cycle_start_round=cycle_start_round,
+                        attempt_idx=attempt_idx,
+                        action_node_id=str(chosen_leaf or ""),
+                        next_round=round_num + 1,
+                        next_attempt_idx=attempt_idx + 1,
+                        world_model_json=self._wm.get(task.name),
+                        solution_db_path=(self._solution_db.jsonl_path if self._solution_db is not None else None),
+                        best_solution=best_solution,
+                        best_eval=best_eval,
+                        best_score=best_score,
+                        current_solution=solution,
+                        current_eval=round_eval,
+                        last_solution=last_solution,
+                        last_eval=last_eval,
+                        max_opt_rounds=max_opt_rounds,
+                        wm_stagnation_window=wm_stagnation_window,
+                        wm_max_difficulty=getattr(
+                            getattr(getattr(self._wm, "_cfg", None), "selection_policy", None),
+                            "max_difficulty_1_to_5",
+                            None,
+                        ),
+                    )
 
                     if wandb is not None and getattr(wandb, "run", None) is not None:
                         try:

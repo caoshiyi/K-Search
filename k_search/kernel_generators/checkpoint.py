@@ -242,7 +242,24 @@ class CheckpointManager:
             raise
 
     def save_attempt_checkpoint(self, **kwargs: Any) -> Path:
-        raise NotImplementedError("attempt-boundary checkpoints are planned for V2")
+        checkpoint_id = self._next_checkpoint_id(kind="attempt", round_index=int(kwargs.get("round_index") or 0))
+        tmp_dir = self.checkpoint_root / f".{checkpoint_id}.{uuid.uuid4().hex}.tmp"
+        final_dir = self.checkpoint_root / checkpoint_id
+        if final_dir.exists():
+            raise FileExistsError(f"checkpoint already exists: {final_dir}")
+        tmp_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            manifest = self._write_attempt_payload(tmp_dir=tmp_dir, checkpoint_id=checkpoint_id, **kwargs)
+            manifest_path = tmp_dir / "manifest.json"
+            _write_json(manifest_path, manifest)
+            os.replace(tmp_dir, final_dir)
+            final_manifest_path = final_dir / "manifest.json"
+            self._write_latest(checkpoint_id=checkpoint_id)
+            self.prune_old_checkpoints()
+            return final_manifest_path
+        except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
 
     def resolve(self, ref: str, *, policy: ResumePolicy = "latest") -> CheckpointRef:
         raw = str(ref or "").strip()
@@ -281,8 +298,8 @@ class CheckpointManager:
         if int(manifest.get("schema_version") or 0) != 1:
             raise ValueError("unsupported checkpoint schema_version")
         checkpoint_kind = str(manifest.get("checkpoint_kind") or "")
-        if checkpoint_kind != "cycle_boundary":
-            raise ValueError(f"unsupported checkpoint_kind for V1 restore: {checkpoint_kind}")
+        if checkpoint_kind not in {"cycle_boundary", "attempt_boundary"}:
+            raise ValueError(f"unsupported checkpoint_kind for checkpoint restore: {checkpoint_kind}")
         task_meta = manifest.get("task") if isinstance(manifest.get("task"), dict) else {}
         llm_meta = manifest.get("llm") if isinstance(manifest.get("llm"), dict) else {}
         if str(task_meta.get("task_source") or "").strip() != "ascendc":
@@ -332,7 +349,7 @@ class CheckpointManager:
             best_score=float(best_score) if isinstance(best_score, (int, float)) else -1.0,
             current_solution=_solution_from_payload(current_payload),
             start_round=int(runtime_next_round or 1),
-            resume_in_cycle=False,
+            resume_in_cycle=checkpoint_kind == "attempt_boundary",
         )
 
     def prune_old_checkpoints(self) -> None:
@@ -514,6 +531,42 @@ class CheckpointManager:
             },
             "integrity": {"files": integrity},
         }
+
+    def _write_attempt_payload(self, *, tmp_dir: Path, checkpoint_id: str, **kwargs: Any) -> dict[str, Any]:
+        manifest = self._write_cycle_payload(tmp_dir=tmp_dir, checkpoint_id=checkpoint_id, **kwargs)
+        attempt_idx = int(kwargs.get("attempt_idx") or 0)
+        next_attempt_idx = int(kwargs.get("next_attempt_idx") or (attempt_idx + 1))
+        round_index = int(kwargs.get("round_index") or 0)
+        runtime_state = {
+            "schema_version": 1,
+            "checkpoint_version": "v2",
+            "state_kind": "attempt_boundary",
+            "resume_action": "continue_current_action",
+            "next_round": int(kwargs.get("next_round") or (round_index + 1)),
+            "next_attempt_idx": next_attempt_idx,
+            "last_completed_attempt_idx": attempt_idx,
+            "last_completed_round": round_index,
+            "last_completed_action_node_id": str(kwargs.get("action_node_id") or ""),
+            "cycle_start_round": int(kwargs.get("cycle_start_round") or round_index or 1),
+            "best_score": _score_or_default(kwargs.get("best_score")),
+            "best_solution_id": _solution_id(kwargs.get("best_solution")),
+            "current_solution_id": _solution_id(kwargs.get("current_solution")),
+            "last_solution_id": _solution_id(kwargs.get("last_solution")),
+        }
+        _write_json(tmp_dir / "runtime_state.json", runtime_state)
+        manifest["checkpoint_version"] = "v2"
+        manifest["checkpoint_kind"] = "attempt_boundary"
+        if isinstance(manifest.get("search"), dict):
+            manifest["search"]["attempt_idx"] = attempt_idx
+            manifest["search"]["next_attempt_idx"] = next_attempt_idx
+        integrity: dict[str, str] = {}
+        for path in sorted(p for p in tmp_dir.rglob("*") if p.is_file()):
+            rel = str(path.relative_to(tmp_dir)).replace("\\", "/")
+            if rel == "manifest.json":
+                continue
+            integrity[rel] = _sha256_file(path)
+        manifest["integrity"] = {"files": integrity}
+        return manifest
 
     def _next_checkpoint_id(self, *, kind: str, round_index: int) -> str:
         self.checkpoint_root.mkdir(parents=True, exist_ok=True)

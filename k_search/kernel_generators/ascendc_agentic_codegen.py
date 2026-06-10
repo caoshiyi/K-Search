@@ -465,6 +465,21 @@ def _parse_review_notes(review_text: str) -> _ReviewNotesState:
     )
 
 
+def _improvement_assessment_status(handoffs: dict[str, str]) -> str:
+    raw = str(handoffs.get("IMPROVEMENT_ASSESSMENT.md", "") or "")
+    return (_field_value(raw, "status") or "").strip().lower().replace("-", "_")
+
+
+def _allows_empty_candidate_change(*, mode: str, handoffs: dict[str, str]) -> bool:
+    if str(mode or "").strip().lower() != "improve":
+        return False
+    return _improvement_assessment_status(handoffs) in {
+        "no_op",
+        "needs_design_update",
+        "blocked",
+    }
+
+
 def _validate_review_notes(review_text: str) -> None:
     state = _parse_review_notes(review_text)
     if not state.is_eval_ready:
@@ -1546,7 +1561,7 @@ class AscendCAgenticCycle:
 
         project_changed_paths = self.wt_session.project_changed_paths()
         changed_paths = _candidate_changed_paths(project_changed_paths or self.wt_session.changed_paths())
-        if not changed_paths:
+        if not changed_paths and not _allows_empty_candidate_change(mode=mode, handoffs=handoff_texts):
             raise RuntimeError(
                 "Claude agentic codegen did not change any files inside the candidate worktree. "
                 "Rejecting this attempt instead of importing external task_path changes."

@@ -189,6 +189,49 @@ class NativeSessionClient:
         session._closed = True
 
 
+class NoOpImproveSessionClient:
+    def __init__(self, *, assessment_status: str = "no_op"):
+        self.prompts = []
+        self.project_dir: Path | None = None
+        self.assessment_status = assessment_status
+
+    def open_session(self, *, project_dir, telemetry_recorder=None):
+        from types import SimpleNamespace
+
+        self.project_dir = Path(project_dir)
+        return SimpleNamespace(_closed=False, project_dir=self.project_dir)
+
+    def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+        self.prompts.append(prompt)
+        root = Path(session.project_dir)
+        _write_native_handoffs(root)
+        if prompt.startswith("Stage 3/4: codegen"):
+            (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+        if prompt.startswith("Stage 1/3: improvement-assessor"):
+            (root / "IMPROVEMENT_ASSESSMENT.md").write_text(
+                f"status: {self.assessment_status}\n"
+                "files_written: IMPROVEMENT_ASSESSMENT.md\n"
+                "next: codegen\n\n"
+                "- strategy_alignment: current implementation already follows the selected strategy.\n"
+                "- design_alignment: implementation and design are consistent.\n"
+                "- implementation_deviation_analysis: no implementation deviation found.\n"
+                "- remaining_opportunity: none; no evidence-backed edit exists.\n"
+                "- edit_scope: none\n"
+                "- risk_checks: correctness, dtype, tail, offsets, workspace, synchronization checked.\n",
+                encoding="utf-8",
+            )
+        return ClaudeProjectEditResult(
+            text="status: ok\nfiles_written: handoffs\nnext: python_eval",
+            transcript="native session completed",
+            prompt=prompt,
+            prompt_chars=len(prompt),
+            prompt_lines=prompt.count("\n") + 1,
+        )
+
+    def close_session(self, session):
+        session._closed = True
+
+
 class NoChangeClient:
     def edit_project(self, *, project_dir, prompt):
         _write_native_handoffs(Path(project_dir), code_map="# CODE_MAP\nkernel.cpp\n")
@@ -1824,6 +1867,86 @@ def test_continue_improve_uses_codegen_flow_without_bug_fixer(tmp_path, monkeypa
     assert "bug-fixer" not in client.prompts[4]
     assert "continue_improve" in client.prompts[4]
     assert "IMPROVEMENT_ASSESSMENT.md" in client.prompts[4]
+
+
+def test_continue_improve_no_op_preserves_current_candidate_without_source_diff(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "native-improve-no-op")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(
+        task_path=task_dir,
+        definition_name="x",
+        artifacts_dir=str(tmp_path / "artifacts"),
+        build_cmd=_py_cmd("print('build ok')"),
+        test_cmd=_py_cmd("print('correctness ok')"),
+        bench_cmd=_py_cmd("print('latency_ms=1.0')"),
+        reference_latency_ms=2.0,
+        timeout_seconds=30,
+    )
+    client = NoOpImproveSessionClient()
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+    first_request = AscendCAgenticCodegenRequest(
+        definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+        target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action", run_id="native-improve-no-op",
+    )
+
+    with runner.open_cycle(task=task, request=first_request, base_solution=None) as cycle:
+        first = cycle.run_initial()
+        assert first.changed_paths == ["kernel/foo.h"]
+        assert cycle.wt_session is not None
+        cycle.wt_session.commit_all("accepted candidate baseline")
+        improve_request = AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="continue action", trace_logs="", perf_summary="last_attempt.status=passed",
+            target_gpu="ascend_910b", round_num=2, attempt_idx=2, mode="improve", run_id="native-improve-no-op",
+        )
+        cycle.request = improve_request
+        second = cycle.continue_improve("continue from passed candidate only if evidence supports another edit")
+
+    assert second.eval_result.status == "passed"
+    assert second.changed_paths == []
+    assert second.diff_text == ""
+    assert "BETA" in next(src.content for src in second.solution.sources if src.path == "kernel/foo.h")
+
+
+def test_continue_improve_requires_source_diff_when_assessor_requests_improvement(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "native-improve-requires-edit")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(
+        task_path=task_dir,
+        definition_name="x",
+        artifacts_dir=str(tmp_path / "artifacts"),
+        build_cmd=_py_cmd("print('build ok')"),
+        test_cmd=_py_cmd("print('correctness ok')"),
+        bench_cmd=_py_cmd("print('latency_ms=1.0')"),
+        reference_latency_ms=2.0,
+        timeout_seconds=30,
+    )
+    client = NoOpImproveSessionClient(assessment_status="improve")
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+    first_request = AscendCAgenticCodegenRequest(
+        definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+        target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action", run_id="native-improve-requires-edit",
+    )
+
+    with runner.open_cycle(task=task, request=first_request, base_solution=None) as cycle:
+        first = cycle.run_initial()
+        assert first.changed_paths == ["kernel/foo.h"]
+        assert cycle.wt_session is not None
+        cycle.wt_session.commit_all("accepted candidate baseline")
+        improve_request = AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="continue action", trace_logs="", perf_summary="last_attempt.status=passed",
+            target_gpu="ascend_910b", round_num=2, attempt_idx=2, mode="improve", run_id="native-improve-requires-edit",
+        )
+        cycle.request = improve_request
+        with pytest.raises(RuntimeError, match="did not change any files"):
+            cycle.continue_improve("continue from passed candidate because assessor found an edit")
 
 
 def test_run_multi_turn_uses_repair_flow_when_eval_fails(tmp_path, monkeypatch):

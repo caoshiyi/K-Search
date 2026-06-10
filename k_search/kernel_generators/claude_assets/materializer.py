@@ -18,6 +18,7 @@ NATIVE_AGENT_FILES = [
     "code-reader.md",
     "designer.md",
     "codegen.md",
+    "improvement-assessor.md",
     "reviewer.md",
     "bug-fixer.md",
     "knowledge-curator.md",

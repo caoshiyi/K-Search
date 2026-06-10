@@ -18,9 +18,16 @@ Read these files in order:
 
 1. `ASCENDC_DESIGN.md` to understand the detailed AscendC design target.
 2. `CODE_MAP.md` to locate likely source files and project contracts.
-3. `KNOWLEDGE.md` if present, to apply distilled patterns and avoid known pitfalls.
-4. `.claude/references/known-pitfalls/` — cross-task durable pitfalls; read entries relevant to this operator before editing (e.g. KP-001 for any subblock/chunked writeback offset, KP-002 for naked L1 single-buffer reuse).
-5. The real source files referenced by the design and map, using Glob/Grep/Read before any Edit.
+3. `IMPROVEMENT_ASSESSMENT.md` if present. In `continue_improve`, this file is
+   authoritative for whether another edit is justified:
+   - `status: improve` means implement only the listed focused opportunity and
+     stay inside `edit_scope`.
+   - `status: no_op`, `needs_design_update`, or `blocked` means preserve the
+     source implementation and write the handoff files explaining why no source
+     edit was made.
+4. `KNOWLEDGE.md` if present, to apply distilled patterns and avoid known pitfalls.
+5. `.claude/references/known-pitfalls/` — cross-task durable pitfalls; read entries relevant to this operator before editing (e.g. KP-001 for any subblock/chunked writeback offset, KP-002 for naked L1 single-buffer reuse).
+6. The real source files referenced by the design, assessment, and map, using Glob/Grep/Read before any Edit.
 
 `CODE_MAP.md is an index, not evidence.`
 Never edit code based only on CODE_MAP.md summaries. Confirm functions, structs, tiling fields, buffer names, workspace layout, synchronization points, Python wrapper contracts, and build files from the actual source files before editing.

@@ -1524,7 +1524,10 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 except Exception:
                                     base_solution_for_agentic = None
                         else:
-                            agentic_mode = "debug" if cycle_best_solution is None else "improve"
+                            last_attempt_passed = bool(
+                                last_eval is not None and getattr(last_eval, "is_passed", lambda: False)()
+                            )
+                            agentic_mode = "improve" if last_attempt_passed else "debug"
                             agentic_action = (
                                 str(chosen_action_text or "")
                                 + "\n\nContinue the same action. If the previous attempt failed, fix it first. "
@@ -1591,17 +1594,28 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                     agentic_cycle = agentic_cycle_cm.__enter__()
                                     result = agentic_cycle.run_initial()
                                 else:
-                                    fix_base = _build_fix_prompt(
-                                        eval_result=last_eval,
-                                        fix_round=attempt_idx - 1,
-                                    )
-                                    fix_prompt = (
-                                        f"Original action intent: {agentic_action}\n\n"
-                                        f"{fix_base}\n\n"
-                                        f"Continue the same action. Fix the failure first, then improve."
-                                    )
                                     agentic_cycle.request = request
-                                    result = agentic_cycle.continue_fix(fix_prompt)
+                                    if agentic_mode == "improve":
+                                        improve_prompt = (
+                                            f"Original action intent: {agentic_action}\n\n"
+                                            f"Previous attempt passed evaluation.\n\n"
+                                            f"Performance summary:\n{perf_summary or '(no performance summary available)'}\n\n"
+                                            "Continue only if there is evidence for a focused latency improvement. "
+                                            "If the implementation already matches the design and there is no clear "
+                                            "performance opportunity, preserve the current implementation and explain that."
+                                        )
+                                        result = agentic_cycle.continue_improve(improve_prompt)
+                                    else:
+                                        fix_base = _build_fix_prompt(
+                                            eval_result=last_eval,
+                                            fix_round=attempt_idx - 1,
+                                        )
+                                        fix_prompt = (
+                                            f"Original action intent: {agentic_action}\n\n"
+                                            f"{fix_base}\n\n"
+                                            f"Continue the same action. Fix the failure first, then improve."
+                                        )
+                                        result = agentic_cycle.continue_fix(fix_prompt)
                         except LLMProviderFatalError as exc:
                             _emit(f"[ERROR] fatal LLM provider error during agentic codegen: {exc}")
                             if agentic_cycle_cm is not None:

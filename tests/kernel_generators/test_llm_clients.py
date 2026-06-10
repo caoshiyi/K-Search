@@ -988,6 +988,7 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
     class FakeAgenticRunner:
         def __init__(self):
             self.requests = []
+            self.continuation_modes = []
 
         def run(self, *, task, request, base_solution):
             self.requests.append(request)
@@ -1046,6 +1047,12 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
 
                 def continue_fix(self, fix_prompt):
                     del fix_prompt
+                    runner.continuation_modes.append("fix")
+                    return runner.run(task=task, request=self.request, base_solution=None)
+
+                def continue_improve(self, improve_prompt):
+                    del improve_prompt
+                    runner.continuation_modes.append("improve")
                     return runner.run(task=task, request=self.request, base_solution=None)
 
             return FakeCycle()
@@ -1126,6 +1133,7 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
 
     assert "BETA" in next(src.content for src in solution.sources if src.path == "kernel/foo.h")
     assert len(fake_runner.requests) == 2
+    assert fake_runner.continuation_modes == ["improve"]
     assert fake_runner.requests[0].action_text
     assert "<ascendc_project>" not in fake_runner.requests[0].action_text
     assert fake_runner.requests[0].run_id == "wm-effective-run"

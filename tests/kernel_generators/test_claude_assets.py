@@ -23,6 +23,7 @@ def test_materialize_claude_project_assets_writes_agents_and_skills(tmp_path):
     assert (tmp_path / ".claude" / "agents" / "codegen.md").exists()
     assert (tmp_path / ".claude" / "agents" / "reviewer.md").exists()
     assert (tmp_path / ".claude" / "agents" / "bug-fixer.md").exists()
+    assert (tmp_path / ".claude" / "agents" / "improvement-assessor.md").exists()
     assert (tmp_path / ".claude" / "agents" / "knowledge-curator.md").exists()
     assert (tmp_path / ".claude" / "skills" / "ascendc-codegen" / "SKILL.md").exists()
     assert (tmp_path / ".claude" / "skills" / "ascendc-api-reference" / "SKILL.md").exists()
@@ -117,6 +118,7 @@ def test_asset_files_contain_required_handoff_contracts(tmp_path):
     codegen = (tmp_path / ".claude" / "agents" / "codegen.md").read_text(encoding="utf-8")
     reviewer = (tmp_path / ".claude" / "agents" / "reviewer.md").read_text(encoding="utf-8")
     bug_fixer = (tmp_path / ".claude" / "agents" / "bug-fixer.md").read_text(encoding="utf-8")
+    improvement_assessor = (tmp_path / ".claude" / "agents" / "improvement-assessor.md").read_text(encoding="utf-8")
     attention_checklist = (
         tmp_path / ".claude" / "references" / "ascendc-design" / "attention-checklist.md"
     ).read_text(encoding="utf-8")
@@ -140,6 +142,7 @@ def test_asset_files_contain_required_handoff_contracts(tmp_path):
     assert "IMPLEMENTATION_EXECUTION_PLAN.md" in NATIVE_HANDOFF_FILES
     assert "IMPLEMENTATION_HANDOFF.md" in NATIVE_HANDOFF_FILES
     assert "IMPLEMENTATION_DEVIATIONS.md" in NATIVE_HANDOFF_FILES
+    assert "IMPROVEMENT_ASSESSMENT.md" in NATIVE_HANDOFF_FILES
     assert old_design_name not in NATIVE_HANDOFF_FILES
 
     assert "CODE_MAP.md" in code_reader
@@ -213,7 +216,14 @@ def test_asset_files_contain_required_handoff_contracts(tmp_path):
     assert "debug_packet.json" in bug_fixer
     assert "ASCENDC_DESIGN.md, IMPLEMENTATION_EXECUTION_PLAN.md, IMPLEMENTATION_HANDOFF.md" in bug_fixer
     assert "next: reviewer" in bug_fixer
-    for text in (code_reader, designer, codegen, reviewer, bug_fixer):
+    assert "tools: Read, Grep, Glob, Write" in improvement_assessor
+    assert "IMPROVEMENT_ASSESSMENT.md" in improvement_assessor
+    assert "Referenced strategy" in improvement_assessor
+    assert "ASCENDC_DESIGN.md" in improvement_assessor
+    assert "implementation deviation" in improvement_assessor.lower()
+    assert "Do not edit source files" in improvement_assessor
+    assert "next: codegen" in improvement_assessor
+    for text in (code_reader, designer, codegen, reviewer, bug_fixer, improvement_assessor):
         assert "status" in text
         assert "files_written" in text
         assert "next" in text

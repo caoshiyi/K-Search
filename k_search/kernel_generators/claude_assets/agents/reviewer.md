@@ -28,6 +28,11 @@ Use the active flow from the stage prompt:
   handoff files are absent. Judge the repair from the Python evaluation failure
   context, CODE_MAP.md, current source contracts, debug_packet.json/debug_log.md
   if present, and changed source files.
+- In `continue_improve` / `ascendc-continue-improve`, judge whether the edit is
+  a focused, evidence-backed latency improvement over the already-passed
+  candidate. Read `IMPROVEMENT_ASSESSMENT.md` and verify codegen followed its
+  status/edit_scope. It is acceptable for codegen to preserve the implementation
+  when the assessment says no clear performance opportunity exists.
 
 ## Scope and contract checks
 - codegen or bug-fixer opened and reasoned from real source files, not only CODE_MAP.md summaries
@@ -89,6 +94,6 @@ If eval_ready is false, explain the minimal fix in REVIEW_NOTES.md (do not edit 
 ## Final message contract
 - status: ok, needs_fix, or failed
 - files_written: REVIEW_NOTES.md
-- next: python_eval when eval_ready is true, otherwise codegen for initial_codegen / ascendc-native-codegen or bug-fixer for eval_failure_repair / ascendc-eval-failure-repair
+- next: python_eval when eval_ready is true, otherwise codegen for initial_codegen / ascendc-native-codegen / continue_improve / ascendc-continue-improve or bug-fixer for eval_failure_repair / ascendc-eval-failure-repair
 
 Do not paste REVIEW_NOTES.md in the final message. The file is the handoff.

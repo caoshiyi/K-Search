@@ -257,6 +257,19 @@ def _build_repair_prompt(eval_result: EvalResult, fix_round: int, max_chars: int
     return _wrap_repair_prompt(_build_fix_prompt(eval_result, fix_round=fix_round, max_chars=max_chars))
 
 
+def _wrap_improve_prompt(improve_prompt: str) -> str:
+    improve_text = sanitize_worktree_paths(str(improve_prompt or "").strip())
+    header = (
+        "This is a continue_improve attempt. Follow the configured improvement flow exactly.\n"
+        "If the active stage is codegen, invoke the codegen subagent exactly once.\n"
+        "Make one focused latency improvement only when the previous evaluation evidence supports it; "
+        "otherwise preserve the current implementation and explain why."
+    )
+    if improve_text.startswith("This is a continue_improve attempt."):
+        return improve_text
+    return f"{header}\n\n{improve_text}".strip()
+
+
 def _render_legacy_single_agent_prompt(base_prompt: str, flow: SubagentFlowConfig | None) -> str:
     if flow is None:
         return str(base_prompt or "")
@@ -450,6 +463,21 @@ def _parse_review_notes(review_text: str) -> _ReviewNotesState:
         required_fixes=_field_value(raw, "required_fixes"),
         raw=raw,
     )
+
+
+def _improvement_assessment_status(handoffs: dict[str, str]) -> str:
+    raw = str(handoffs.get("IMPROVEMENT_ASSESSMENT.md", "") or "")
+    return (_field_value(raw, "status") or "").strip().lower().replace("-", "_")
+
+
+def _allows_empty_candidate_change(*, mode: str, handoffs: dict[str, str]) -> bool:
+    if str(mode or "").strip().lower() != "improve":
+        return False
+    return _improvement_assessment_status(handoffs) in {
+        "no_op",
+        "needs_design_update",
+        "blocked",
+    }
 
 
 def _validate_review_notes(review_text: str) -> None:
@@ -1431,6 +1459,62 @@ class AscendCAgenticCycle:
             mode="fix",
         )
 
+    def continue_improve(self, improve_prompt: str) -> AscendCAgenticCodegenResult:
+        self._require_open()
+        if not self._initial_has_run:
+            raise RuntimeError("continue_improve() requires run_initial() first")
+        if self.editor_session is None or not supports_configured_subagent_flow(self.runner.editor_client):
+            raise RuntimeError("continue_improve() requires an open Claude agentic session")
+        self.task_name, self.run_id = _resolve_agentic_run_context(request=self.request, task=self.task)
+        assert self.wt_session is not None
+        if not _write_runtime_file(self.wt_session.project_dir, CODE_MAP.filename, self.code_map_text):
+            _materialize_existing_code_map(self.store, self.wt_session.project_dir)
+        if not _write_runtime_file(
+            self.wt_session.project_dir,
+            KNOWLEDGE.filename,
+            self.curator_context.get(KNOWLEDGE.filename),
+        ):
+            _materialize_existing_knowledge(self.store, self.wt_session.project_dir)
+
+        improve_prompt = _wrap_improve_prompt(improve_prompt)
+        action_with_improve_context = (
+            f"{self.request.action_text}\n\nImprovement context from previous evaluation:\n{improve_prompt}"
+        ).strip()
+        native_request = replace(self.request, action_text=action_with_improve_context)
+        prompt = self._build_prompt(
+            native_request,
+            has_code_map=(self.wt_session.project_dir / CODE_MAP.filename).is_file(),
+        )
+        telemetry_recorder = build_file_recorder(
+            context=self._telemetry_context(stage="improve"),
+            prompt=prompt,
+        )
+        stage_prompt_sink = self._stage_prompt_sink()
+        try:
+            edit_result = self._run_flow(
+                prompt=prompt,
+                flow=self.runner.improve_subagent_flow,
+                telemetry_recorder=telemetry_recorder,
+                stage_prompt_sink=stage_prompt_sink,
+            )
+        finally:
+            telemetry_recorder.close()
+        edit_result, prompt, telemetry_recorder, flow = self._run_review_feedback_retries(
+            edit_result=edit_result,
+            prompt=prompt,
+            telemetry_recorder=telemetry_recorder,
+            flow=self.runner.improve_subagent_flow,
+            mode="improve",
+            stage_prompt_records=stage_prompt_sink.records,
+        )
+        return self._finalize_attempt_result(
+            edit_result=edit_result,
+            prompt=prompt,
+            telemetry_recorder=telemetry_recorder,
+            flow=flow,
+            mode="improve",
+        )
+
     def run_repair_loop(
         self,
         first_result: AscendCAgenticCodegenResult,
@@ -1477,7 +1561,7 @@ class AscendCAgenticCycle:
 
         project_changed_paths = self.wt_session.project_changed_paths()
         changed_paths = _candidate_changed_paths(project_changed_paths or self.wt_session.changed_paths())
-        if not changed_paths:
+        if not changed_paths and not _allows_empty_candidate_change(mode=mode, handoffs=handoff_texts):
             raise RuntimeError(
                 "Claude agentic codegen did not change any files inside the candidate worktree. "
                 "Rejecting this attempt instead of importing external task_path changes."
@@ -1625,6 +1709,7 @@ class AscendCAgenticCodegenRunner:
         prompt_builder: AscendCAgenticPromptBuilder | None = None,
         subagent_flow: SubagentFlowConfig | None = None,
         repair_subagent_flow: SubagentFlowConfig | None = None,
+        improve_subagent_flow: SubagentFlowConfig | None = None,
     ) -> None:
         self.model_name = str(model_name)
         self.editor_client = editor_client or ClaudeAgentProjectEditorClient(model_name=self.model_name)
@@ -1637,6 +1722,11 @@ class AscendCAgenticCodegenRunner:
         except KeyError:
             default_repair_flow = self.subagent_flow
         self.repair_subagent_flow = repair_subagent_flow or default_repair_flow
+        try:
+            default_improve_flow = flow_set.get("continue_improve")
+        except KeyError:
+            default_improve_flow = self.subagent_flow
+        self.improve_subagent_flow = improve_subagent_flow or default_improve_flow
 
     def open_cycle(
         self,

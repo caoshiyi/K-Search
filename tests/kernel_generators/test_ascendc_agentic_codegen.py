@@ -162,6 +162,19 @@ class NativeSessionClient:
         self.prompts.append(prompt)
         root = Path(session.project_dir)
         _write_native_handoffs(root)
+        if prompt.startswith("Stage 1/3: improvement-assessor"):
+            (root / "IMPROVEMENT_ASSESSMENT.md").write_text(
+                "status: improve\n"
+                "files_written: IMPROVEMENT_ASSESSMENT.md\n"
+                "next: codegen\n\n"
+                "- strategy_alignment: current implementation follows the selected strategy.\n"
+                "- design_alignment: implementation and design are consistent.\n"
+                "- implementation_deviation_analysis: no D1/D2/D3 deviation found.\n"
+                "- remaining_opportunity: one source-local latency cleanup remains.\n"
+                "- edit_scope: kernel/foo.h\n"
+                "- risk_checks: correctness, dtype, tail, offsets, workspace, synchronization checked.\n",
+                encoding="utf-8",
+            )
         text = "alpha\nBETA\ngamma\n" if len(self.prompts) == 1 else "alpha\nGAMMA\ngamma\n"
         (root / "kernel" / "foo.h").write_text(text, encoding="utf-8")
         return ClaudeProjectEditResult(
@@ -1768,6 +1781,49 @@ def test_continue_fix_uses_native_prompt_and_run_scoped_artifacts(tmp_path, monk
     assert str(
         tmp_path / "artifacts" / "x" / "task-native-continue" / "runs" / "native-continue" / "artifacts"
     ) in second.artifact_paths["manifest_path"]
+
+
+def test_continue_improve_uses_codegen_flow_without_bug_fixer(tmp_path, monkeypatch):
+    monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
+    monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
+    monkeypatch.setenv("KSEARCH_RUN_ID", "native-improve")
+    task_dir = tmp_path / "task"
+    (task_dir / "kernel").mkdir(parents=True)
+    (task_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    task = AscendCTask(
+        task_path=task_dir,
+        definition_name="x",
+        artifacts_dir=str(tmp_path / "artifacts"),
+        build_cmd=_py_cmd("print('build ok')"),
+        test_cmd=_py_cmd("print('correctness ok')"),
+        bench_cmd=_py_cmd("print('latency_ms=1.0')"),
+        reference_latency_ms=2.0,
+        timeout_seconds=30,
+    )
+    client = NativeSessionClient()
+    runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
+    first_request = AscendCAgenticCodegenRequest(
+        definition_text="spec", action_text="change beta", trace_logs="", perf_summary="",
+        target_gpu="ascend_910b", round_num=1, attempt_idx=1, mode="action", run_id="native-improve",
+    )
+
+    with runner.open_cycle(task=task, request=first_request, base_solution=None) as cycle:
+        cycle.run_initial()
+        improve_request = AscendCAgenticCodegenRequest(
+            definition_text="spec", action_text="continue action", trace_logs="", perf_summary="last_attempt.status=passed",
+            target_gpu="ascend_910b", round_num=2, attempt_idx=2, mode="improve", run_id="native-improve",
+        )
+        cycle.request = improve_request
+        cycle.continue_improve("continue from passed candidate and seek a smaller latency change")
+
+    assert [prompt.splitlines()[0] for prompt in client.prompts[4:]] == [
+        "Stage 1/3: improvement-assessor",
+        "Stage 2/3: codegen",
+        "Stage 3/3: reviewer",
+    ]
+    assert "bug-fixer" not in client.prompts[4]
+    assert "continue_improve" in client.prompts[4]
+    assert "IMPROVEMENT_ASSESSMENT.md" in client.prompts[4]
 
 
 def test_run_multi_turn_uses_repair_flow_when_eval_fails(tmp_path, monkeypatch):

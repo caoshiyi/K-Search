@@ -56,6 +56,34 @@
           "required_files": ["REVIEW_NOTES.md"]
         }
       ]
+    },
+    "continue_improve": {
+      "name": "ascendc-continue-improve",
+      "description": "Continue a passed candidate with a focused latency improvement attempt.",
+      "trigger": {
+        "event": "python_eval_passed_continue_action",
+        "statuses": ["passed"]
+      },
+      "stages": [
+        {
+          "name": "improvement-assessor",
+          "agent": "improvement-assessor",
+          "instruction": "Read the referenced strategy, ASCENDC_DESIGN.md if present, current handoff files, CODE_MAP.md, and the real source files. Write IMPROVEMENT_ASSESSMENT.md with a decision on whether there is evidence-backed room for another focused latency improvement, including design/implementation deviation analysis. Do not edit source files.",
+          "required_files": ["IMPROVEMENT_ASSESSMENT.md"]
+        },
+        {
+          "name": "codegen",
+          "agent": "codegen",
+          "instruction": "Read IMPROVEMENT_ASSESSMENT.md, CODE_MAP.md, the previous evaluation summary, ASCENDC_DESIGN.md if present, and the current source files. If assessment status is improve, make one focused latency improvement within edit_scope. If status is no_op, needs_design_update, or blocked, preserve the implementation and write handoff files explaining why no source edit was made. Update CODE_MAP.md if project contracts changed, and write IMPLEMENTATION_EXECUTION_PLAN.md plus IMPLEMENTATION_HANDOFF.md.",
+          "required_files": ["CODE_MAP.md", "IMPLEMENTATION_EXECUTION_PLAN.md", "IMPLEMENTATION_HANDOFF.md"]
+        },
+        {
+          "name": "reviewer",
+          "agent": "reviewer",
+          "instruction": "Review the improvement attempt, CODE_MAP.md, and the previous evaluation context, then write REVIEW_NOTES.md before Python re-evaluates.",
+          "required_files": ["REVIEW_NOTES.md"]
+        }
+      ]
     }
   }
 }

@@ -39,11 +39,11 @@ def test_readme_documents_configured_native_stage_order():
     assert "initial_codegen` runs `code-reader`, `plan`, `codegen`, and `reviewer`" not in readme
 
 
-def test_load_default_subagent_flows_includes_eval_failure_repair_flow():
+def test_load_default_subagent_flows_includes_repair_and_improve_flows():
     flows = load_subagent_flows()
 
     assert flows.default_flow == "initial_codegen"
-    assert set(flows.flows) == {"initial_codegen", "eval_failure_repair"}
+    assert set(flows.flows) == {"initial_codegen", "eval_failure_repair", "continue_improve"}
     repair_flow = flows.get("eval_failure_repair")
     assert repair_flow.trigger == {
         "event": "python_eval_failed",
@@ -53,6 +53,20 @@ def test_load_default_subagent_flows_includes_eval_failure_repair_flow():
     assert [stage.agent for stage in repair_flow.stages] == ["bug-fixer", "reviewer"]
     assert repair_flow.stages[0].required_files == ("CODE_MAP.md",)
     assert repair_flow.stages[1].required_files == ("REVIEW_NOTES.md",)
+    improve_flow = flows.get("continue_improve")
+    assert improve_flow.trigger == {
+        "event": "python_eval_passed_continue_action",
+        "statuses": ["passed"],
+    }
+    assert [stage.name for stage in improve_flow.stages] == ["improvement-assessor", "codegen", "reviewer"]
+    assert [stage.agent for stage in improve_flow.stages] == ["improvement-assessor", "codegen", "reviewer"]
+    assert improve_flow.stages[0].required_files == ("IMPROVEMENT_ASSESSMENT.md",)
+    assert improve_flow.stages[1].required_files == (
+        "CODE_MAP.md",
+        "IMPLEMENTATION_EXECUTION_PLAN.md",
+        "IMPLEMENTATION_HANDOFF.md",
+    )
+    assert improve_flow.stages[2].required_files == ("REVIEW_NOTES.md",)
 
 
 def test_load_subagent_flow_uses_env_config_path(tmp_path, monkeypatch):

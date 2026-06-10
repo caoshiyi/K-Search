@@ -56,6 +56,14 @@ def test_eval_failure_repair_flow_contains_bug_fixer_then_reviewer():
     assert [stage.agent for stage in repair.stages] == ["bug-fixer", "reviewer"]
 
 
+def test_continue_improve_flow_assesses_improvement_before_codegen_without_bug_fixer():
+    improve = load_subagent_flows().get("continue_improve")
+
+    assert [stage.agent for stage in improve.stages] == ["improvement-assessor", "codegen", "reviewer"]
+    assert "bug-fixer" not in [stage.agent for stage in improve.stages]
+    assert improve.stages[0].required_files == ("IMPROVEMENT_ASSESSMENT.md",)
+
+
 def test_stage_agent_not_declared_in_flow_raises():
     flow = SubagentFlowConfig(
         name="repair",

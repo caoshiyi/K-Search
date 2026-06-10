@@ -94,11 +94,11 @@ def _agent_tool_allowlist_expr(agent_names: list[str]) -> str:
 
 
 def _use_agent_tool_allowlist() -> bool:
-    return os.getenv("KSEARCH_USE_AGENT_TOOL_ALLOWLIST", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
+    return os.getenv("KSEARCH_USE_AGENT_TOOL_ALLOWLIST", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 
@@ -106,7 +106,7 @@ def _canonical_permission_tool_names(tools: list[str]) -> list[str]:
     out: list[str] = []
     for tool in tools:
         name = str(tool or "").strip()
-        if name.startswith("Agent(") or name.startswith("Task("):
+        if name == "Agent" or name == "Task" or name.startswith("Agent(") or name.startswith("Task("):
             out.extend(["Agent", "Task"])
         else:
             out.append(name)

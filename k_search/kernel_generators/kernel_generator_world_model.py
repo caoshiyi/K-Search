@@ -600,6 +600,80 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         except Exception:
             pass
 
+    def _adopt_passed_candidate_to_active_leaf(
+        self,
+        *,
+        task: Any | None,
+        run_id: str | None,
+        action_node_id: str | None,
+        solution: Any | None,
+        eval_result: EvalResult | None,
+        round_index: int,
+        code_text: str,
+        candidate_id: str | None = None,
+        candidate_manifest_path: str | None = None,
+        changed_paths: list[str] | None = None,
+        diff_summary: str | None = None,
+        adoption_reason: str = "selected_as_current_parent",
+    ) -> str | None:
+        """Commit a passed candidate to WM lineage immediately after evaluation."""
+        if task is None or solution is None or eval_result is None or self._solution_db is None:
+            return None
+        if not bool(getattr(eval_result, "is_passed", lambda: False)()):
+            return None
+        node_id = str(action_node_id or "").strip()
+        if not node_id:
+            return None
+        definition_name = str(getattr(task, "name", "") or "")
+        if not definition_name:
+            return None
+
+        try:
+            solution_id = solution.hash() if hasattr(solution, "hash") else None
+        except Exception:
+            solution_id = None
+        existing_ref: dict[str, Any] = {}
+        try:
+            existing = self._wm.get_solution_ref_for_node(definition_name=definition_name, node_id=node_id)
+            existing_ref = existing if isinstance(existing, dict) else {}
+        except Exception:
+            existing_ref = {}
+
+        if not solution_id or str(existing_ref.get("solution_id") or "") != str(solution_id):
+            rec = self._solution_db.add(
+                solution=solution,
+                eval_result=eval_result,
+                code_text=str(code_text or ""),
+                parent_solution_id=None,
+            )
+            solution_id = rec.solution_id
+            self._wm.set_active_leaf_id(definition_name=definition_name, node_id=node_id)
+            self._wm.attach_solution_to_active_leaf(
+                definition_name=definition_name,
+                solution_id=rec.solution_id,
+                solution_name=rec.solution_name,
+                eval_result=eval_result,
+                round_index=round_index,
+                candidate_id=candidate_id,
+                candidate_manifest_path=candidate_manifest_path,
+                changed_paths=changed_paths,
+                diff_summary=diff_summary,
+            )
+
+        self._mark_candidate_manifest_adopted(
+            manifest_path=candidate_manifest_path,
+            adoption_reason=adoption_reason,
+        )
+        self._persist_world_model_snapshot(task=task, run_id=run_id)
+        wm_after_attach = load_world_model_obj(self._wm.get(definition_name) or "")
+        if isinstance(wm_after_attach, dict):
+            self._persist_strategy_state_artifact(
+                task=task,
+                run_id=run_id,
+                world_model_obj=wm_after_attach,
+            )
+        return str(solution_id or "") or None
+
     def _ensure_selected_strategy_parent_lineage(
         self,
         *,
@@ -1562,6 +1636,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             cycle_best_diff_summary: str = ""
             cycle_best_project_snapshot: Any | None = None
             cycle_best_session_id: str | None = None
+            cycle_best_adopted_solution_id: str | None = None
             # Multi-turn SDK session/worktree owner for agentic AscendC (cycle-level).
             agentic_cycle_cm: Any = None
             agentic_cycle: Any = None
@@ -1848,6 +1923,19 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                     cycle_best_diff_summary = str(result.diff_text or "")[:4000]
                                     cycle_best_project_snapshot = getattr(result, "project_snapshot", None)
                                     cycle_best_session_id = getattr(result, "session_id", None)
+                                    cycle_best_adopted_solution_id = self._adopt_passed_candidate_to_active_leaf(
+                                        task=task,
+                                        run_id=effective_run_id,
+                                        action_node_id=str(chosen_leaf or ""),
+                                        solution=cycle_best_solution,
+                                        eval_result=cycle_best_eval,
+                                        round_index=cycle_best_round,
+                                        code_text=cycle_best_raw,
+                                        candidate_id=cycle_best_candidate_id,
+                                        candidate_manifest_path=cycle_best_manifest_path,
+                                        changed_paths=cycle_best_changed_paths,
+                                        diff_summary=cycle_best_diff_summary,
+                                    )
                                     no_improve_streak = 0
                                 else:
                                     no_improve_streak += 1
@@ -2216,6 +2304,15 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             cycle_best_raw = str(current_raw_code or "")
                             cycle_best_wm_code = str(current_wm_code or "")
                             cycle_best_round = int(round_num)
+                            cycle_best_adopted_solution_id = self._adopt_passed_candidate_to_active_leaf(
+                                task=task,
+                                run_id=effective_run_id,
+                                action_node_id=str(chosen_leaf or ""),
+                                solution=cycle_best_solution,
+                                eval_result=cycle_best_eval,
+                                round_index=cycle_best_round,
+                                code_text=cycle_best_raw,
+                            )
                             no_improve_streak = 0
                         else:
                             no_improve_streak += 1
@@ -2308,7 +2405,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
 
             if cycle_best_solution is not None and cycle_best_eval is not None:
                 _stage(f"cycle end: attach+refine best PASSED (round {cycle_best_round}, score={cycle_best_score:.3f})")
-                if self._solution_db is not None:
+                if self._solution_db is not None and not cycle_best_adopted_solution_id:
                     rec_best = self._solution_db.add(
                         solution=cycle_best_solution,
                         eval_result=cycle_best_eval,

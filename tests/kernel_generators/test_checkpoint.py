@@ -654,3 +654,120 @@ def test_world_model_generate_saves_attempt_checkpoint_under_run_artifacts(tmp_p
     assert runtime["resume_action"] == "continue_current_action"
     assert runtime["next_attempt_idx"] == 2
     assert (manifest_path.parent / "solutions" / "current_solution.json").is_file()
+
+
+def test_world_model_adopts_passed_attempt_before_later_improve_interrupt(tmp_path, monkeypatch):
+    from k_search.kernel_generators.ascendc_agentic_codegen import AscendCAgenticCodegenResult
+    from k_search.kernel_generators.kernel_generator_world_model import (
+        WorldModelKernelGeneratorWithBaseline,
+    )
+    from k_search.kernel_generators.strategy_injection import StrategyCatalogEntry
+
+    monkeypatch.setenv("KSEARCH_TASK_ID", "task-adopt")
+
+    strategy_md = tmp_path / "fa_qkv_two_level_l1_reuse.md"
+    strategy_md.write_text("# QKV two-level L1 reuse\n\nUse L1 reuse.", encoding="utf-8")
+    strategy = StrategyCatalogEntry(
+        id="fa_qkv_two_level_l1_reuse",
+        title="QKV two-level L1 reuse",
+        summary="Reuse QKV through L1.",
+        markdown_ref=strategy_md.name,
+        markdown_path=strategy_md,
+        score_0_to_1=0.9,
+    )
+
+    class FakeTask:
+        name = "vec_add"
+        task_source = "ascendc"
+        task_path = tmp_path / "op_project"
+
+        def get_definition_text(self, language):
+            return "spec"
+
+        def get_agentic_definition_text(self, *, language):
+            return "agentic spec"
+
+        def get_baseline_targets_text(self):
+            return ""
+
+        def get_last_round_trace_logs_for_prompt(self):
+            return ""
+
+        def code_for_world_model_from_raw(self, *, raw, language):
+            return json.dumps(raw, sort_keys=True) if isinstance(raw, dict) else str(raw)
+
+        def make_solution_from_project_dir(self, **kwargs):
+            raise AssertionError("fake runner supplies solution directly")
+
+    class FakeRunner:
+        def open_cycle(self, *, task, request, base_solution):
+            class FakeCycle:
+                def __init__(self, request):
+                    self.request = request
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def run_initial(self):
+                    sol = _solution("passed-attempt", "best-code")
+                    raw = {src.path: src.content for src in sol.sources}
+                    return AscendCAgenticCodegenResult(
+                        solution=sol,
+                        eval_result=EvalResult(
+                            status="passed",
+                            latency_ms=0.5,
+                            metrics={"score": 2.0, "score_name": "vs_baseline"},
+                        ),
+                        raw=json.dumps(raw, sort_keys=True),
+                        cleaned=raw,
+                        transcript="ok",
+                        prompt="prompt",
+                        prompt_chars=6,
+                        changed_paths=["kernel.cpp"],
+                        diff_text="diff --git a/kernel.cpp b/kernel.cpp",
+                        project_path=str(tmp_path),
+                        artifact_paths={},
+                        session_id="session-1",
+                    )
+
+                def continue_improve(self, prompt):
+                    raise KeyboardInterrupt()
+
+            return FakeCycle(request)
+
+    generator = WorldModelKernelGeneratorWithBaseline(
+        model_name="claude-sonnet-4-6",
+        language="ascendc",
+        target_gpu="ascend_910b",
+        llm_provider="claude-agent",
+        llm_client=SimpleNamespace(generate=lambda prompt: "{}"),
+        artifacts_dir=str(tmp_path / "artifacts"),
+    )
+    generator._strategy_catalog = [strategy]
+    generator._strategy_form = "natural_language"
+    generator._ascendc_agentic_runner = FakeRunner()
+
+    with pytest.raises(KeyboardInterrupt):
+        generator.generate(
+            task=FakeTask(),
+            max_opt_rounds=2,
+            wm_stagnation_window=2,
+            run_id="run-adopt",
+        )
+
+    world_model_dir = (
+        tmp_path
+        / "artifacts"
+        / "vec_add"
+        / "task-adopt"
+        / "runs"
+        / "run-adopt"
+        / "artifacts"
+        / "world_model"
+    )
+    state = json.loads((world_model_dir / "strategy_state.json").read_text(encoding="utf-8"))
+    assert state["adopted_strategy_ids"] == ["fa_qkv_two_level_l1_reuse"]
+    assert state["current_parent_solution_id"]

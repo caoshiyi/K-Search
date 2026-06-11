@@ -481,7 +481,7 @@ class _ReviewNotesState:
     @property
     def is_eval_ready(self) -> bool:
         return (
-            self.status == "ok"
+            self.status in {"ok", "fixed"}
             and self.eval_ready == "true"
             and _empty_required_fixes(self.required_fixes)
         )
@@ -662,6 +662,8 @@ def _build_review_feedback_retry_prompt(base_prompt: str, review_text: str, retr
         "The native reviewer marked the candidate not eval-ready, so do not proceed to Python evaluation yet.\n"
         "Re-run the implementation stage in this flow, address every item from REVIEW_NOTES.md, "
         "update the implementation handoff files, then run reviewer again.\n"
+        "The retry codegen stage must regenerate all required files, including "
+        "IMPLEMENTATION_EXECUTION_PLAN.md and IMPLEMENTATION_HANDOFF.md, even if the source fix is already applied.\n"
         "Use the existing CODE_MAP.md / ASCENDC_DESIGN.md and inspect source before editing.\n\n"
         "REVIEW_NOTES.md feedback:\n"
         "```text\n"

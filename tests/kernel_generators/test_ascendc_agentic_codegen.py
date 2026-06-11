@@ -11,6 +11,8 @@ from k_search.kernel_generators.ascendc_agentic_codegen import (
     AscendCAgenticCodegenRequest,
     AscendCAgenticCodegenRunner,
     AscendCAgenticPromptBuilder,
+    _build_review_feedback_retry_prompt,
+    _parse_review_notes,
 )
 from k_search.kernel_generators.checkpoint_v3 import StageCheckpointConfig
 from k_search.kernel_generators.checkpoint_v3 import StageCheckpointManager
@@ -51,6 +53,27 @@ def _write_native_handoffs(root: Path, code_map: str = "# CODE_MAP\nkernel/foo.h
         encoding="utf-8",
     )
     (root / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
+
+
+def test_review_notes_fixed_status_with_eval_ready_is_accepted():
+    state = _parse_review_notes(
+        "status: fixed\n"
+        "eval_ready: true\n"
+        "fix_applied: reviewer applied the required source fix\n"
+    )
+
+    assert state.is_eval_ready
+
+
+def test_review_retry_prompt_requires_execution_plan_regeneration():
+    prompt = _build_review_feedback_retry_prompt(
+        base_prompt="Base prompt",
+        review_text="status: needs_fix\neval_ready: false\nrequired_fixes: fix offsets\n",
+        retry_round=1,
+    )
+
+    assert "IMPLEMENTATION_EXECUTION_PLAN.md" in prompt
+    assert "must regenerate all required files" in prompt
 
 
 @pytest.fixture(autouse=True)

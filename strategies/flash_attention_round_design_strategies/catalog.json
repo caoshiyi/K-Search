@@ -6,7 +6,21 @@
       "id": "fa_qkv_two_level_l1_reuse",
       "title": "QKV two-level tiling with L1 reuse",
       "summary": "Use bidirectional Q and KV two-level tiling so K/V tiles are reused across multiple Q microblocks, reducing repeated GM to L1 traffic. This strategy is the prerequisite structure for later pipeline overlap.",
-      "markdown_ref": "round1-qkv-two-level-l1-reuse-design.md",
+      "markdown_ref": "round1-qkv-two-level-l1-reuse-design_v1.md",
+      "version": 1,
+      "refinement_history": [
+        {
+          "version": 0,
+          "base_file": "round1-qkv-two-level-l1-reuse-design.md",
+          "issues_found": ["AP-002: Q Outer Block State Cache Pollution"]
+        },
+        {
+          "version": 1,
+          "refined_file": "round1-qkv-two-level-l1-reuse-design_v1.md",
+          "matched_ap": "AP-002",
+          "added_sections": ["6.5: Q Outer Block State Cache Reset"]
+        }
+      ],
       "tags": [
         "ascendc",
         "flash_attention",

@@ -37,10 +37,26 @@ from k_search.kernel_generators.llm_clients import (
     _log_llm_interaction,
 )
 from k_search.telemetry.claude_sdk_adapter import event_from_claude_message
+from k_search.telemetry.diagnostics import UNKNOWN_TOOL_PATTERN
 from k_search.telemetry.events import TelemetryEvent
 from k_search.telemetry.recorder import TelemetryRecorder, noop_recorder
 
 logger = logging.getLogger(__name__)
+
+
+def _raise_for_tool_result_protocol_error(event: TelemetryEvent) -> None:
+    if event.event_type != "tool_result" or event.is_error is not True:
+        return
+    excerpt = str(event.tool_result_excerpt or event.error_message or "")
+    match = UNKNOWN_TOOL_PATTERN.search(excerpt)
+    if not match:
+        return
+    unknown_tool = match.group(1)
+    detail = excerpt.strip() or f"No such tool available: {unknown_tool}"
+    raise RuntimeError(
+        f"Claude Agent SDK tool protocol error: {detail}. "
+        f"'{unknown_tool}' is not an available tool name."
+    )
 
 DEFAULT_PROJECT_EDITOR_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write"]
 DEFAULT_CLAUDE_NATIVE_TOOLS = ["Skill", *NATIVE_AGENT_TOOL_NAMES]
@@ -496,6 +512,7 @@ class ClaudeAgentProjectEditorClient:
                             event.provider = event.provider or "claude-agent"
                             event.model_name = event.model_name or self.model_name
                             recorder.emit(event)
+                            _raise_for_tool_result_protocol_error(event)
                             if event.event_type == "llm_result":
                                 result_event = event
                         is_result_message = hasattr(message, "result")
@@ -720,6 +737,7 @@ class ClaudeAgentProjectEditorClient:
                     event.provider = event.provider or "claude-agent"
                     event.model_name = event.model_name or session.model_name
                     recorder.emit(event)
+                    _raise_for_tool_result_protocol_error(event)
                     if event.event_type == "llm_result":
                         result_event = event
                 is_result_message = hasattr(message, "result")

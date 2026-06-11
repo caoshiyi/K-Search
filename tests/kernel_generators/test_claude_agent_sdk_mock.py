@@ -4,6 +4,8 @@ import shlex
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from k_search.kernel_generators.kernel_generator import KernelGenerator
 from k_search.kernel_generators.llm_clients import ClaudeAgentLLMClient
 from k_search.tasks.ascendc_task import AscendCTask
@@ -115,6 +117,84 @@ def test_claude_project_editor_tool_permission_callback_rejects_unknown_tools_an
     assert _permission_behavior(denied_web) == "deny"
     assert _permission_behavior(allowed_agent) == "allow"
     assert _permission_behavior(denied_agent) == "deny"
+
+
+def test_claude_project_editor_raises_on_unknown_tool_result(monkeypatch, tmp_path):
+    from k_search.kernel_generators.claude_agent_project_editor import ClaudeAgentProjectEditorClient
+
+    install_mock_claude_agent_sdk(
+        monkeypatch,
+        responses=[
+            [
+                MockClaudeMessage(
+                    content=[
+                        SimpleNamespace(
+                            type="tool_use",
+                            id="toolu_bad",
+                            name="file_path",
+                            input={"file_path": "kernel/foo.h"},
+                        )
+                    ]
+                ),
+                MockClaudeMessage(
+                    content=[
+                        SimpleNamespace(
+                            type="tool_result",
+                            tool_use_id="toolu_bad",
+                            content="<tool_use_error>Error: No such tool available: file_path</tool_use_error>",
+                            is_error=True,
+                        )
+                    ]
+                ),
+            ]
+        ],
+    )
+    recorder = build_file_recorder(
+        context=TelemetryContext(run_id="r", task_name="t", flow="unit", stage="edit"),
+        prompt="edit",
+    )
+    client = ClaudeAgentProjectEditorClient(model_name="claude", timeout_seconds=30)
+
+    try:
+        with pytest.raises(RuntimeError, match="No such tool available: file_path"):
+            client.edit_project(project_dir=tmp_path, prompt="edit", telemetry_recorder=recorder)
+    finally:
+        recorder.close()
+
+
+def test_claude_project_editor_session_raises_on_unknown_tool_result(monkeypatch, tmp_path):
+    from k_search.kernel_generators.claude_agent_project_editor import ClaudeAgentProjectEditorClient
+
+    install_mock_claude_agent_sdk(
+        monkeypatch,
+        responses=[
+            [
+                MockClaudeMessage(
+                    content=[
+                        SimpleNamespace(
+                            type="tool_result",
+                            tool_use_id="toolu_bad",
+                            content="<tool_use_error>Error: No such tool available: file_path</tool_use_error>",
+                            is_error=True,
+                        )
+                    ]
+                ),
+            ]
+        ],
+    )
+    recorder = build_file_recorder(
+        context=TelemetryContext(run_id="r", task_name="t", flow="unit", stage="session"),
+        prompt="edit",
+    )
+    client = ClaudeAgentProjectEditorClient(model_name="claude", timeout_seconds=30)
+    session = client.open_session(project_dir=tmp_path)
+
+    try:
+        with pytest.raises(RuntimeError, match="No such tool available: file_path"):
+            client.send_prompt(session, prompt="edit", telemetry_recorder=recorder)
+    finally:
+        client.close_session(session)
+        recorder.close()
 
 
 def _permission_behavior(result):

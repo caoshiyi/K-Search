@@ -41,6 +41,8 @@ from k_search.kernel_generators.world_model import (
 )
 from k_search.utils.solution_db import SolutionDB
 from k_search.utils.paths import get_ksearch_artifacts_dir, get_run_id, get_run_logs_dir, get_task_id
+from k_search.telemetry.context import TelemetryContext, build_attempt_dir
+from k_search.telemetry.diagnostics import diagnose_tool_protocol_failure
 from k_search.telemetry.narrative import RunNarrativeLogger
 
 
@@ -161,6 +163,23 @@ def _open_frontier_action_nodes(world_model_obj: dict[str, Any]) -> list[dict[st
                 continue
         frontier.append(node)
     return frontier
+
+
+def _frontier_action_event_items(world_model_obj: dict[str, Any], *, max_items: int = 20) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for node in _open_frontier_action_nodes(world_model_obj)[: max(0, int(max_items))]:
+        action = node.get("action") if isinstance(node.get("action"), dict) else {}
+        items.append(
+            {
+                "node_id": node.get("node_id"),
+                "parent_id": node.get("parent_id"),
+                "title": action.get("title") or node.get("title"),
+                "decision": action.get("decision") or node.get("decision"),
+                "difficulty_1_to_5": action.get("difficulty_1_to_5"),
+                "score_0_to_1": action.get("score_0_to_1"),
+            }
+        )
+    return items
 
 
 def _adopted_strategy_ids_from_world_model(
@@ -823,6 +842,16 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             world_model_obj=wm_obj_after_blocks,
             blocked_actions=blocked,
         )
+        try:
+            _nar = getattr(self, "_narrative", None)
+            if _nar is not None and blocked:
+                _nar.blocked_actions(
+                    round_num=round_index,
+                    actions=blocked,
+                    no_executable=not executable,
+                )
+        except Exception:
+            pass
         if not executable:
             raise NoExecutableStrategyNodeError(blocked)
 
@@ -1293,7 +1322,15 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             try:
                 _nar = getattr(self, "_narrative", None)
                 if _nar is not None:
-                    _nar.world_model_init(summary=render_open_action_nodes_block(wm, max_items=8))
+                    wm_obj_for_events = load_world_model_obj(wm or "")
+                    _nar.world_model_init(
+                        summary=render_open_action_nodes_block(wm, max_items=8),
+                        actions=(
+                            _frontier_action_event_items(wm_obj_for_events, max_items=8)
+                            if isinstance(wm_obj_for_events, dict)
+                            else []
+                        ),
+                    )
             except Exception:
                 pass
 
@@ -1441,6 +1478,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         best_solution: Optional[Any] = restored_best_solution
         best_eval: Optional[EvalResult] = restored_best_eval
         best_score: float = float(restored_best_score) if restored_best_score is not None else -1.0
+        run_failed: bool = False
 
         current_raw_code: Any = str(initial_raw_code or "")
         last_solution: Optional[Any] = restored_best_solution
@@ -1804,6 +1842,27 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 agentic_cycle_cm.__exit__(type(exc), exc, exc.__traceback__)
                                 agentic_cycle_cm = None
                                 agentic_cycle = None
+                            diagnosis = diagnose_tool_protocol_failure(
+                                trace_path=(
+                                    build_attempt_dir(
+                                        TelemetryContext(
+                                            run_id=effective_run_id,
+                                            task_name=agentic_task_name,
+                                            definition=getattr(task, "definition_name", None) or agentic_task_name,
+                                            flow="agentic_codegen_multi_turn",
+                                            stage=str(agentic_mode),
+                                            round_index=int(round_num),
+                                            attempt_index=int(attempt_idx),
+                                            action_node_id=str(chosen_leaf or ""),
+                                            model_name=str(self.model_name),
+                                            provider="claude-agent",
+                                            target_gpu=str(self.target_gpu),
+                                            language=str(self.language),
+                                        )
+                                    )
+                                    / "agent_trace.jsonl"
+                                )
+                            )
                             if self._allow_ascendc_agentic_legacy_fallback():
                                 _emit(
                                     f"[WARN] agentic codegen failed for action_node_id={chosen_leaf} "
@@ -1815,14 +1874,74 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                     f"agentic codegen failed for action_node_id={chosen_leaf} "
                                     f"round={round_num}: {type(exc).__name__}: {exc}"
                                 )
+                                if diagnosis is not None:
+                                    msg = (
+                                        f"{msg}\n\n"
+                                        f"diagnosis={diagnosis.reason}; retryable={diagnosis.retryable}; "
+                                        f"unknown_tool={diagnosis.unknown_tool}; stage={diagnosis.stage or agentic_mode}\n"
+                                        f"recovery_prompt: {diagnosis.recovery_prompt}"
+                                    )
                                 _emit(f"[WARN] {msg}")
+                                metrics: dict[str, Any] = {"score_name": "codegen", "score": -1.0}
+                                if diagnosis is not None:
+                                    metrics.update(diagnosis.to_dict())
                                 round_eval = EvalResult(
                                     status="codegen_failed",
                                     log_excerpt=msg,
-                                    metrics={"score_name": "codegen", "score": -1.0},
+                                    metrics=metrics,
                                 )
                                 last_eval = round_eval
+                                try:
+                                    _nar = getattr(self, "_narrative", None)
+                                    if _nar is not None:
+                                        _nar.eval_result(round_num=round_num, eval_result=round_eval)
+                                except Exception:
+                                    pass
                                 rounds_consumed = max(rounds_consumed, attempt_idx)
+                                if (
+                                    diagnosis is not None
+                                    and diagnosis.retryable
+                                    and (cycle_start_round + rounds_consumed) <= max_opt_rounds
+                                ):
+                                    _emit(
+                                        f"[RETRY] retryable tool protocol error in agentic attempt {attempt_idx}; "
+                                        f"continuing with recovery prompt context."
+                                    )
+                                    continue
+                                if diagnosis is not None:
+                                    run_failed = True
+                                    try:
+                                        _nar = getattr(self, "_narrative", None)
+                                        if _nar is not None:
+                                            _nar.run_failure(
+                                                reason=diagnosis.reason,
+                                                error_type="ToolProtocolError",
+                                                error_message=diagnosis.message,
+                                                retryable=diagnosis.retryable,
+                                                stage=diagnosis.stage or str(agentic_mode),
+                                                detail=diagnosis.recovery_prompt,
+                                                extra={
+                                                    "unknown_tool": diagnosis.unknown_tool,
+                                                    "tool_use_id": diagnosis.tool_use_id,
+                                                },
+                                            )
+                                    except Exception:
+                                        pass
+                                else:
+                                    run_failed = True
+                                    try:
+                                        _nar = getattr(self, "_narrative", None)
+                                        if _nar is not None:
+                                            _nar.run_failure(
+                                                reason="codegen_failed",
+                                                error_type=type(exc).__name__,
+                                                error_message=str(exc),
+                                                retryable=False,
+                                                stage=str(agentic_mode),
+                                                detail=msg,
+                                            )
+                                    except Exception:
+                                        pass
                                 break
                         else:
                             solution = result.solution
@@ -2180,6 +2299,20 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         )
                         last_eval = round_eval
                         rounds_consumed = max(rounds_consumed, attempt_idx)
+                        run_failed = True
+                        try:
+                            _nar = getattr(self, "_narrative", None)
+                            if _nar is not None:
+                                _nar.run_failure(
+                                    reason="codegen_failed",
+                                    error_type=type(exc).__name__,
+                                    error_message=str(exc),
+                                    retryable=False,
+                                    stage=("action_codegen" if attempt_idx == 1 else "debug_codegen"),
+                                    detail=msg,
+                                )
+                        except Exception:
+                            pass
                         break
                     current_code = code_result["cleaned"]
                     current_raw_code = code_result["raw"]
@@ -2583,7 +2716,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         # Run-level narrative end marker (best-effort).
         try:
             _nar = getattr(self, "_narrative", None)
-            if _nar is not None:
+            if _nar is not None and not run_failed:
                 _be = best_eval
                 _nar.run_end(
                     best_round=getattr(_be, "metrics", {}).get("round")

@@ -136,3 +136,61 @@ def write_agentic_candidate_artifacts(
         manifest["stage_prompt_paths"] = list(stage_prompt_records)
     paths["manifest_path"].write_text(json.dumps(_jsonable(manifest), indent=2, sort_keys=True), encoding="utf-8")
     return candidate, {key: str(path) for key, path in paths.items()}
+
+
+def write_agentic_failed_attempt_manifest(
+    *,
+    artifacts_dir: str | Path | None,
+    task_name: str,
+    run_id: str,
+    round_num: int,
+    attempt_idx: int,
+    stage: str,
+    error_type: str,
+    error_message: str,
+    prompt: str = "",
+    model_name: str = "",
+    action_node_id: str | None = None,
+    parent_candidate_id: str | None = None,
+    stage_prompt_records: list[dict[str, Any]] | None = None,
+    telemetry_paths: dict[str, str | None] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    candidate_id = f"round_{int(round_num):04d}_attempt_{int(attempt_idx):02d}"
+    out_dir = get_agentic_candidate_artifact_dir(
+        artifacts_dir=artifacts_dir,
+        task_name=task_name,
+        run_id=run_id,
+        round_num=round_num,
+        attempt_idx=attempt_idx,
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    prompt_path = out_dir / "prompt.md"
+    manifest_path = out_dir / "manifest.json"
+    if prompt:
+        prompt_path.write_text(str(prompt), encoding="utf-8")
+
+    manifest: dict[str, Any] = {
+        "candidate_id": candidate_id,
+        "status": "failed",
+        "run_id": run_id,
+        "task_name": task_name,
+        "round_num": int(round_num),
+        "attempt_idx": int(attempt_idx),
+        "action_node_id": action_node_id,
+        "parent_candidate_id": parent_candidate_id,
+        "model_name": str(model_name or ""),
+        "prompt_path": str(prompt_path) if prompt else None,
+        "failure": {
+            "stage": str(stage or ""),
+            "error_type": str(error_type or "Error"),
+            "error_message": str(error_message or ""),
+        },
+        "stage_prompt_paths": list(stage_prompt_records or []),
+        "telemetry": dict(telemetry_paths or {}),
+    }
+    if metadata:
+        manifest.update(dict(metadata))
+    manifest_path.write_text(json.dumps(_jsonable(manifest), indent=2, sort_keys=True), encoding="utf-8")
+    return manifest

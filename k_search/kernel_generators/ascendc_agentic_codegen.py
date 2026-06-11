@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 from k_search.kernel_generators.agentic_candidate_artifacts import (
     get_agentic_candidate_artifact_dir,
+    write_agentic_failed_attempt_manifest,
     write_agentic_candidate_artifacts,
 )
 from k_search.kernel_generators.agentic_worktree import create_agentic_worktree
@@ -55,6 +56,7 @@ from k_search.kernel_generators.worktree_context import (
 )
 from k_search.tasks.task_base import EvalResult, Solution
 from k_search.telemetry.context import TelemetryContext
+from k_search.telemetry.diagnostics import diagnose_tool_protocol_failure
 from k_search.telemetry.recorder import build_file_recorder
 from k_search.utils.path_sanitize import sanitize_worktree_paths
 from k_search.utils.paths import get_ksearch_artifacts_dir, get_ksearch_worktrees_dir, get_run_id
@@ -1068,6 +1070,9 @@ class AscendCAgenticPromptBuilder:
             f"Attempt: {int(request.attempt_idx)}\n"
             f"CODE_MAP.md already exists: {code_map_status}\n\n"
             "Available tools: Read/Grep/Glob/Edit/Write, Skill, and Agent. Bash is disabled.\n"
+            "Tool protocol rule: file_path, content, pattern, and path are argument keys, not tool names. "
+            "Never call file_path as a tool. Use file_path only inside Read/Write/Edit tool inputs, for example "
+            "Write(file_path=..., content=...). If no file read or write is needed, respond in plain text only.\n"
             "Use the ascendc-codegen and ascendc-api-reference skills when relevant.\n"
             + code_map_instruction
             + "Runtime handoff files include CODE_MAP.md, ASCENDC_DESIGN.md, IMPLEMENTATION_EXECUTION_PLAN.md, IMPLEMENTATION_HANDOFF.md, optional IMPLEMENTATION_DEVIATIONS.md, and REVIEW_NOTES.md.\n"
@@ -1281,6 +1286,61 @@ class AscendCAgenticCycle:
             )
         )
 
+    def _write_failed_attempt_manifest(
+        self,
+        *,
+        stage: str,
+        exc: BaseException,
+        prompt: str = "",
+        stage_prompt_records: list[dict[str, Any]] | None = None,
+        telemetry_recorder: Any | None = None,
+        flow: SubagentFlowConfig | None = None,
+    ) -> None:
+        try:
+            artifacts = getattr(telemetry_recorder, "artifacts", None)
+            telemetry_paths = {
+                "trace_path": getattr(artifacts, "trace_path", None),
+                "timeline_path": getattr(artifacts, "timeline_path", None),
+                "cost_path": getattr(artifacts, "cost_path", None),
+            }
+            diagnosis = None
+            try:
+                diagnosis = diagnose_tool_protocol_failure(
+                    events=getattr(telemetry_recorder, "events", None),
+                    trace_path=telemetry_paths.get("trace_path"),
+                )
+            except Exception:
+                diagnosis = None
+            metadata: dict[str, Any] = {
+                "mode": self.request.mode,
+                "artifact_mode": stage,
+                "target_gpu": self.request.target_gpu,
+                "blocked_strategy_nodes": list(self.request.blocked_strategy_nodes or []),
+                "strategy": dict(self.request.strategy_context or {}),
+                "flow_name": getattr(flow, "name", None),
+            }
+            if diagnosis is not None:
+                metadata["tool_protocol_diagnosis"] = diagnosis.to_dict()
+            write_agentic_failed_attempt_manifest(
+                artifacts_dir=getattr(self.task, "artifacts_dir", None),
+                task_name=str(self.task_name),
+                run_id=str(self.run_id),
+                round_num=self.request.round_num,
+                attempt_idx=self.request.attempt_idx,
+                stage=str(stage or self.request.mode),
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+                prompt=prompt,
+                model_name=self.runner.model_name,
+                action_node_id=self.request.action_node_id,
+                parent_candidate_id=self.request.parent_candidate_id,
+                stage_prompt_records=list(stage_prompt_records or []),
+                telemetry_paths=telemetry_paths,
+                metadata=metadata,
+            )
+        except Exception:
+            pass
+
     def _curator_telemetry_context(self) -> TelemetryContext:
         return _build_curator_telemetry_context(
             task=self.task,
@@ -1438,6 +1498,16 @@ class AscendCAgenticCycle:
                     telemetry_recorder=retry_recorder,
                     stage_prompt_sink=retry_stage_prompt_sink,
                 )
+            except Exception as exc:
+                self._write_failed_attempt_manifest(
+                    stage=f"{mode}_review_retry",
+                    exc=exc,
+                    prompt=retry_prompt,
+                    stage_prompt_records=records + retry_stage_prompt_sink.records,
+                    telemetry_recorder=retry_recorder,
+                    flow=retry_flow,
+                )
+                raise
             finally:
                 retry_recorder.close()
             records.extend(retry_stage_prompt_sink.records)
@@ -1457,29 +1527,40 @@ class AscendCAgenticCycle:
         )
         stage_prompt_sink = self._stage_prompt_sink()
         try:
-            edit_result = self._run_flow(
+            try:
+                edit_result = self._run_flow(
+                    prompt=prompt,
+                    flow=self.runner.subagent_flow,
+                    telemetry_recorder=telemetry_recorder,
+                    stage_prompt_sink=stage_prompt_sink,
+                )
+            finally:
+                telemetry_recorder.close()
+            edit_result, prompt, telemetry_recorder, flow = self._run_review_feedback_retries(
+                edit_result=edit_result,
                 prompt=prompt,
-                flow=self.runner.subagent_flow,
                 telemetry_recorder=telemetry_recorder,
-                stage_prompt_sink=stage_prompt_sink,
+                flow=self.runner.subagent_flow,
+                mode=self.request.mode,
+                stage_prompt_records=stage_prompt_sink.records,
             )
-        finally:
-            telemetry_recorder.close()
-        edit_result, prompt, telemetry_recorder, flow = self._run_review_feedback_retries(
-            edit_result=edit_result,
-            prompt=prompt,
-            telemetry_recorder=telemetry_recorder,
-            flow=self.runner.subagent_flow,
-            mode=self.request.mode,
-            stage_prompt_records=stage_prompt_sink.records,
-        )
-        return self._finalize_attempt_result(
-            edit_result=edit_result,
-            prompt=prompt,
-            telemetry_recorder=telemetry_recorder,
-            flow=flow,
-            mode=self.request.mode,
-        )
+            return self._finalize_attempt_result(
+                edit_result=edit_result,
+                prompt=prompt,
+                telemetry_recorder=telemetry_recorder,
+                flow=flow,
+                mode=self.request.mode,
+            )
+        except Exception as exc:
+            self._write_failed_attempt_manifest(
+                stage=self.request.mode,
+                exc=exc,
+                prompt=prompt,
+                stage_prompt_records=stage_prompt_sink.records,
+                telemetry_recorder=telemetry_recorder,
+                flow=self.runner.subagent_flow,
+            )
+            raise
 
     def continue_fix(self, fix_prompt: str) -> AscendCAgenticCodegenResult:
         self._require_open()
@@ -1513,29 +1594,40 @@ class AscendCAgenticCycle:
         )
         stage_prompt_sink = self._stage_prompt_sink()
         try:
-            edit_result = self._run_flow(
+            try:
+                edit_result = self._run_flow(
+                    prompt=prompt,
+                    flow=self.runner.repair_subagent_flow,
+                    telemetry_recorder=telemetry_recorder,
+                    stage_prompt_sink=stage_prompt_sink,
+                )
+            finally:
+                telemetry_recorder.close()
+            edit_result, prompt, telemetry_recorder, flow = self._run_review_feedback_retries(
+                edit_result=edit_result,
                 prompt=prompt,
-                flow=self.runner.repair_subagent_flow,
                 telemetry_recorder=telemetry_recorder,
-                stage_prompt_sink=stage_prompt_sink,
+                flow=self.runner.repair_subagent_flow,
+                mode="fix",
+                stage_prompt_records=stage_prompt_sink.records,
             )
-        finally:
-            telemetry_recorder.close()
-        edit_result, prompt, telemetry_recorder, flow = self._run_review_feedback_retries(
-            edit_result=edit_result,
-            prompt=prompt,
-            telemetry_recorder=telemetry_recorder,
-            flow=self.runner.repair_subagent_flow,
-            mode="fix",
-            stage_prompt_records=stage_prompt_sink.records,
-        )
-        return self._finalize_attempt_result(
-            edit_result=edit_result,
-            prompt=prompt,
-            telemetry_recorder=telemetry_recorder,
-            flow=flow,
-            mode="fix",
-        )
+            return self._finalize_attempt_result(
+                edit_result=edit_result,
+                prompt=prompt,
+                telemetry_recorder=telemetry_recorder,
+                flow=flow,
+                mode="fix",
+            )
+        except Exception as exc:
+            self._write_failed_attempt_manifest(
+                stage="fix",
+                exc=exc,
+                prompt=prompt,
+                stage_prompt_records=stage_prompt_sink.records,
+                telemetry_recorder=telemetry_recorder,
+                flow=self.runner.repair_subagent_flow,
+            )
+            raise
 
     def continue_improve(self, improve_prompt: str) -> AscendCAgenticCodegenResult:
         self._require_open()
@@ -1569,29 +1661,40 @@ class AscendCAgenticCycle:
         )
         stage_prompt_sink = self._stage_prompt_sink()
         try:
-            edit_result = self._run_flow(
+            try:
+                edit_result = self._run_flow(
+                    prompt=prompt,
+                    flow=self.runner.improve_subagent_flow,
+                    telemetry_recorder=telemetry_recorder,
+                    stage_prompt_sink=stage_prompt_sink,
+                )
+            finally:
+                telemetry_recorder.close()
+            edit_result, prompt, telemetry_recorder, flow = self._run_review_feedback_retries(
+                edit_result=edit_result,
                 prompt=prompt,
-                flow=self.runner.improve_subagent_flow,
                 telemetry_recorder=telemetry_recorder,
-                stage_prompt_sink=stage_prompt_sink,
+                flow=self.runner.improve_subagent_flow,
+                mode="improve",
+                stage_prompt_records=stage_prompt_sink.records,
             )
-        finally:
-            telemetry_recorder.close()
-        edit_result, prompt, telemetry_recorder, flow = self._run_review_feedback_retries(
-            edit_result=edit_result,
-            prompt=prompt,
-            telemetry_recorder=telemetry_recorder,
-            flow=self.runner.improve_subagent_flow,
-            mode="improve",
-            stage_prompt_records=stage_prompt_sink.records,
-        )
-        return self._finalize_attempt_result(
-            edit_result=edit_result,
-            prompt=prompt,
-            telemetry_recorder=telemetry_recorder,
-            flow=flow,
-            mode="improve",
-        )
+            return self._finalize_attempt_result(
+                edit_result=edit_result,
+                prompt=prompt,
+                telemetry_recorder=telemetry_recorder,
+                flow=flow,
+                mode="improve",
+            )
+        except Exception as exc:
+            self._write_failed_attempt_manifest(
+                stage="improve",
+                exc=exc,
+                prompt=prompt,
+                stage_prompt_records=stage_prompt_sink.records,
+                telemetry_recorder=telemetry_recorder,
+                flow=self.runner.improve_subagent_flow,
+            )
+            raise
 
     def run_repair_loop(
         self,

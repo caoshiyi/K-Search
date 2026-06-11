@@ -108,7 +108,10 @@ class RunNarrativeLogger:
             m = dict(self.meta)
             if meta:
                 m.update(dict(meta))
-                self.meta = dict(m)
+            started = datetime.now().isoformat(timespec="seconds")
+            m.setdefault("status", "running")
+            m.setdefault("start_time", started)
+            self.meta = dict(m)
             if m:
                 self._write_meta(m)
             lines = ["# K-Search Run Summary", ""]
@@ -125,10 +128,77 @@ class RunNarrativeLogger:
             ):
                 if key in m and m[key] is not None:
                     lines.append(f"- {key}: {m[key]}")
-            lines.append(f"- started: {datetime.now().isoformat(timespec='seconds')}")
+            lines.append(f"- started: {started}")
             lines.append("")
             self._append_md("\n".join(lines))
             self._append_event("run_start", m)
+        except Exception:
+            pass
+
+    def run_failure(
+        self,
+        *,
+        reason: str,
+        error_type: str = "",
+        error_message: str = "",
+        retryable: bool = False,
+        stage: str = "",
+        detail: str = "",
+        extra: Optional[Mapping[str, Any]] = None,
+    ) -> None:
+        try:
+            reason_s = str(reason or "failed").strip() or "failed"
+            error_type_s = str(error_type or "").strip()
+            error_message_s = str(error_message or "").strip()
+            stage_s = str(stage or "").strip()
+            ended = datetime.now().isoformat(timespec="seconds")
+
+            meta = dict(self.meta)
+            meta.update(
+                {
+                    "status": "failed",
+                    "failed_reason": reason_s,
+                    "retryable": bool(retryable),
+                    "ended": ended,
+                    "end_time": ended,
+                }
+            )
+            if stage_s:
+                meta["last_stage"] = stage_s
+            if error_type_s or error_message_s:
+                meta["last_error"] = {
+                    "type": error_type_s or "Error",
+                    "message": error_message_s,
+                }
+            if extra:
+                meta.update(dict(extra))
+            self.meta = dict(meta)
+            self._write_meta(meta)
+
+            lines = [f"## [{self._clock()}] Run 失败", f"- 原因: {reason_s}"]
+            if stage_s:
+                lines.append(f"- 阶段: {stage_s}")
+            lines.append(f"- 可重试: {'是' if retryable else '否'}")
+            if error_type_s or error_message_s:
+                label = error_type_s or "Error"
+                lines.append(f"- 错误: {label}: {_excerpt(error_message_s, self.excerpt_chars)}")
+            if detail:
+                lines += ["- 诊断:", "", "```", _excerpt(detail, self.excerpt_chars), "```"]
+            lines.append(f"- 结束: {ended}")
+            lines.append("")
+            self._append_md("\n".join(lines))
+            self._append_event(
+                "run_failure",
+                {
+                    "reason": reason_s,
+                    "error_type": error_type_s,
+                    "error_message": error_message_s,
+                    "retryable": bool(retryable),
+                    "stage": stage_s,
+                    "detail": _excerpt(detail, self.excerpt_chars),
+                    "extra": dict(extra or {}),
+                },
+            )
         except Exception:
             pass
 
@@ -316,8 +386,57 @@ class RunNarrativeLogger:
         except Exception:
             pass
 
+    def blocked_actions(
+        self,
+        *,
+        round_num: Any = None,
+        actions: Optional[Iterable[Mapping[str, Any]]] = None,
+        no_executable: bool = False,
+    ) -> None:
+        try:
+            blocked = [dict(item) for item in (actions or [])]
+            if not blocked:
+                return
+            lines = [f"### [{self._clock()}] 阻塞 action"]
+            if round_num is not None:
+                lines.append(f"- Round: {round_num}")
+            lines.append(f"- 数量: {len(blocked)}")
+            if no_executable:
+                lines.append("- 可执行 action: 无")
+            for item in blocked[:20]:
+                nid = item.get("node_id") or item.get("action_node_id") or "?"
+                reason = item.get("reason") or "unknown"
+                strategy = item.get("strategy_id")
+                missing = item.get("missing")
+                text = f"  - [{nid}] {reason}"
+                if strategy:
+                    text += f" strategy={strategy}"
+                if missing:
+                    text += f" missing={','.join(str(x) for x in missing)}"
+                lines.append(text)
+            lines.append("")
+            self._append_md("\n".join(lines))
+            self._append_event(
+                "blocked_actions",
+                {
+                    "round": round_num,
+                    "actions": blocked[:20],
+                    "blocked_count": len(blocked),
+                    "no_executable": bool(no_executable),
+                },
+            )
+        except Exception:
+            pass
+
     def run_end(self, *, best_round: Any = None, latency_ms: Any = None, vs_baseline: Any = None, total_rounds: Any = None, note: str = "") -> None:
         try:
+            meta = dict(self.meta)
+            meta["status"] = "completed"
+            ended = datetime.now().isoformat(timespec="seconds")
+            meta["ended"] = ended
+            meta["end_time"] = ended
+            self.meta = dict(meta)
+            self._write_meta(meta)
             lines = [f"## [{self._clock()}] Run 结束"]
             if best_round is not None:
                 lines.append(f"- 最优轮: {best_round}")
@@ -329,7 +448,7 @@ class RunNarrativeLogger:
                 lines.append(f"- 总轮数: {total_rounds}")
             if note:
                 lines.append(f"- 备注: {note}")
-            lines.append(f"- 结束: {datetime.now().isoformat(timespec='seconds')}")
+            lines.append(f"- 结束: {ended}")
             lines.append("")
             self._append_md("\n".join(lines))
             self._append_event(

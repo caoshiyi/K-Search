@@ -1,4 +1,5 @@
 import dataclasses
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -177,6 +178,7 @@ def test_run_one_shot_closed_closes_session_and_cleans_worktree_on_success(tmp_p
 
 
 def test_run_one_shot_closed_closes_session_and_cleans_worktree_on_exception(tmp_path, monkeypatch, lifecycle_env):
+    monkeypatch.setenv("KSEARCH_TASK_ID", "taskid")
     worktree = _install_fake_worktree(monkeypatch, tmp_path)
     client = FakeSessionClient(fail_flow=True)
     runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
@@ -192,6 +194,25 @@ def test_run_one_shot_closed_closes_session_and_cleans_worktree_on_exception(tmp
     assert len(client.sessions) == 1
     assert client.closed_sessions == client.sessions
     assert worktree.cleaned is True
+
+    manifest_path = (
+        tmp_path
+        / "artifacts"
+        / "x"
+        / "taskid"
+        / "runs"
+        / "lifecycle"
+        / "artifacts"
+        / "candidates"
+        / "round_0001_attempt_01"
+        / "manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "failed"
+    assert manifest["failure"]["stage"] == "action"
+    assert manifest["failure"]["error_type"] == "RuntimeError"
+    assert "flow failed" in manifest["failure"]["error_message"]
+    assert manifest["stage_prompt_paths"]
 
 
 def test_open_cycle_reuses_session_until_context_exit(tmp_path, monkeypatch, lifecycle_env):

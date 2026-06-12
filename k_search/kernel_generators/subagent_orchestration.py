@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 from dataclasses import dataclass, replace
 from importlib.resources import files
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any
 from k_search.kernel_generators.claude_agent_project_editor import ClaudeProjectEditResult
 from k_search.kernel_generators.prompt_hygiene import check_prompt_hygiene_or_raise
 from k_search.kernel_generators.worktree_context import assert_no_absolute_paths_for_llm
+from k_search.telemetry.events import TelemetryEvent
 
 logger = logging.getLogger(__name__)
 
@@ -424,11 +426,187 @@ def _flow_stage_index(flow: SubagentFlowConfig, stage: SubagentStageConfig) -> i
     return 0
 
 
-def _require_stage_files(project_root: Path, stage: SubagentStageConfig) -> None:
+def _require_stage_files(
+    project_root: Path,
+    stage: SubagentStageConfig,
+    *,
+    telemetry_recorder: Any | None = None,
+    event_start: int = 0,
+) -> None:
     missing = [path for path in stage.required_files if not (project_root / path).is_file()]
     if missing:
+        recovered = _recover_required_file_writes_outside_project(
+            project_root=project_root,
+            stage=stage,
+            missing_files=missing,
+            telemetry_recorder=telemetry_recorder,
+            event_start=event_start,
+        )
+        if recovered:
+            missing = [path for path in stage.required_files if not (project_root / path).is_file()]
+        if not missing:
+            return
+        external_writes = _required_file_writes_outside_project(
+            project_root=project_root,
+            missing_files=missing,
+            telemetry_recorder=telemetry_recorder,
+            event_start=event_start,
+        )
+        if external_writes:
+            details = "; ".join(f"{rel} -> {path}" for rel, path in external_writes)
+            raise RuntimeError(
+                f"subagent stage {stage.name!r} wrote required file(s) outside candidate project root: "
+                f"{details}. Expected outputs under {project_root}; use relative file_path values "
+                f"such as {', '.join(missing)}."
+            )
         joined = ", ".join(missing)
         raise RuntimeError(f"subagent stage {stage.name!r} did not produce required file(s): {joined}")
+
+
+def _recover_required_file_writes_outside_project(
+    *,
+    project_root: Path,
+    stage: SubagentStageConfig,
+    missing_files: list[str],
+    telemetry_recorder: Any | None,
+    event_start: int,
+) -> list[tuple[str, Path, Path]]:
+    recovered: list[tuple[str, Path, Path]] = []
+    for rel, source in _required_file_writes_outside_project(
+        project_root=project_root,
+        missing_files=missing_files,
+        telemetry_recorder=telemetry_recorder,
+        event_start=event_start,
+    ):
+        if not source.is_file():
+            continue
+        target = project_root / rel
+        if target.is_file():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        recovered.append((rel, source, target))
+        logger.warning(
+            "recovered subagent required file written outside project root: "
+            "stage=%r agent=%r file=%s source=%s target=%s",
+            stage.name,
+            stage.agent,
+            rel,
+            source,
+            target,
+        )
+        _emit_recovery_event(
+            telemetry_recorder=telemetry_recorder,
+            stage=stage,
+            rel=rel,
+            source=source,
+            target=target,
+        )
+    return recovered
+
+
+def _required_file_writes_outside_project(
+    *,
+    project_root: Path,
+    missing_files: list[str],
+    telemetry_recorder: Any | None,
+    event_start: int,
+) -> list[tuple[str, Path]]:
+    root = project_root.expanduser().resolve(strict=False)
+    missing_by_name = {Path(rel).name: rel for rel in missing_files}
+    out: list[tuple[str, Path]] = []
+    seen: set[tuple[str, str]] = set()
+    for event in _iter_stage_telemetry_events(telemetry_recorder=telemetry_recorder, event_start=event_start):
+        if _event_get(event, "event_type") != "tool_use" or _event_get(event, "tool_name") != "Write":
+            continue
+        tool_input = _event_get(event, "tool_input")
+        if not isinstance(tool_input, dict):
+            continue
+        raw_path = tool_input.get("file_path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        observed = _observed_tool_path(root, raw_path)
+        rel = missing_by_name.get(observed.name)
+        if rel is None or _path_is_under_root(observed, root):
+            continue
+        key = (rel, str(observed))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((rel, observed))
+    return out
+
+
+def _iter_stage_telemetry_events(*, telemetry_recorder: Any | None, event_start: int) -> list[Any]:
+    if telemetry_recorder is None:
+        return []
+    events = list(getattr(telemetry_recorder, "events", []) or [])
+    if events:
+        return events[int(event_start) :]
+
+    trace_path = getattr(getattr(telemetry_recorder, "artifacts", None), "trace_path", None)
+    if not trace_path:
+        return []
+    path = Path(str(trace_path))
+    if not path.is_file():
+        return []
+    parsed: list[dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            item = json.loads(line)
+            if isinstance(item, dict):
+                parsed.append(item)
+    except Exception:
+        return []
+    return parsed[int(event_start) :]
+
+
+def _event_get(event: Any, key: str) -> Any:
+    if isinstance(event, dict):
+        return event.get(key)
+    return getattr(event, key, None)
+
+
+def _emit_recovery_event(
+    *,
+    telemetry_recorder: Any | None,
+    stage: SubagentStageConfig,
+    rel: str,
+    source: Path,
+    target: Path,
+) -> None:
+    emit = getattr(telemetry_recorder, "emit", None)
+    if not callable(emit):
+        return
+    try:
+        emit(
+            TelemetryEvent(
+                event_type="subagent_handoff_recovered",
+                context={
+                    "stage": stage.name,
+                    "agent": stage.agent,
+                    "required_file": rel,
+                    "source_path": str(source),
+                    "target_path": str(target),
+                },
+            )
+        )
+    except Exception:
+        logger.debug("failed to emit subagent handoff recovery telemetry", exc_info=True)
+
+
+def _observed_tool_path(root: Path, raw_path: str) -> Path:
+    path = Path(str(raw_path).strip()).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    return path.resolve(strict=False)
+
+
+def _path_is_under_root(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
 
 
 def _validate_stage_completion(
@@ -439,7 +617,12 @@ def _validate_stage_completion(
     event_start: int,
     require_agent_tool_use: bool,
 ) -> None:
-    _require_stage_files(project_root, stage)
+    _require_stage_files(
+        project_root,
+        stage,
+        telemetry_recorder=telemetry_recorder,
+        event_start=event_start,
+    )
     if require_agent_tool_use and bool(getattr(telemetry_recorder, "enabled", False)):
         _require_agent_tool_invocation(
             telemetry_recorder=telemetry_recorder,

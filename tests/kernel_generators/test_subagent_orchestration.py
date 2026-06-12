@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +15,8 @@ from k_search.kernel_generators.subagent_orchestration import (
     render_subagent_stage_prompt,
     run_configured_subagent_flow,
 )
+from k_search.telemetry.events import TelemetryEvent
+from k_search.telemetry.recorder import TelemetryRecorder
 
 
 def test_load_default_subagent_flow_uses_configured_stage_order():
@@ -314,6 +317,174 @@ def test_run_configured_subagent_flow_fails_when_required_file_missing(tmp_path)
             base_prompt="BASE",
             flow=flow,
         )
+
+
+def test_run_configured_subagent_flow_recovers_required_file_written_outside_project(tmp_path, caplog):
+    flow = SubagentFlowConfig(
+        name="test-flow",
+        description="Test flow.",
+        stages=(
+            SubagentStageConfig(
+                name="reviewer",
+                agent="reviewer",
+                instruction="Create REVIEW_NOTES.md.",
+                required_files=("REVIEW_NOTES.md",),
+            ),
+        ),
+    )
+    outside = tmp_path.parent / f"{tmp_path.name}_wrong_recover" / "agent_workdir" / "flash_attention" / "REVIEW_NOTES.md"
+
+    class SessionClient:
+        def open_session(self, *, project_dir, telemetry_recorder=None):
+            return SimpleNamespace(project_dir=Path(project_dir), _closed=False)
+
+        def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+            telemetry_recorder.emit(
+                TelemetryEvent(
+                    event_type="tool_use",
+                    tool_name="Write",
+                    tool_input={"file_path": str(outside), "content": "status: ok\n"},
+                )
+            )
+            outside.parent.mkdir(parents=True, exist_ok=True)
+            outside.write_text("status: ok\n", encoding="utf-8")
+            return ClaudeProjectEditResult(
+                text="review done",
+                transcript="review done",
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+        def close_session(self, session):
+            session._closed = True
+
+    recorder = TelemetryRecorder()
+
+    result = run_configured_subagent_flow(
+        editor_client=SessionClient(),
+        project_dir=tmp_path,
+        base_prompt="BASE",
+        flow=flow,
+        telemetry_recorder=recorder,
+    )
+
+    assert result.text == "review done"
+    assert (tmp_path / "REVIEW_NOTES.md").read_text(encoding="utf-8") == "status: ok\n"
+    assert "recovered subagent required file written outside project root" in caplog.text
+    assert any(event.event_type == "subagent_handoff_recovered" for event in recorder.events)
+
+
+def test_run_configured_subagent_flow_reports_missing_external_write_source(tmp_path):
+    flow = SubagentFlowConfig(
+        name="test-flow",
+        description="Test flow.",
+        stages=(
+            SubagentStageConfig(
+                name="reviewer",
+                agent="reviewer",
+                instruction="Create REVIEW_NOTES.md.",
+                required_files=("REVIEW_NOTES.md",),
+            ),
+        ),
+    )
+    outside = tmp_path.parent / f"{tmp_path.name}_wrong_missing" / "agent_workdir" / "flash_attention" / "REVIEW_NOTES.md"
+
+    class SessionClient:
+        def open_session(self, *, project_dir, telemetry_recorder=None):
+            return SimpleNamespace(project_dir=Path(project_dir), _closed=False)
+
+        def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+            telemetry_recorder.emit(
+                TelemetryEvent(
+                    event_type="tool_use",
+                    tool_name="Write",
+                    tool_input={"file_path": str(outside), "content": "status: ok\n"},
+                )
+            )
+            return ClaudeProjectEditResult(
+                text="review done",
+                transcript="review done",
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+        def close_session(self, session):
+            session._closed = True
+
+    with pytest.raises(RuntimeError) as exc:
+        run_configured_subagent_flow(
+            editor_client=SessionClient(),
+            project_dir=tmp_path,
+            base_prompt="BASE",
+            flow=flow,
+            telemetry_recorder=TelemetryRecorder(),
+        )
+
+    message = str(exc.value)
+    assert "outside candidate project root" in message
+    assert "REVIEW_NOTES.md" in message
+    assert str(outside) in message
+
+
+def test_run_configured_subagent_flow_recovers_external_write_from_trace_file(tmp_path):
+    flow = SubagentFlowConfig(
+        name="test-flow",
+        description="Test flow.",
+        stages=(
+            SubagentStageConfig(
+                name="reviewer",
+                agent="reviewer",
+                instruction="Create REVIEW_NOTES.md.",
+                required_files=("REVIEW_NOTES.md",),
+            ),
+        ),
+    )
+    outside = tmp_path.parent / "wrong_run_trace" / "agent_workdir" / "flash_attention" / "REVIEW_NOTES.md"
+    trace_path = tmp_path / "logs" / "agent_trace.jsonl"
+
+    class SessionClient:
+        def open_session(self, *, project_dir, telemetry_recorder=None):
+            return SimpleNamespace(project_dir=Path(project_dir), _closed=False)
+
+        def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+            outside.parent.mkdir(parents=True, exist_ok=True)
+            outside.write_text("status: ok\n", encoding="utf-8")
+            trace_path.parent.mkdir(parents=True, exist_ok=True)
+            trace_path.write_text(
+                json.dumps(
+                    {
+                        "event_type": "tool_use",
+                        "tool_name": "Write",
+                        "tool_input": {"file_path": str(outside), "content": "status: ok\n"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            return ClaudeProjectEditResult(
+                text="review done",
+                transcript="review done",
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+        def close_session(self, session):
+            session._closed = True
+
+    recorder = TelemetryRecorder(artifacts=SimpleNamespace(trace_path=str(trace_path)))
+
+    run_configured_subagent_flow(
+        editor_client=SessionClient(),
+        project_dir=tmp_path,
+        base_prompt="BASE",
+        flow=flow,
+        telemetry_recorder=recorder,
+    )
+
+    assert (tmp_path / "REVIEW_NOTES.md").read_text(encoding="utf-8") == "status: ok\n"
 
 
 def test_run_configured_subagent_flow_saves_stage_checkpoints_in_order(tmp_path):

@@ -207,7 +207,9 @@ class NativeSessionClient:
         self.prompts.append(prompt)
         root = Path(session.project_dir)
         _write_native_handoffs(root)
-        if prompt.startswith("Stage 1/3: improvement-assessor"):
+        if prompt.startswith("Stage 1/1: improvement-assessor") or prompt.startswith(
+            "Stage 1/3: improvement-assessor"
+        ):
             (root / "IMPROVEMENT_ASSESSMENT.md").write_text(
                 "status: improve\n"
                 "files_written: IMPROVEMENT_ASSESSMENT.md\n"
@@ -254,11 +256,15 @@ class NoOpImproveSessionClient:
         self.prompts.append(prompt)
         root = Path(session.project_dir)
         _write_native_handoffs(root)
-        if prompt.startswith("Stage 3/4: codegen"):
+        if prompt.startswith("Stage 1/2: codegen") or prompt.startswith(
+            "Stage 3/4: codegen"
+        ):
             (root / "kernel" / "foo.h").write_text(
                 "alpha\nBETA\ngamma\n", encoding="utf-8"
             )
-        if prompt.startswith("Stage 1/3: improvement-assessor"):
+        if prompt.startswith("Stage 1/1: improvement-assessor") or prompt.startswith(
+            "Stage 1/3: improvement-assessor"
+        ):
             (root / "IMPROVEMENT_ASSESSMENT.md").write_text(
                 f"status: {self.assessment_status}\n"
                 "files_written: IMPROVEMENT_ASSESSMENT.md\n"
@@ -2598,9 +2604,9 @@ def test_continue_improve_uses_codegen_flow_without_bug_fixer(tmp_path, monkeypa
         )
 
     assert [prompt.splitlines()[0] for prompt in client.prompts[4:]] == [
-        "Stage 1/3: improvement-assessor",
-        "Stage 2/3: codegen",
-        "Stage 3/3: reviewer",
+        "Stage 1/1: improvement-assessor",
+        "Stage 1/2: codegen",
+        "Stage 2/2: reviewer",
     ]
     assert "bug-fixer" not in client.prompts[4]
     assert "continue_improve" in client.prompts[4]
@@ -2666,6 +2672,10 @@ def test_continue_improve_no_op_preserves_current_candidate_without_source_diff(
     assert second.eval_result.status == "passed"
     assert second.changed_paths == []
     assert second.diff_text == ""
+    assert [prompt.splitlines()[0] for prompt in client.prompts[4:]] == [
+        "Stage 1/1: improvement-assessor",
+    ]
+    assert not any("codegen" in prompt.splitlines()[0] for prompt in client.prompts[4:])
     assert "BETA" in next(
         src.content for src in second.solution.sources if src.path == "kernel/foo.h"
     )

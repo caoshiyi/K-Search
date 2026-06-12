@@ -536,14 +536,16 @@ def _improvement_assessment_status(handoffs: dict[str, str]) -> str:
     return (_field_value(raw, "status") or "").strip().lower().replace("-", "_")
 
 
+def _is_terminal_improvement_assessment_status(status: str) -> bool:
+    return status in {"no_op", "needs_design_update", "blocked"}
+
+
 def _allows_empty_candidate_change(*, mode: str, handoffs: dict[str, str]) -> bool:
     if str(mode or "").strip().lower() != "improve":
         return False
-    return _improvement_assessment_status(handoffs) in {
-        "no_op",
-        "needs_design_update",
-        "blocked",
-    }
+    return _is_terminal_improvement_assessment_status(
+        _improvement_assessment_status(handoffs)
+    )
 
 
 def _validate_review_notes(review_text: str) -> None:
@@ -1884,22 +1886,44 @@ class AscendCAgenticCycle:
             try:
                 edit_result = self._run_flow(
                     prompt=prompt,
-                    flow=self.runner.improve_subagent_flow,
+                    flow=self.runner.improve_assessment_subagent_flow,
                     telemetry_recorder=telemetry_recorder,
                     stage_prompt_sink=stage_prompt_sink,
                 )
+                assessment_handoffs = _require_native_handoff_files(
+                    self.wt_session.project_dir,
+                    _flow_handoff_files(self.runner.improve_assessment_subagent_flow),
+                    validate_review_ready=False,
+                )
+                assessment_status = _improvement_assessment_status(assessment_handoffs)
+                if assessment_status == "improve":
+                    edit_result = self._run_flow(
+                        prompt=prompt,
+                        flow=self.runner.improve_codegen_subagent_flow,
+                        telemetry_recorder=telemetry_recorder,
+                        stage_prompt_sink=stage_prompt_sink,
+                    )
+                    edit_result, prompt, telemetry_recorder, flow = (
+                        self._run_review_feedback_retries(
+                            edit_result=edit_result,
+                            prompt=prompt,
+                            telemetry_recorder=telemetry_recorder,
+                            flow=self.runner.improve_codegen_subagent_flow,
+                            mode="improve",
+                            stage_prompt_records=stage_prompt_sink.records,
+                        )
+                    )
+                elif _is_terminal_improvement_assessment_status(assessment_status):
+                    self.last_stage_prompt_records = list(stage_prompt_sink.records)
+                    flow = self.runner.improve_assessment_subagent_flow
+                else:
+                    raise RuntimeError(
+                        "IMPROVEMENT_ASSESSMENT.md has unsupported status "
+                        f"{assessment_status or 'missing'}; expected improve, "
+                        "no_op, needs_design_update, or blocked"
+                    )
             finally:
                 telemetry_recorder.close()
-            edit_result, prompt, telemetry_recorder, flow = (
-                self._run_review_feedback_retries(
-                    edit_result=edit_result,
-                    prompt=prompt,
-                    telemetry_recorder=telemetry_recorder,
-                    flow=self.runner.improve_subagent_flow,
-                    mode="improve",
-                    stage_prompt_records=stage_prompt_sink.records,
-                )
-            )
             return self._finalize_attempt_result(
                 edit_result=edit_result,
                 prompt=prompt,
@@ -1914,7 +1938,7 @@ class AscendCAgenticCycle:
                 prompt=prompt,
                 stage_prompt_records=stage_prompt_sink.records,
                 telemetry_recorder=telemetry_recorder,
-                flow=self.runner.improve_subagent_flow,
+                flow=self.runner.improve_assessment_subagent_flow,
             )
             raise
 
@@ -2157,6 +2181,8 @@ class AscendCAgenticCodegenRunner:
         subagent_flow: SubagentFlowConfig | None = None,
         repair_subagent_flow: SubagentFlowConfig | None = None,
         improve_subagent_flow: SubagentFlowConfig | None = None,
+        improve_assessment_subagent_flow: SubagentFlowConfig | None = None,
+        improve_codegen_subagent_flow: SubagentFlowConfig | None = None,
         stage_checkpoint_config: StageCheckpointConfig | None = None,
     ) -> None:
         self.model_name = str(model_name)
@@ -2181,10 +2207,40 @@ class AscendCAgenticCodegenRunner:
             default_repair_flow = self.subagent_flow
         self.repair_subagent_flow = repair_subagent_flow or default_repair_flow
         try:
-            default_improve_flow = flow_set.get("continue_improve")
+            default_improve_assessment_flow = flow_set.get(
+                "continue_improve_assessment"
+            )
         except KeyError:
-            default_improve_flow = self.subagent_flow
-        self.improve_subagent_flow = improve_subagent_flow or default_improve_flow
+            try:
+                default_improve_assessment_flow = flow_set.get("continue_improve")
+            except KeyError:
+                default_improve_assessment_flow = self.subagent_flow
+        try:
+            default_improve_codegen_flow = flow_set.get("continue_improve_codegen")
+        except KeyError:
+            try:
+                legacy_improve_flow = flow_set.get("continue_improve")
+            except KeyError:
+                default_improve_codegen_flow = self.subagent_flow
+            else:
+                default_improve_codegen_flow = replace(
+                    legacy_improve_flow,
+                    name=f"{legacy_improve_flow.name}-codegen",
+                    description=(
+                        f"Codegen/reviewer branch derived from {legacy_improve_flow.name}."
+                    ),
+                    stages=tuple(legacy_improve_flow.stages[1:])
+                    or tuple(legacy_improve_flow.stages),
+                )
+        self.improve_subagent_flow = (
+            improve_subagent_flow or default_improve_assessment_flow
+        )
+        self.improve_assessment_subagent_flow = (
+            improve_assessment_subagent_flow or self.improve_subagent_flow
+        )
+        self.improve_codegen_subagent_flow = (
+            improve_codegen_subagent_flow or default_improve_codegen_flow
+        )
 
     def open_cycle(
         self,

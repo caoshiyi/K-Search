@@ -57,9 +57,9 @@
         }
       ]
     },
-    "continue_improve": {
-      "name": "ascendc-continue-improve",
-      "description": "Continue a passed candidate with a focused latency improvement attempt.",
+    "continue_improve_assessment": {
+      "name": "ascendc-continue-improve-assessment",
+      "description": "Assess whether a passed candidate has evidence-backed room for another focused latency improvement.",
       "trigger": {
         "event": "python_eval_passed_continue_action",
         "statuses": ["passed"]
@@ -70,11 +70,17 @@
           "agent": "improvement-assessor",
           "instruction": "Read the referenced strategy, ASCENDC_DESIGN.md if present, current handoff files, CODE_MAP.md, and the real source files. Write IMPROVEMENT_ASSESSMENT.md with a decision on whether there is evidence-backed room for another focused latency improvement, including design/implementation deviation analysis. Do not edit source files.",
           "required_files": ["IMPROVEMENT_ASSESSMENT.md"]
-        },
+        }
+      ]
+    },
+    "continue_improve_codegen": {
+      "name": "ascendc-continue-improve-codegen",
+      "description": "Implement and review a focused latency improvement after the assessment gate returns status=improve.",
+      "stages": [
         {
           "name": "codegen",
           "agent": "codegen",
-          "instruction": "Read IMPROVEMENT_ASSESSMENT.md, CODE_MAP.md, the previous evaluation summary, ASCENDC_DESIGN.md if present, and the current source files. If assessment status is improve, make one focused latency improvement within edit_scope. If status is no_op, needs_design_update, or blocked, preserve the implementation and write handoff files explaining why no source edit was made. Update CODE_MAP.md if project contracts changed, and write IMPLEMENTATION_EXECUTION_PLAN.md plus IMPLEMENTATION_HANDOFF.md.",
+          "instruction": "Read IMPROVEMENT_ASSESSMENT.md, CODE_MAP.md, the previous evaluation summary, ASCENDC_DESIGN.md if present, and the current source files. The assessment status is improve, so make one focused latency improvement within edit_scope. Update CODE_MAP.md if project contracts changed, and write IMPLEMENTATION_EXECUTION_PLAN.md plus IMPLEMENTATION_HANDOFF.md.",
           "required_files": ["CODE_MAP.md", "IMPLEMENTATION_EXECUTION_PLAN.md", "IMPLEMENTATION_HANDOFF.md"]
         },
         {

@@ -1342,12 +1342,14 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
 
         # Optional: resume world model from a JSON snapshot on disk.
         wm_ref = str(continue_from_world_model or "").strip()
+        _wm_already_restored_from_snapshot = False
         if wm_ref and restored_checkpoint is None:
             self._resume_world_model_from_snapshot(
                 task=task, ref=wm_ref, run_id=effective_run_id
             )
             _emit(render_world_model_status(self._wm.get(task.name)))
             self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
+            _wm_already_restored_from_snapshot = True
 
         # Optional W&B support
         try:
@@ -1397,38 +1399,36 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         parent_solution_id=None,
                     )
                     # Initialize WM (or seed existing WM) with root attached to the continued-from solution.
-                    try:
-                        wm_code = _wm_guardrail(_code_for_wm_from_raw(current_raw_code))
-                    except Exception:
-                        wm_code = None
-                    with llm_log_context(
-                        operator=str(getattr(task, "name", "") or ""),
-                        flow="world_model",
-                        round_index=0,
-                        stage="world_model_seed_init",
-                        language=str(self.language),
-                        target_gpu=str(self.target_gpu),
-                    ):
-                        self._wm.ensure_initialized(
-                            definition_name=task.name,
-                            definition_text=definition_text,
-                            current_code_excerpt=(
-                                str(wm_code)
-                                if isinstance(wm_code, str) and wm_code.strip()
-                                else None
-                            ),
-                            eval_result=seed_eval,
-                            seed_root_solution_id=str(rec_seed.solution_id),
-                            seed_root_solution_name=str(rec_seed.solution_name),
-                            seed_root_round_index=0,
-                        )
-                    _emit(
-                        "[WM] Initialized+seeded root from continue_from_solution (code+eval)."
-                    )
-                    _emit(render_world_model_status(self._wm.get(task.name)))
-                    self._persist_world_model_snapshot(
-                        task=task, run_id=effective_run_id
-                    )
+# Skip this if WM was already restored from a snapshot (which preserves the full tree state).
+                    if not _wm_already_restored_from_snapshot:
+                        try:
+                            wm_code = _wm_guardrail(_code_for_wm_from_raw(current_raw_code))
+                        except Exception:
+                            wm_code = None
+                        with llm_log_context(
+                            operator=str(getattr(task, "name", "") or ""),
+                            flow="world_model",
+                            round_index=0,
+                            stage="world_model_seed_init",
+                            language=str(self.language),
+                            target_gpu=str(self.target_gpu),
+                        ):
+                            self._wm.ensure_initialized(
+                                definition_name=task.name,
+                                definition_text=definition_text,
+                                current_code_excerpt=(str(wm_code) if isinstance(wm_code, str) and wm_code.strip() else None),
+                                eval_result=seed_eval,
+                                seed_root_solution_id=str(rec_seed.solution_id),
+                                seed_root_solution_name=str(rec_seed.solution_name),
+                                seed_root_round_index=0,
+                            )
+                        _emit("[WM] Initialized+seeded root from continue_from_solution (code+eval).")
+                        _emit(render_world_model_status(self._wm.get(task.name)))
+                        self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
+                    else:
+                        _emit("[WM] Skipping ensure_initialized because WM was restored from snapshot.")
+                        # WM snapshot already has correct state; no need to modify
+                        _emit(render_world_model_status(self._wm.get(task.name)))
             except LLMProviderFatalError as exc:
                 _emit(
                     f"[ERROR] world model seed init failed with fatal provider error: {exc}"
@@ -1448,11 +1448,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 from k_search.kernel_generators.strategy_injection import (
                     build_wm_from_strategies,
                 )
-                from k_search.kernel_generators.world_model import dump_world_model_obj
-
-                _emit(
-                    f"[STRATEGY] Building WM from strategy catalog ({len(self._strategy_catalog)} strategies, form=natural_language)"
-                )
+                _emit(f"[STRATEGY] Building WM from strategy catalog ({len(self._strategy_catalog)} strategies, form=natural_language)")
                 wm_obj = build_wm_from_strategies(
                     strategy_catalog=self._strategy_catalog,
                     definition_name=task.name,

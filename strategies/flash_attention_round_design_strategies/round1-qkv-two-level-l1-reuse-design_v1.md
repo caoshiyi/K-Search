@@ -264,11 +264,14 @@ ComputeVec1(slot, isFirst, kvRows):     # kvRows = 本 KV 外层块实际行数 
         dealRows = min(vec1ChunkRows_, vecDealM - chunkRow)
         sUb = copy S[ sSlot[(vecStartM+chunkRow)*outerCols] ]  (dealRows × outerCols)
         Muls(sUb, smScale)
+        mGlobal = vecStartM + chunkRow           # ⚠️ 必须用任务内全局行索引（KP-004）
+        stateBase = slot * stateStride + mGlobal
+        prevStateBase = prevSlot * stateStride + mGlobal
         # SoftMaxShapeInfo: srcM=dealRows, srcK=outerCols, oriSrcK=kvRows
         #   oriSrcK=kvRows(实际KV列) 让 softmax 只在有效列上归约，自动屏蔽 padding 列，
         #   省掉基线里手写的 -inf mask（基线对 128 列尾块用 maskBuf 填 -inf）。
-        SoftmaxFlashV2(sUb, sum=sumCache[slot,base], max=maxCache[slot,base], sUb,
-                       exp=expCache[slot,base], inSum/inMax = (isFirst? default : prevSlot),
+        SoftmaxFlashV2(sUb, sum=sumCache[stateBase], max=maxCache[stateBase], sUb,
+                       exp=expCache[stateBase], inSum/inMax = (isFirst? default : prevStateBase),
                        smTiling, srcShape)
         pHalf = Cast(sUb → fp16);  copy pHalf → pSlot[(vecStartM+chunkRow)*outerCols]
     pQueue.ProducerReleaseMte3()
@@ -276,6 +279,13 @@ ComputeVec1(slot, isFirst, kvRows):     # kvRows = 本 KV 外层块实际行数 
 关键变化 vs 基线：
 - 基线 srcK 固定 128 且手工 `-inf` mask 尾块；本轮 srcK=`s2BaseSize`、`oriSrcK=kvRows`，**靠 softmax 的 oriSrcK 自动处理 KV 尾块**，删掉 maskBuf 逻辑。
 - softmax 的 max/sum/exp 状态按 `slot` 环形缓存，`isFirst`（首个 KV 外层块）用 -inf/0 默认值，否则读 `prevSlot` 状态做 online 合并。
+
+> **⚠️ 高危坑 (KP-004)**：chunk 循环中 softmax state cache 索引必须使用 `prevStateBase + mGlobal`（而非仅 `prevStateBase`）。若遗漏 `mGlobal`，所有 chunk（除第一个）都读取 slot 第 0-15 行的状态，导致 online-softmax rescaling 错误，mismatch ~41%。状态缓存索引公式：
+> ```
+> stateBase = slot * stateStride + mGlobal
+> prevStateBase = prevSlot * stateStride + mGlobal
+> ```
+> 其中 `mGlobal = vecStartM + chunkRow` 是任务内全局行索引。这与 KP-001（写回偏移）、KP-003（Q outer block reset）同属「单一全局行坐标系」约束家族。
 
 
 ### 6.4 ComputeVec2（O 的 online 重缩放 + 归一化 + 写回）

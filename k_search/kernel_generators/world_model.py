@@ -1283,6 +1283,23 @@ def _normalize_world_model_obj(obj: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             lur = 0
 
+        # Preserve strategy_ref for catalog strategy matching
+        strategy_ref = None
+        act = n.get("action")
+        if isinstance(act, dict):
+            sr = act.get("strategy_ref")
+            if isinstance(sr, dict):
+                strategy_ref = {
+                    "id": str(sr.get("id") or "").strip() or None,
+                    "markdown_ref": str(sr.get("markdown_ref") or "").strip() or None,
+                }
+                # Remove None values
+                strategy_ref = {k: v for k, v in strategy_ref.items() if v is not None}
+                if not strategy_ref:
+                    strategy_ref = None
+        if strategy_ref:
+            act_norm["strategy_ref"] = strategy_ref
+
         return {
             "node_id": node_id,
             "parent_id": parent_id,

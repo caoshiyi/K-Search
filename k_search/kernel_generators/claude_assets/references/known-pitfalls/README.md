@@ -23,3 +23,5 @@
 |----|------|----------------|
 | KP-001 | 分段/子块写回偏移必须用单一全局行坐标系 | designer / codegen / bug-fixer |
 | KP-002 | 单缓冲 L1 复用必须补齐 MTE1→MTE2 反向同步 | designer / codegen / bug-fixer / reviewer |
+| KP-003 | 多 Q outer block 任务的 softmax 状态缓存必须在每块开始时重置 | designer / codegen / reviewer / bug-fixer |
+| KP-004 | Vec chunk 循环中 softmax state cache 索引必须使用全局行偏移 | codegen / reviewer / bug-fixer |

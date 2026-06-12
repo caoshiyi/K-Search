@@ -61,6 +61,7 @@ from k_search.tasks.task_base import EvalResult, Solution
 from k_search.telemetry.context import TelemetryContext
 from k_search.telemetry.diagnostics import diagnose_tool_protocol_failure
 from k_search.telemetry.recorder import build_file_recorder
+from k_search.meta_harness.failure import classify_claude_exception, write_failure_artifacts
 from k_search.utils.path_sanitize import sanitize_worktree_paths
 from k_search.utils.paths import (
     get_ksearch_artifacts_dir,
@@ -1450,6 +1451,53 @@ class AscendCAgenticCycle:
                 "strategy": dict(self.request.strategy_context or {}),
                 "flow_name": getattr(flow, "name", None),
             }
+            failure_class = None
+            failure_signature_path = None
+            retryable = None
+            recommended_action = None
+            try:
+                candidate_id = f"round_{int(self.request.round_num):04d}_attempt_{int(self.request.attempt_idx):02d}"
+                failure = classify_claude_exception(
+                    exc,
+                    trace_path=telemetry_paths.get("trace_path"),
+                    context={
+                        "stage": str(stage or self.request.mode),
+                        "round_index": self.request.round_num,
+                        "attempt_index": self.request.attempt_idx,
+                        "action_node_id": self.request.action_node_id,
+                        "candidate_id": candidate_id,
+                        "tool_timeline_path": telemetry_paths.get("timeline_path"),
+                    },
+                )
+                if diagnosis is not None:
+                    failure.failure_class = "CLAUDE_TOOL_PROTOCOL_ERROR"
+                    failure.retryable = bool(diagnosis.retryable)
+                    failure.recommended_action = "retry_codegen_with_recovery_prompt"
+                    failure.normalized_message = diagnosis.message
+                candidate_dir = get_agentic_candidate_artifact_dir(
+                    artifacts_dir=getattr(self.task, "artifacts_dir", None),
+                    task_name=str(self.task_name),
+                    run_id=str(self.run_id),
+                    round_num=self.request.round_num,
+                    attempt_idx=self.request.attempt_idx,
+                    action_node_id=self.request.action_node_id,
+                )
+                failure_paths = write_failure_artifacts(
+                    get_ksearch_run_dir(
+                        base_dir=getattr(self.task, "artifacts_dir", None),
+                        task_name=str(self.task_name),
+                        task_id=get_task_id(),
+                        run_id=str(self.run_id),
+                    ),
+                    failure,
+                    candidate_dir=candidate_dir,
+                )
+                failure_class = failure.failure_class
+                failure_signature_path = failure_paths.get("candidate_failure_signature_path")
+                retryable = failure.retryable
+                recommended_action = failure.recommended_action
+            except Exception:
+                pass
             if diagnosis is not None:
                 metadata["tool_protocol_diagnosis"] = diagnosis.to_dict()
             write_agentic_failed_attempt_manifest(
@@ -1468,6 +1516,19 @@ class AscendCAgenticCycle:
                 stage_prompt_records=list(stage_prompt_records or []),
                 telemetry_paths=telemetry_paths,
                 metadata=metadata,
+                failure_class=failure_class,
+                failure_signature_path=failure_signature_path,
+                retryable=retryable,
+                recommended_action=recommended_action,
+                run_state_path=str(
+                    get_ksearch_run_dir(
+                        base_dir=getattr(self.task, "artifacts_dir", None),
+                        task_name=str(self.task_name),
+                        task_id=get_task_id(),
+                        run_id=str(self.run_id),
+                    )
+                    / "run_state.json"
+                ),
             )
         except Exception:
             pass
@@ -1874,11 +1935,30 @@ class AscendCAgenticCycle:
 
     def _run_eval(self) -> tuple[EvalResult, str | None]:
         assert self.wt_session is not None
-        return _run_eval_in_isolated_copy(
-            task=self.task,
-            candidate_project_dir=self.wt_session.project_dir,
-            round_num=self.request.round_num,
+        eval_artifact_dir = (
+            get_agentic_candidate_artifact_dir(
+                artifacts_dir=getattr(self.task, "artifacts_dir", None),
+                task_name=self.task_name,
+                run_id=self.run_id,
+                round_num=self.request.round_num,
+                attempt_idx=self.request.attempt_idx,
+                action_node_id=self.request.action_node_id,
+            )
+            / "eval"
         )
+        old_eval_dir = os.environ.get("KSEARCH_META_EVAL_DIR")
+        os.environ["KSEARCH_META_EVAL_DIR"] = str(eval_artifact_dir)
+        try:
+            return _run_eval_in_isolated_copy(
+                task=self.task,
+                candidate_project_dir=self.wt_session.project_dir,
+                round_num=self.request.round_num,
+            )
+        finally:
+            if old_eval_dir is None:
+                os.environ.pop("KSEARCH_META_EVAL_DIR", None)
+            else:
+                os.environ["KSEARCH_META_EVAL_DIR"] = old_eval_dir
 
     def _finalize_attempt_result(
         self,
@@ -1976,6 +2056,11 @@ class AscendCAgenticCycle:
             project_rel_path=self.wt_session.project_rel_path(),
             action_node_id=self.request.action_node_id,
             model_name=self.runner.model_name,
+            telemetry_paths={
+                "agent_trace_path": edit_result.trace_path or telemetry_recorder.artifacts.trace_path,
+                "tool_timeline_path": edit_result.timeline_path or telemetry_recorder.artifacts.timeline_path,
+                "cost_path": edit_result.cost_path or telemetry_recorder.artifacts.cost_path,
+            },
             handoff_files=handoff_texts,
             stage_prompt_records=self.last_stage_prompt_records,
             metadata={

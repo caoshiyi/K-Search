@@ -9,6 +9,7 @@ from typing import Any
 from k_search.kernel_generators.candidate_patch import CandidatePatch
 from k_search.kernel_generators.project_snapshot import ProjectSnapshot
 from k_search.utils.paths import get_attempt_dir, get_ksearch_run_dir
+from k_search.meta_harness.failure import classify_ascendc_eval_failure, write_failure_artifacts
 
 
 def _jsonable(value: Any) -> Any:
@@ -153,6 +154,8 @@ def write_agentic_candidate_artifacts(
     action_node_id: str | None,
     model_name: str,
     metadata: dict[str, Any] | None = None,
+    telemetry_paths: dict[str, str | None] | None = None,
+    meta_harness: dict[str, Any] | None = None,
     handoff_files: dict[str, str] | None = None,
     stage_prompt_records: list[dict[str, Any]] | None = None,
 ) -> tuple[CandidatePatch, dict[str, str]]:
@@ -226,6 +229,64 @@ def write_agentic_candidate_artifacts(
         model_name=str(model_name or ""),
         eval_result=eval_dict,
     )
+    telemetry_payload = {
+        "agent_trace_path": (telemetry_paths or {}).get("agent_trace_path") or (telemetry_paths or {}).get("trace_path"),
+        "tool_timeline_path": (telemetry_paths or {}).get("tool_timeline_path") or (telemetry_paths or {}).get("timeline_path"),
+        "cost_path": (telemetry_paths or {}).get("cost_path"),
+    }
+    metrics = eval_dict.get("metrics") if isinstance(eval_dict.get("metrics"), dict) else {}
+    failure_class = metrics.get("failure_class") if isinstance(metrics, dict) else None
+    recommended_action = None
+    retryable = None
+    failure_signature_path = None
+    if failure_class:
+        try:
+            failure = classify_ascendc_eval_failure(
+                eval_result,
+                stage=str(metrics.get("failure_stage") or "evaluate_solution"),
+                paths=[
+                    str(out_dir / "eval" / "build.stdout.log"),
+                    str(out_dir / "eval" / "build.stderr.log"),
+                    str(out_dir / "eval" / "correctness.stdout.log"),
+                    str(out_dir / "eval" / "correctness.stderr.log"),
+                    str(out_dir / "eval" / "benchmark.stdout.log"),
+                    str(out_dir / "eval" / "benchmark.stderr.log"),
+                    str(paths["diff_path"]),
+                    str(paths["transcript_path"]),
+                    *[str(v) for v in telemetry_payload.values() if v],
+                ],
+                round_index=round_num,
+                attempt_index=attempt_idx,
+                action_node_id=action_node_id,
+                candidate_id=candidate_id,
+            )
+            failure_paths = write_failure_artifacts(
+                get_ksearch_run_dir(
+                    base_dir=artifacts_dir, task_name=task_name, run_id=run_id
+                ),
+                failure,
+                candidate_dir=out_dir,
+            )
+            failure_signature_path = failure_paths.get("candidate_failure_signature_path")
+            recommended_action = failure.recommended_action
+            retryable = failure.retryable
+        except Exception:
+            pass
+    mh = {
+        "schema_version": 1,
+        "candidate_id": candidate_id,
+        "round_index": int(round_num),
+        "attempt_index": int(attempt_idx),
+        "action_node_id": action_node_id,
+        "stage": "agentic_codegen",
+        "status": "passed" if str(eval_dict.get("status") or "").lower() == "passed" else ("failed" if failure_class else str(eval_dict.get("status") or "unknown")),
+        "failure_class": failure_class,
+        "failure_signature_path": failure_signature_path,
+        "checkpoint_id": (meta_harness or {}).get("checkpoint_id"),
+        "retryable": retryable,
+        "recommended_action": recommended_action,
+    }
+    mh.update(meta_harness or {})
     manifest = {
         **asdict(candidate),
         "diff_path": _rel(paths["diff_path"], out_dir),
@@ -235,6 +296,8 @@ def write_agentic_candidate_artifacts(
             if paths["snapshot_archive_path"].exists()
             else None
         ),
+        "telemetry": telemetry_payload,
+        "meta_harness": mh,
         **(metadata or {}),
     }
     if handoff_paths:
@@ -274,6 +337,12 @@ def write_agentic_failed_attempt_manifest(
     stage_prompt_records: list[dict[str, Any]] | None = None,
     telemetry_paths: dict[str, str | None] | None = None,
     metadata: dict[str, Any] | None = None,
+    failure_class: str | None = None,
+    failure_signature_path: str | None = None,
+    retryable: bool | None = None,
+    recommended_action: str | None = None,
+    checkpoint_id: str | None = None,
+    run_state_path: str | None = None,
 ) -> dict[str, Any]:
     candidate_id = f"round_{int(round_num):04d}_attempt_{int(attempt_idx):02d}"
     out_dir = get_agentic_candidate_artifact_dir(
@@ -308,7 +377,26 @@ def write_agentic_failed_attempt_manifest(
             "error_message": str(error_message or ""),
         },
         "stage_prompt_paths": list(stage_prompt_records or []),
-        "telemetry": dict(telemetry_paths or {}),
+        "telemetry": {
+            "agent_trace_path": (telemetry_paths or {}).get("agent_trace_path") or (telemetry_paths or {}).get("trace_path"),
+            "tool_timeline_path": (telemetry_paths or {}).get("tool_timeline_path") or (telemetry_paths or {}).get("timeline_path"),
+            "cost_path": (telemetry_paths or {}).get("cost_path"),
+        },
+        "meta_harness": {
+            "schema_version": 1,
+            "candidate_id": candidate_id,
+            "round_index": int(round_num),
+            "attempt_index": int(attempt_idx),
+            "action_node_id": action_node_id,
+            "stage": str(stage or "agentic_codegen"),
+            "status": "failed",
+            "failure_class": failure_class,
+            "failure_signature_path": failure_signature_path,
+            "checkpoint_id": checkpoint_id,
+            "retryable": retryable,
+            "recommended_action": recommended_action,
+            "run_state_path": run_state_path,
+        },
     }
     if metadata:
         manifest.update(dict(metadata))

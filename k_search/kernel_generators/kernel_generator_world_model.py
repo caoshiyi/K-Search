@@ -65,6 +65,8 @@ from k_search.utils.paths import (
 from k_search.telemetry.context import TelemetryContext, build_attempt_dir
 from k_search.telemetry.diagnostics import diagnose_tool_protocol_failure
 from k_search.telemetry.narrative import RunNarrativeLogger
+from k_search.meta_harness.failure import classify_process_exit, write_failure_artifacts
+from k_search.meta_harness.run_state import RunStateWriter
 
 
 class MissingStrategyFileError(RuntimeError):
@@ -1063,15 +1065,15 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             )
         self._wm.set(str(getattr(task, "name", "") or ""), raw_wm)
 
-    def _save_cycle_checkpoint_if_enabled(self, **kwargs: Any) -> None:
+    def _save_cycle_checkpoint_if_enabled(self, **kwargs: Any) -> Path | None:
         cfg = getattr(self, "_checkpoint_config", CheckpointConfig())
         if self._checkpoint_manager is None:
-            return
+            return None
         if not (bool(cfg.enabled) or bool(cfg.resume_from)):
-            return
+            return None
         if str(cfg.every or "cycle") != "cycle":
-            return
-        self._checkpoint_manager.save_cycle_checkpoint(
+            return None
+        manifest_path = self._checkpoint_manager.save_cycle_checkpoint(
             **kwargs,
             llm_provider=str(getattr(self, "llm_provider", "") or ""),
             model_name=str(getattr(self, "model_name", "") or ""),
@@ -1079,16 +1081,23 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             target_gpu=str(self.target_gpu),
             resume_mode=str(cfg.resume_mode or "new-run"),
         )
+        try:
+            writer = getattr(self, "_meta_run_state", None)
+            if writer is not None:
+                writer.set_latest_checkpoint(checkpoint_id=manifest_path.parent.name, manifest_path=manifest_path)
+        except Exception:
+            pass
+        return manifest_path
 
-    def _save_attempt_checkpoint_if_enabled(self, **kwargs: Any) -> None:
+    def _save_attempt_checkpoint_if_enabled(self, **kwargs: Any) -> Path | None:
         cfg = getattr(self, "_checkpoint_config", CheckpointConfig())
         if self._checkpoint_manager is None:
-            return
+            return None
         if not (bool(cfg.enabled) or bool(cfg.resume_from)):
-            return
+            return None
         if str(cfg.every or "cycle") != "attempt":
-            return
-        self._checkpoint_manager.save_attempt_checkpoint(
+            return None
+        manifest_path = self._checkpoint_manager.save_attempt_checkpoint(
             **kwargs,
             llm_provider=str(getattr(self, "llm_provider", "") or ""),
             model_name=str(getattr(self, "model_name", "") or ""),
@@ -1096,6 +1105,13 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             target_gpu=str(self.target_gpu),
             resume_mode=str(cfg.resume_mode or "new-run"),
         )
+        try:
+            writer = getattr(self, "_meta_run_state", None)
+            if writer is not None:
+                writer.set_latest_checkpoint(checkpoint_id=manifest_path.parent.name, manifest_path=manifest_path)
+        except Exception:
+            pass
+        return manifest_path
 
     def __init__(
         self,
@@ -1119,6 +1135,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         self._checkpoint_config = checkpoint_config or CheckpointConfig()
         self._checkpoint_manager: CheckpointManager | None = None
         self._restored_checkpoint: RestoredCheckpoint | None = None
+        self._meta_run_state: RunStateWriter | None = None
 
         # Load strategy catalog if provided.
         self._strategy_catalog: list[Any] | None = None
@@ -1201,6 +1218,26 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
 
         # Store run_id in task for downstream artifact and telemetry lineage.
         setattr(task, "_ksearch_run_id", effective_run_id)
+
+        _task_name_for_meta = str(getattr(task, "name", "") or getattr(task, "definition_name", "") or "ascendc")
+        try:
+            self._meta_run_state = RunStateWriter(
+                run_root=get_ksearch_run_dir(
+                    base_dir=self._artifacts_dir,
+                    task_name=_task_name_for_meta,
+                    task_id=get_task_id(),
+                    run_id=effective_run_id,
+                ),
+                run_id=effective_run_id,
+                task_id=get_task_id(),
+                task_name=_task_name_for_meta,
+                task_source=str(getattr(task, "task_source", "") or "ascendc"),
+                language=str(self.language),
+                llm_provider=str(getattr(self, "llm_provider", "") or getattr(getattr(self, "llm_client", None), "provider", "") or ""),
+            )
+            self._meta_run_state.mark_running(stage="run_start")
+        except Exception:
+            self._meta_run_state = None
 
         checkpoint_resume = str(self._checkpoint_config.resume_from or "").strip()
         restored_checkpoint: RestoredCheckpoint | None = None
@@ -1500,36 +1537,67 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
 
         # Use the simpler explicit action-cycle loop (v2). This is much easier to reason about:
         # choose action -> attempt 1 (spec/base + action) -> attempts 2..N (debug_and_improve) -> attach+refine/too-hard.
-        return self._generate_world_model_cycles_v2(
-            task=task,
-            max_opt_rounds=max_opt_rounds,
-            wm_stagnation_window=wm_stagnation_window,
-            max_dai=max_dai,
-            initial_raw_code=(
-                current_raw_code if isinstance(current_raw_code, str) else None
-            ),
-            run_id=effective_run_id,
-            start_round=(
-                restored_checkpoint.start_round
-                if restored_checkpoint is not None
-                else 1
-            ),
-            restored_best_solution=(
-                restored_checkpoint.best_solution
-                if restored_checkpoint is not None
-                else None
-            ),
-            restored_best_eval=(
-                restored_checkpoint.best_eval
-                if restored_checkpoint is not None
-                else None
-            ),
-            restored_best_score=(
-                restored_checkpoint.best_score
-                if restored_checkpoint is not None
-                else None
-            ),
-        )
+        try:
+            result = self._generate_world_model_cycles_v2(
+                task=task,
+                max_opt_rounds=max_opt_rounds,
+                wm_stagnation_window=wm_stagnation_window,
+                max_dai=max_dai,
+                initial_raw_code=(
+                    current_raw_code if isinstance(current_raw_code, str) else None
+                ),
+                run_id=effective_run_id,
+                start_round=(
+                    restored_checkpoint.start_round
+                    if restored_checkpoint is not None
+                    else 1
+                ),
+                restored_best_solution=(
+                    restored_checkpoint.best_solution
+                    if restored_checkpoint is not None
+                    else None
+                ),
+                restored_best_eval=(
+                    restored_checkpoint.best_eval
+                    if restored_checkpoint is not None
+                    else None
+                ),
+                restored_best_score=(
+                    restored_checkpoint.best_score
+                    if restored_checkpoint is not None
+                    else None
+                ),
+            )
+            try:
+                writer = getattr(self, "_meta_run_state", None)
+                if writer is not None:
+                    writer.mark_completed()
+            except Exception:
+                pass
+            return result
+        except Exception as exc:
+            try:
+                writer = getattr(self, "_meta_run_state", None)
+                run_root = writer.run_root if writer is not None else get_ksearch_run_dir(
+                    base_dir=self._artifacts_dir, task_name=_task_name_for_meta, task_id=get_task_id(), run_id=effective_run_id
+                )
+                failure = classify_process_exit(
+                    1,
+                    logs=f"{type(exc).__name__}: {exc}",
+                    stage=getattr(writer.state, "last_stage", None) if writer is not None else None,
+                    round_index=getattr(writer.state, "last_round_index", None) if writer is not None else None,
+                    attempt_index=getattr(writer.state, "last_attempt_index", None) if writer is not None else None,
+                    action_node_id=getattr(writer.state, "last_action_node_id", None) if writer is not None else None,
+                    candidate_id=getattr(writer.state, "last_candidate_id", None) if writer is not None else None,
+                )
+                paths = write_failure_artifacts(run_root, failure)
+                data = failure.to_dict()
+                data["failure_signature_path"] = paths.get("latest_failure_path")
+                if writer is not None:
+                    writer.mark_crashed(data)
+            except Exception:
+                pass
+            raise
         # (legacy loop removed; v2 runs all optimization rounds)
 
     def _generate_world_model_cycles_v2(
@@ -1672,6 +1740,12 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         # - we hit max_opt_rounds.
         cycle_start_round = int(start_round or 1)
         while cycle_start_round <= max_opt_rounds:
+            try:
+                writer = getattr(self, "_meta_run_state", None)
+                if writer is not None:
+                    writer.update_stage(stage="select_action", round_index=cycle_start_round)
+            except Exception:
+                pass
             try:
                 stagnation_window = int(wm_stagnation_window)
             except Exception:
@@ -1933,6 +2007,18 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         break
                     attempt_idx = rounds_consumed + 1
                     round_num = cycle_start_round + rounds_consumed
+                    try:
+                        writer = getattr(self, "_meta_run_state", None)
+                        if writer is not None:
+                            writer.update_stage(
+                                stage="agentic_codegen",
+                                round_index=round_num,
+                                attempt_index=attempt_idx,
+                                action_node_id=str(chosen_leaf or ""),
+                                candidate_id=f"round_{int(round_num):04d}_attempt_{int(attempt_idx):02d}",
+                            )
+                    except Exception:
+                        pass
                     print(f"\n=== Optimization Round {round_num}/{max_opt_rounds} ===")
                     _emit(
                         f"[CYCLE] action_node_id={chosen_leaf} attempt={attempt_idx} "
@@ -2239,6 +2325,18 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 f"project_path={result.project_path}"
                             )
                             _stage(f"use agentic worktree eval (round {round_num})")
+                            try:
+                                writer = getattr(self, "_meta_run_state", None)
+                                if writer is not None:
+                                    writer.update_stage(
+                                        stage="evaluate_solution",
+                                        round_index=round_num,
+                                        attempt_index=attempt_idx,
+                                        action_node_id=str(chosen_leaf or ""),
+                                        candidate_id=f"round_{int(round_num):04d}_attempt_{int(attempt_idx):02d}",
+                                    )
+                            except Exception:
+                                pass
                             round_eval = result.eval_result
                             all_passed = bool(
                                 getattr(round_eval, "is_passed", lambda: False)()
@@ -2247,6 +2345,15 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 getattr(round_eval, "score", lambda: -1.0)()
                             )
                             last_eval = round_eval
+                            try:
+                                writer = getattr(self, "_meta_run_state", None)
+                                if writer is not None and all_passed:
+                                    writer.set_best(
+                                        candidate_id=f"round_{int(round_num):04d}_attempt_{int(attempt_idx):02d}",
+                                        score=round_score,
+                                    )
+                            except Exception:
+                                pass
                             try:
                                 _nar = getattr(self, "_narrative", None)
                                 if _nar is not None:

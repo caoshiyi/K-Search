@@ -10,6 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from k_search.kernel_generators.checkpoint_index import (
+    append_or_update_checkpoint_index,
+)
 from k_search.kernel_generators.project_snapshot import (
     FileMeta,
     ProjectSnapshot,
@@ -17,7 +20,6 @@ from k_search.kernel_generators.project_snapshot import (
     materialize_project_snapshot,
 )
 from k_search.utils.paths import safe_path_component
-
 
 StageStatus = Literal["pending", "running", "completed", "failed", "skipped", "invalid"]
 ResumeStagePolicy = Literal["next-pending"]
@@ -105,17 +107,29 @@ def validate_stage_checkpoint_config(
     if not bool(world_model):
         raise ValueError("--checkpoint-v3 requires --world-model")
     if config.session_store_kind != "none" and config.enable_claude_file_checkpointing:
-        raise ValueError("SessionStore cannot be combined with Claude file checkpointing")
+        raise ValueError(
+            "SessionStore cannot be combined with Claude file checkpointing"
+        )
     if config.subagent_resume and not config.resume_claude_session:
-        raise ValueError("--checkpoint-subagent-resume requires --checkpoint-resume-claude-session")
+        raise ValueError(
+            "--checkpoint-subagent-resume requires --checkpoint-resume-claude-session"
+        )
     if config.claude_session_required and not config.resume_claude_session:
-        raise ValueError("--checkpoint-claude-session-required requires --checkpoint-resume-claude-session")
+        raise ValueError(
+            "--checkpoint-claude-session-required requires --checkpoint-resume-claude-session"
+        )
     if config.enable_claude_file_checkpointing and not config.resume_claude_session:
-        raise ValueError("--checkpoint-enable-claude-file-checkpointing requires --checkpoint-resume-claude-session")
+        raise ValueError(
+            "--checkpoint-enable-claude-file-checkpointing requires --checkpoint-resume-claude-session"
+        )
     if config.resume_stage_policy != "next-pending":
-        raise ValueError("--checkpoint-resume-stage-policy currently supports only next-pending")
+        raise ValueError(
+            "--checkpoint-resume-stage-policy currently supports only next-pending"
+        )
     if config.file_state_source != "project-snapshot":
-        raise ValueError("--checkpoint-file-state-source currently supports only project-snapshot")
+        raise ValueError(
+            "--checkpoint-file-state-source currently supports only project-snapshot"
+        )
 
 
 class StageCheckpointManager:
@@ -206,7 +220,9 @@ class StageCheckpointManager:
         if value == "latest":
             latest_path = self.checkpoints_dir / "latest.json"
             latest = _read_json(latest_path)
-            path = self.checkpoints_dir / str(latest.get("latest_checkpoint_path") or "")
+            path = self.checkpoints_dir / str(
+                latest.get("latest_checkpoint_path") or ""
+            )
             if not path.is_file():
                 raise FileNotFoundError(f"latest checkpoint manifest not found: {path}")
             return path
@@ -227,12 +243,18 @@ class StageCheckpointManager:
         manifest_path = self.resolve(ref)
         checkpoint_root = manifest_path.parent
         manifest = _read_json(manifest_path)
-        runtime_state = _read_json(checkpoint_root / str(manifest["paths"]["runtime_state"]))
-        stage_state = _read_json(checkpoint_root / str(manifest["paths"]["stage_state"]))
+        runtime_state = _read_json(
+            checkpoint_root / str(manifest["paths"]["runtime_state"])
+        )
+        stage_state = _read_json(
+            checkpoint_root / str(manifest["paths"]["stage_state"])
+        )
         checkpoint_id = str(manifest.get("checkpoint_id") or checkpoint_root.name)
         snapshot_ref = _snapshot_path_for_restore(stage_state, manifest)
         if not snapshot_ref:
-            raise FileNotFoundError(f"checkpoint has no project snapshot path: {checkpoint_id}")
+            raise FileNotFoundError(
+                f"checkpoint has no project snapshot path: {checkpoint_id}"
+            )
         snapshot_path = checkpoint_root / snapshot_ref
         snapshot = load_project_snapshot(snapshot_path)
         restore_dir = (
@@ -280,7 +302,9 @@ class StageCheckpointManager:
         parent_checkpoint_id = _latest_checkpoint_id(self.checkpoints_dir)
         sequence = _next_checkpoint_sequence(self.checkpoints_dir)
         suffix = "start" if checkpoint_kind == "stage_start" else "completed"
-        stage_slug = safe_path_component(getattr(stage, "name", "stage"), default="stage")
+        stage_slug = safe_path_component(
+            getattr(stage, "name", "stage"), default="stage"
+        )
         checkpoint_id = (
             f"ckpt_{sequence:06d}_stage_"
             f"r{int(round_num):04d}_a{int(attempt_idx):02d}_{stage_slug}_{suffix}"
@@ -291,14 +315,24 @@ class StageCheckpointManager:
             shutil.rmtree(tmp_dir)
         tmp_dir.mkdir(parents=True)
 
-        prompt_rel = Path("stage") / "stage_prompts" / f"stage_{int(stage_index):02d}_{stage_slug}.md"
+        prompt_rel = (
+            Path("stage")
+            / "stage_prompts"
+            / f"stage_{int(stage_index):02d}_{stage_slug}.md"
+        )
         _write_text(tmp_dir / prompt_rel, str(prompt or ""))
         result_rel: Path | None = None
         if result is not None:
-            result_rel = Path("stage") / "stage_results" / f"stage_{int(stage_index):02d}_{stage_slug}.json"
+            result_rel = (
+                Path("stage")
+                / "stage_results"
+                / f"stage_{int(stage_index):02d}_{stage_slug}.json"
+            )
             _write_json(tmp_dir / result_rel, _result_payload(result))
 
-        snapshot_kind = "pre_snapshot" if checkpoint_kind == "stage_start" else "post_snapshot"
+        snapshot_kind = (
+            "pre_snapshot" if checkpoint_kind == "stage_start" else "post_snapshot"
+        )
         snapshot_rel = (
             Path("project")
             / "stages"
@@ -367,12 +401,16 @@ class StageCheckpointManager:
         paths = {
             "runtime_state": "runtime_state.json",
             "stage_state": "stage_state.json",
-            "post_stage_project_snapshot": str(snapshot_rel).replace("\\", "/")
-            if checkpoint_kind == "stage_completed"
-            else None,
-            "pre_stage_project_snapshot": str(snapshot_rel).replace("\\", "/")
-            if checkpoint_kind == "stage_start"
-            else None,
+            "post_stage_project_snapshot": (
+                str(snapshot_rel).replace("\\", "/")
+                if checkpoint_kind == "stage_completed"
+                else None
+            ),
+            "pre_stage_project_snapshot": (
+                str(snapshot_rel).replace("\\", "/")
+                if checkpoint_kind == "stage_start"
+                else None
+            ),
             "claude_session": "claude/session.json",
             "subagents": "claude/subagents.json",
             "file_checkpoints": "claude/file_checkpoints.json",
@@ -386,7 +424,11 @@ class StageCheckpointManager:
             "task": {
                 "task_source": "ascendc",
                 "task_name": str(getattr(task, "name", "") or self.task_name),
-                "definition": str(getattr(task, "definition_name", "") or getattr(task, "name", "") or self.task_name),
+                "definition": str(
+                    getattr(task, "definition_name", "")
+                    or getattr(task, "name", "")
+                    or self.task_name
+                ),
                 "task_path": str(getattr(task, "task_path", "") or project_root),
             },
             "run": {
@@ -410,7 +452,9 @@ class StageCheckpointManager:
 
         tmp_dir.rename(final_dir)
         _write_latest(self.checkpoints_dir, checkpoint_id=checkpoint_id)
-        return final_dir / "manifest.json"
+        final_manifest_path = final_dir / "manifest.json"
+        append_or_update_checkpoint_index(self.checkpoints_dir, final_manifest_path)
+        return final_manifest_path
 
 
 def load_project_snapshot(path: str | Path) -> ProjectSnapshot:
@@ -422,7 +466,11 @@ def load_project_snapshot(path: str | Path) -> ProjectSnapshot:
         if isinstance(meta, dict)
     }
     archive_path = data.get("archive_path")
-    if isinstance(archive_path, str) and archive_path.strip() and not Path(archive_path).is_absolute():
+    if (
+        isinstance(archive_path, str)
+        and archive_path.strip()
+        and not Path(archive_path).is_absolute()
+    ):
         archive_path = str((snapshot_path.parent / archive_path).resolve())
     return ProjectSnapshot(
         snapshot_id=str(data.get("snapshot_id") or snapshot_path.parent.name),
@@ -433,7 +481,11 @@ def load_project_snapshot(path: str | Path) -> ProjectSnapshot:
         archive_path=(str(archive_path) if archive_path else None),
         diff_from_parent=data.get("diff_from_parent"),
         created_by_round=int(data.get("created_by_round") or 0),
-        eval_result=data.get("eval_result") if isinstance(data.get("eval_result"), dict) else None,
+        eval_result=(
+            data.get("eval_result")
+            if isinstance(data.get("eval_result"), dict)
+            else None
+        ),
     )
 
 
@@ -506,11 +558,17 @@ def _build_stage_records(
     file_checkpoint_uuid: str | None,
 ) -> list[StageRecord]:
     records: list[StageRecord] = []
-    for index, flow_stage in enumerate(tuple(getattr(flow, "stages", ()) or ()), start=1):
-        required = [str(path) for path in tuple(getattr(flow_stage, "required_files", ()) or ())]
+    for index, flow_stage in enumerate(
+        tuple(getattr(flow, "stages", ()) or ()), start=1
+    ):
+        required = [
+            str(path) for path in tuple(getattr(flow_stage, "required_files", ()) or ())
+        ]
         produced = [path for path in required if (project_root / path).is_file()]
         missing = [path for path in required if path not in produced]
-        is_current = _stage_matches(flow_stage, current_stage) and index == int(current_stage_index)
+        is_current = _stage_matches(flow_stage, current_stage) and index == int(
+            current_stage_index
+        )
         if index < int(current_stage_index):
             status: StageStatus = "completed" if not missing else "invalid"
         elif is_current:
@@ -530,12 +588,24 @@ def _build_stage_records(
                 missing_files=missing,
                 stage_prompt_path=prompt_rel if is_current else None,
                 stage_result_path=result_rel if is_current else None,
-                pre_snapshot_manifest_path=snapshot_rel if is_current and checkpoint_kind == "stage_start" else None,
-                post_snapshot_manifest_path=snapshot_rel if is_current and checkpoint_kind == "stage_completed" else None,
+                pre_snapshot_manifest_path=(
+                    snapshot_rel
+                    if is_current and checkpoint_kind == "stage_start"
+                    else None
+                ),
+                post_snapshot_manifest_path=(
+                    snapshot_rel
+                    if is_current and checkpoint_kind == "stage_completed"
+                    else None
+                ),
                 session_id=session_id if is_current else None,
                 agent_id=agent_id if is_current else None,
                 file_checkpoint_uuid=file_checkpoint_uuid if is_current else None,
-                result_status="success" if is_current and checkpoint_kind == "stage_completed" else None,
+                result_status=(
+                    "success"
+                    if is_current and checkpoint_kind == "stage_completed"
+                    else None
+                ),
             )
         )
     return records
@@ -551,8 +621,14 @@ def _stage_state_payload(
     attempt_idx: int,
     stages: list[StageRecord],
 ) -> dict[str, Any]:
-    next_index, next_name, next_agent = _next_stage_after(checkpoint_kind, flow, stage_index)
-    last_completed = stage_index if checkpoint_kind == "stage_completed" else _last_completed_before(stages, stage_index)
+    next_index, next_name, next_agent = _next_stage_after(
+        checkpoint_kind, flow, stage_index
+    )
+    last_completed = (
+        stage_index
+        if checkpoint_kind == "stage_completed"
+        else _last_completed_before(stages, stage_index)
+    )
     return {
         "schema_version": 1,
         "checkpoint_version": "v3",
@@ -572,9 +648,15 @@ def _stage_state_payload(
             "next_stage_index": next_index,
             "next_stage_name": next_name,
             "next_stage_agent": next_agent,
-            "resume_action": "rerun_current_stage"
-            if checkpoint_kind == "stage_start"
-            else ("enter_eval_finalize" if next_index is None else "continue_next_pending_stage"),
+            "resume_action": (
+                "rerun_current_stage"
+                if checkpoint_kind == "stage_start"
+                else (
+                    "enter_eval_finalize"
+                    if next_index is None
+                    else "continue_next_pending_stage"
+                )
+            ),
         },
         "stages": [asdict(record) for record in stages],
     }
@@ -601,7 +683,9 @@ def _runtime_payload(
     )
     payload.setdefault("position", {})
     if isinstance(payload["position"], dict):
-        payload["position"].update({"round_num": int(round_num), "attempt_idx": int(attempt_idx)})
+        payload["position"].update(
+            {"round_num": int(round_num), "attempt_idx": int(attempt_idx)}
+        )
     payload.setdefault("attempt", {})
     if isinstance(payload["attempt"], dict):
         payload["attempt"].update(
@@ -638,9 +722,11 @@ def _write_claude_metadata(
         },
         "file_checkpointing": {
             "enabled": bool(config.enable_claude_file_checkpointing),
-            "last_uuid": str(getattr(result, "file_checkpoint_uuid", "") or "") or None
-            if result is not None
-            else None,
+            "last_uuid": (
+                str(getattr(result, "file_checkpoint_uuid", "") or "") or None
+                if result is not None
+                else None
+            ),
         },
     }
     subagents: dict[str, Any] = {}
@@ -660,7 +746,10 @@ def _write_claude_metadata(
         else None
     )
     _write_json(claude_dir / "session.json", session_payload)
-    _write_json(claude_dir / "subagents.json", {"schema_version": 1, "session_id": session_id, "subagents": subagents})
+    _write_json(
+        claude_dir / "subagents.json",
+        {"schema_version": 1, "session_id": session_id, "subagents": subagents},
+    )
     _write_json(
         claude_dir / "file_checkpoints.json",
         {
@@ -668,13 +757,22 @@ def _write_claude_metadata(
             "enabled": bool(config.enable_claude_file_checkpointing),
             "session_id": session_id,
             "checkpoints": (
-                [{"user_message_uuid": file_checkpoint_uuid, "meaning": "stage_prompt", "captured_at": _utc_now()}]
+                [
+                    {
+                        "user_message_uuid": file_checkpoint_uuid,
+                        "meaning": "stage_prompt",
+                        "captured_at": _utc_now(),
+                    }
+                ]
                 if file_checkpoint_uuid
                 else []
             ),
         },
     )
-    _write_json(claude_dir / "transcript_index.json", {"schema_version": 1, "session_id": session_id, "entries": []})
+    _write_json(
+        claude_dir / "transcript_index.json",
+        {"schema_version": 1, "session_id": session_id, "entries": []},
+    )
 
 
 def _result_payload(result: Any) -> dict[str, Any]:
@@ -682,23 +780,33 @@ def _result_payload(result: Any) -> dict[str, Any]:
         "text": str(getattr(result, "text", "") or ""),
         "transcript": str(getattr(result, "transcript", "") or ""),
         "session_id": str(getattr(result, "session_id", "") or "") or None,
-        "file_checkpoint_uuid": str(getattr(result, "file_checkpoint_uuid", "") or "") or None,
+        "file_checkpoint_uuid": str(getattr(result, "file_checkpoint_uuid", "") or "")
+        or None,
         "user_message_uuids": list(getattr(result, "user_message_uuids", None) or []),
         "subagent_agent_ids": list(getattr(result, "subagent_agent_ids", None) or []),
-        "subagent_invocations": list(getattr(result, "subagent_invocations", None) or []),
+        "subagent_invocations": list(
+            getattr(result, "subagent_invocations", None) or []
+        ),
     }
 
 
-def _snapshot_path_for_restore(stage_state: dict[str, Any], manifest: dict[str, Any]) -> str | None:
+def _snapshot_path_for_restore(
+    stage_state: dict[str, Any], manifest: dict[str, Any]
+) -> str | None:
     stages = list(stage_state.get("stages") or [])
     running = [
         item
         for item in stages
-        if isinstance(item, dict) and str(item.get("status") or "") in {"running", "failed"}
+        if isinstance(item, dict)
+        and str(item.get("status") or "") in {"running", "failed"}
     ]
     if running:
         path = running[0].get("pre_snapshot_manifest_path")
-        return str(path) if path else manifest.get("paths", {}).get("pre_stage_project_snapshot")
+        return (
+            str(path)
+            if path
+            else manifest.get("paths", {}).get("pre_stage_project_snapshot")
+        )
     completed = [
         item
         for item in stages
@@ -707,13 +815,23 @@ def _snapshot_path_for_restore(stage_state: dict[str, Any], manifest: dict[str, 
     if completed:
         completed.sort(key=lambda item: int(item.get("index") or 0))
         path = completed[-1].get("post_snapshot_manifest_path")
-        return str(path) if path else manifest.get("paths", {}).get("post_stage_project_snapshot")
+        return (
+            str(path)
+            if path
+            else manifest.get("paths", {}).get("post_stage_project_snapshot")
+        )
     paths = manifest.get("paths") if isinstance(manifest.get("paths"), dict) else {}
-    return paths.get("pre_stage_project_snapshot") or paths.get("post_stage_project_snapshot")
+    return paths.get("pre_stage_project_snapshot") or paths.get(
+        "post_stage_project_snapshot"
+    )
 
 
-def _restore_position(stage_state: dict[str, Any]) -> tuple[int | None, str | None, bool]:
-    stages = [item for item in list(stage_state.get("stages") or []) if isinstance(item, dict)]
+def _restore_position(
+    stage_state: dict[str, Any],
+) -> tuple[int | None, str | None, bool]:
+    stages = [
+        item for item in list(stage_state.get("stages") or []) if isinstance(item, dict)
+    ]
     stages.sort(key=lambda item: int(item.get("index") or 0))
     for item in stages:
         status = str(item.get("status") or "pending")
@@ -767,7 +885,10 @@ def _write_latest(checkpoints_dir: Path, *, checkpoint_id: str) -> None:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -808,7 +929,12 @@ def _sha256(path: Path) -> str:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def _session_id(*, result: Any | None, session: Any | None) -> str | None:
@@ -838,12 +964,16 @@ def _agent_id_from_result(result: Any | None) -> str | None:
 
 
 def _stage_matches(left: Any, right: Any) -> bool:
-    return str(getattr(left, "name", "") or "") == str(getattr(right, "name", "") or "") and str(
-        getattr(left, "agent", "") or ""
-    ) == str(getattr(right, "agent", "") or "")
+    return str(getattr(left, "name", "") or "") == str(
+        getattr(right, "name", "") or ""
+    ) and str(getattr(left, "agent", "") or "") == str(
+        getattr(right, "agent", "") or ""
+    )
 
 
-def _next_stage_after(checkpoint_kind: str, flow: Any, stage_index: int) -> tuple[int | None, str | None, str | None]:
+def _next_stage_after(
+    checkpoint_kind: str, flow: Any, stage_index: int
+) -> tuple[int | None, str | None, str | None]:
     stages = tuple(getattr(flow, "stages", ()) or ())
     if checkpoint_kind == "stage_start":
         idx = int(stage_index)
@@ -852,11 +982,19 @@ def _next_stage_after(checkpoint_kind: str, flow: Any, stage_index: int) -> tupl
     if idx < 1 or idx > len(stages):
         return None, None, None
     stage = stages[idx - 1]
-    return idx, str(getattr(stage, "name", "") or ""), str(getattr(stage, "agent", "") or "")
+    return (
+        idx,
+        str(getattr(stage, "name", "") or ""),
+        str(getattr(stage, "agent", "") or ""),
+    )
 
 
 def _last_completed_before(stages: list[StageRecord], stage_index: int) -> int | None:
-    completed = [record.index for record in stages if record.index < int(stage_index) and record.status == "completed"]
+    completed = [
+        record.index
+        for record in stages
+        if record.index < int(stage_index) and record.status == "completed"
+    ]
     return max(completed) if completed else None
 
 

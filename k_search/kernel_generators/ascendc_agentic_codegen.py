@@ -33,7 +33,10 @@ from k_search.kernel_generators.checkpoint_v3 import (
     StageCheckpointConfig,
     StageCheckpointManager,
 )
-from k_search.kernel_generators.project_snapshot import ProjectSnapshot, create_project_snapshot
+from k_search.kernel_generators.project_snapshot import (
+    ProjectSnapshot,
+    create_project_snapshot,
+)
 from k_search.kernel_generators.stage_prompt_artifacts import StagePromptSink
 from k_search.kernel_generators.runtime_artifacts import (
     NATIVE_DEBUG_EVIDENCE_FILES,
@@ -59,9 +62,13 @@ from k_search.telemetry.context import TelemetryContext
 from k_search.telemetry.diagnostics import diagnose_tool_protocol_failure
 from k_search.telemetry.recorder import build_file_recorder
 from k_search.utils.path_sanitize import sanitize_worktree_paths
-from k_search.utils.paths import get_ksearch_artifacts_dir, get_ksearch_worktrees_dir, get_run_id
+from k_search.utils.paths import (
+    get_ksearch_artifacts_dir,
+    get_ksearch_run_dir,
+    get_ksearch_worktrees_dir,
+    get_run_id,
+)
 from k_search.utils.paths import get_task_id
-
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +76,9 @@ AgenticMode = Literal["generate", "action", "debug", "improve"]
 
 DEBUG_EVIDENCE_FILES = set(NATIVE_DEBUG_EVIDENCE_FILES)
 
-CURATOR_CONTEXT_FILES = set(NATIVE_HANDOFF_FILES) | {KNOWLEDGE.filename} | set(DEBUG_EVIDENCE_FILES)
+CURATOR_CONTEXT_FILES = (
+    set(NATIVE_HANDOFF_FILES) | {KNOWLEDGE.filename} | set(DEBUG_EVIDENCE_FILES)
+)
 
 
 @dataclass
@@ -171,7 +180,9 @@ def _render_strategy_dependency_status(strategy_context: dict[str, Any] | None) 
     if isinstance(parent_lineage, str):
         parent_lineage_list = [parent_lineage]
     elif isinstance(parent_lineage, (list, tuple)):
-        parent_lineage_list = [str(item).strip() for item in parent_lineage if str(item).strip()]
+        parent_lineage_list = [
+            str(item).strip() for item in parent_lineage if str(item).strip()
+        ]
     else:
         parent_lineage_list = []
     lines = [
@@ -187,7 +198,9 @@ def _render_strategy_dependency_status(strategy_context: dict[str, Any] | None) 
     return "\n".join(lines)
 
 
-def _render_eval_summary_for_prompt(eval_summary: dict[str, Any] | None, *, max_chars: int = 1800) -> str:
+def _render_eval_summary_for_prompt(
+    eval_summary: dict[str, Any] | None, *, max_chars: int = 1800
+) -> str:
     if not isinstance(eval_summary, dict):
         return "(none)"
     payload: dict[str, Any] = {}
@@ -209,7 +222,9 @@ def _render_eval_summary_for_prompt(eval_summary: dict[str, Any] | None, *, max_
     return _truncate(text, max_chars)
 
 
-def _build_fix_prompt(eval_result: EvalResult, fix_round: int, max_chars: int = 6000) -> str:
+def _build_fix_prompt(
+    eval_result: EvalResult, fix_round: int, max_chars: int = 6000
+) -> str:
     """Build a short fix prompt from an EvalResult, for multi-turn session follow-ups."""
     status = eval_result.status
     log = _truncate(eval_result.log_excerpt, max_chars)
@@ -260,8 +275,12 @@ def _wrap_repair_prompt(fix_prompt: str) -> str:
     return f"{header}\n\n{fix_text}".strip()
 
 
-def _build_repair_prompt(eval_result: EvalResult, fix_round: int, max_chars: int = 6000) -> str:
-    return _wrap_repair_prompt(_build_fix_prompt(eval_result, fix_round=fix_round, max_chars=max_chars))
+def _build_repair_prompt(
+    eval_result: EvalResult, fix_round: int, max_chars: int = 6000
+) -> str:
+    return _wrap_repair_prompt(
+        _build_fix_prompt(eval_result, fix_round=fix_round, max_chars=max_chars)
+    )
 
 
 def _wrap_improve_prompt(improve_prompt: str) -> str:
@@ -277,7 +296,9 @@ def _wrap_improve_prompt(improve_prompt: str) -> str:
     return f"{header}\n\n{improve_text}".strip()
 
 
-def _render_legacy_single_agent_prompt(base_prompt: str, flow: SubagentFlowConfig | None) -> str:
+def _render_legacy_single_agent_prompt(
+    base_prompt: str, flow: SubagentFlowConfig | None
+) -> str:
     if flow is None:
         return str(base_prompt or "")
     stage_names = " -> ".join(stage.agent for stage in flow.stages)
@@ -309,7 +330,9 @@ def _edit_project_with_optional_telemetry(
         )
     if subagent_flow is not None:
         if not _env_truthy("KSEARCH_ALLOW_LEGACY_SINGLE_AGENT_FLOW"):
-            raise RuntimeError("Configured subagent flow is required in native subagent mode")
+            raise RuntimeError(
+                "Configured subagent flow is required in native subagent mode"
+            )
         prompt = _render_legacy_single_agent_prompt(prompt, subagent_flow)
     try:
         return editor_client.edit_project(
@@ -323,11 +346,15 @@ def _edit_project_with_optional_telemetry(
         return editor_client.edit_project(project_dir=project_dir, prompt=prompt)
 
 
-def _overlay_restored_project_into_worktree(*, restored_project_dir: Path, worktree_project_dir: Path) -> None:
+def _overlay_restored_project_into_worktree(
+    *, restored_project_dir: Path, worktree_project_dir: Path
+) -> None:
     restored = Path(restored_project_dir).expanduser().resolve()
     worktree = Path(worktree_project_dir).expanduser().resolve()
     if not restored.is_dir():
-        raise FileNotFoundError(f"restored checkpoint project directory not found: {restored}")
+        raise FileNotFoundError(
+            f"restored checkpoint project directory not found: {restored}"
+        )
     worktree.mkdir(parents=True, exist_ok=True)
     for child in list(worktree.iterdir()):
         if child.name == ".git":
@@ -372,7 +399,9 @@ def _candidate_diff_text(diff_text: str) -> str:
     blocks: list[list[str]] = []
     current: list[str] = []
     for line in str(diff_text or "").splitlines():
-        starts_block = line.startswith("diff --git ") or line.startswith("--- /dev/null")
+        starts_block = line.startswith("diff --git ") or line.startswith(
+            "--- /dev/null"
+        )
         if starts_block and current:
             blocks.append(current)
             current = []
@@ -416,7 +445,11 @@ def _split_field_candidate(candidate: str, field: str) -> tuple[bool, str | None
 
 def _strip_wrapping_scalar_quotes(value: str) -> str:
     stripped = str(value or "").strip()
-    if len(stripped) >= 2 and stripped[0] in {"'", '"', "`"} and stripped[-1] == stripped[0]:
+    if (
+        len(stripped) >= 2
+        and stripped[0] in {"'", '"', "`"}
+        and stripped[-1] == stripped[0]
+    ):
         return stripped[1:-1].strip()
     return stripped
 
@@ -540,11 +573,14 @@ def _env_truthy(name: str) -> bool:
 
 
 def _fallback_agentic_task_name(task: Any) -> str:
-    return str(
-        getattr(task, "name", "")
-        or getattr(task, "definition_name", "")
+    return (
+        str(
+            getattr(task, "name", "")
+            or getattr(task, "definition_name", "")
+            or "ascendc"
+        ).strip()
         or "ascendc"
-    ).strip() or "ascendc"
+    )
 
 
 def _resolve_agentic_run_context(
@@ -609,7 +645,9 @@ def _validate_optional_handoff(text: str, validator: Any) -> None:
 def _flow_handoff_files(flow: SubagentFlowConfig) -> set[str]:
     required: set[str] = set()
     for stage in flow.stages:
-        required.update(path for path in stage.required_files if path in NATIVE_HANDOFF_FILES)
+        required.update(
+            path for path in stage.required_files if path in NATIVE_HANDOFF_FILES
+        )
     return required or set(NATIVE_HANDOFF_FILES)
 
 
@@ -623,15 +661,25 @@ def _review_feedback_retry_round_limit() -> int:
 
 
 def _stage_is_reviewer(stage: Any) -> bool:
-    return str(getattr(stage, "agent", "")).strip() == "reviewer" or str(getattr(stage, "name", "")).strip() == "reviewer"
+    return (
+        str(getattr(stage, "agent", "")).strip() == "reviewer"
+        or str(getattr(stage, "name", "")).strip() == "reviewer"
+    )
 
 
 def _review_feedback_retry_flow(flow: SubagentFlowConfig) -> SubagentFlowConfig:
-    reviewer_index = next((index for index, stage in enumerate(flow.stages) if _stage_is_reviewer(stage)), None)
+    reviewer_index = next(
+        (index for index, stage in enumerate(flow.stages) if _stage_is_reviewer(stage)),
+        None,
+    )
     if reviewer_index is None:
-        raise RuntimeError(f"subagent flow {flow.name!r} has no reviewer stage for review feedback retry")
+        raise RuntimeError(
+            f"subagent flow {flow.name!r} has no reviewer stage for review feedback retry"
+        )
     if reviewer_index <= 0:
-        raise RuntimeError(f"subagent flow {flow.name!r} cannot retry review feedback without a prior implementation stage")
+        raise RuntimeError(
+            f"subagent flow {flow.name!r} cannot retry review feedback without a prior implementation stage"
+        )
     retry_stages = tuple(flow.stages[reviewer_index - 1 : reviewer_index + 1])
     return replace(
         flow,
@@ -641,7 +689,9 @@ def _review_feedback_retry_flow(flow: SubagentFlowConfig) -> SubagentFlowConfig:
     )
 
 
-def _clear_review_retry_handoff_outputs(project_dir: Path, retry_flow: SubagentFlowConfig) -> None:
+def _clear_review_retry_handoff_outputs(
+    project_dir: Path, retry_flow: SubagentFlowConfig
+) -> None:
     preserve = {CODE_MAP.filename, "ASCENDC_DESIGN.md"}
     generated = {
         path
@@ -654,7 +704,9 @@ def _clear_review_retry_handoff_outputs(project_dir: Path, retry_flow: SubagentF
             (project_dir / name).unlink(missing_ok=True)
 
 
-def _build_review_feedback_retry_prompt(base_prompt: str, review_text: str, retry_round: int) -> str:
+def _build_review_feedback_retry_prompt(
+    base_prompt: str, review_text: str, retry_round: int
+) -> str:
     review_text = sanitize_worktree_paths(str(review_text or "").strip())
     return (
         f"{str(base_prompt or '').rstrip()}\n\n"
@@ -681,8 +733,14 @@ def _require_native_handoff_files(
     required = set(required_files or NATIVE_HANDOFF_FILES)
     missing = [name for name in sorted(required) if not (project_dir / name).is_file()]
     if missing:
-        raise RuntimeError(f"Claude native subagent flow did not produce required handoff file(s): {', '.join(missing)}")
-    present_optional = {name for name in NATIVE_HANDOFF_FILES - required if (project_dir / name).is_file()}
+        raise RuntimeError(
+            f"Claude native subagent flow did not produce required handoff file(s): {', '.join(missing)}"
+        )
+    present_optional = {
+        name
+        for name in NATIVE_HANDOFF_FILES - required
+        if (project_dir / name).is_file()
+    }
     collected = required | present_optional
     handoffs = {
         name: (project_dir / name).read_text(encoding="utf-8", errors="replace")
@@ -691,14 +749,19 @@ def _require_native_handoff_files(
     if "CODE_MAP.md" in required:
         _validate_optional_handoff(handoffs.get("CODE_MAP.md", ""), _validate_code_map)
     if "ASCENDC_DESIGN.md" in required:
-        _validate_optional_handoff(handoffs.get("ASCENDC_DESIGN.md", ""), _validate_ascendc_design)
+        _validate_optional_handoff(
+            handoffs.get("ASCENDC_DESIGN.md", ""), _validate_ascendc_design
+        )
     if "IMPLEMENTATION_EXECUTION_PLAN.md" in required:
         _validate_optional_handoff(
             handoffs.get("IMPLEMENTATION_EXECUTION_PLAN.md", ""),
             _validate_execution_plan,
         )
     if "IMPLEMENTATION_HANDOFF.md" in required:
-        _validate_optional_handoff(handoffs.get("IMPLEMENTATION_HANDOFF.md", ""), _validate_implementation_handoff)
+        _validate_optional_handoff(
+            handoffs.get("IMPLEMENTATION_HANDOFF.md", ""),
+            _validate_implementation_handoff,
+        )
     if validate_review_ready and "REVIEW_NOTES.md" in required:
         _validate_review_notes(handoffs.get("REVIEW_NOTES.md", ""))
     return handoffs
@@ -773,7 +836,9 @@ def _find_git_root_for_eval(path: Path) -> Path | None:
     return root if root.is_dir() else None
 
 
-def _copy_project_for_eval(candidate_dir: Path) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+def _copy_project_for_eval(
+    candidate_dir: Path,
+) -> tuple[tempfile.TemporaryDirectory[str], Path]:
     tmp = tempfile.TemporaryDirectory(prefix="ksearch_eval_")
     candidate_dir = Path(candidate_dir).expanduser().resolve()
     source_root = _find_git_root_for_eval(candidate_dir) or candidate_dir
@@ -812,12 +877,23 @@ def _run_eval_in_isolated_copy(
 ) -> tuple[EvalResult, str | None]:
     run_in_project_dir = getattr(task, "run_benchmark_in_project_dir", None)
     if not callable(run_in_project_dir):
-        raise RuntimeError("AscendC agentic task does not support run_benchmark_in_project_dir")
+        raise RuntimeError(
+            "AscendC agentic task does not support run_benchmark_in_project_dir"
+        )
     tmp, eval_dir = _copy_project_for_eval(candidate_project_dir)
-    keep_eval_dir = os.getenv("KSEARCH_KEEP_EVAL_WORKDIRS", "").strip().lower() in {"1", "true", "yes", "on"}
+    keep_eval_dir = os.getenv("KSEARCH_KEEP_EVAL_WORKDIRS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     try:
         eval_result = run_in_project_dir(project_dir=eval_dir, round_num=round_num)
-        setattr(eval_result, "_ksearch_debug_evidence", _capture_eval_debug_evidence(eval_dir))
+        setattr(
+            eval_result,
+            "_ksearch_debug_evidence",
+            _capture_eval_debug_evidence(eval_dir),
+        )
         return eval_result, str(eval_dir)
     finally:
         if keep_eval_dir:
@@ -849,18 +925,31 @@ def _materialize_native_assets_baseline(wt_session: Any) -> None:
     wt_session.commit_all("ksearch native claude assets baseline")
 
 
-def _code_map_reuse_context_for_request(request: AscendCAgenticCodegenRequest) -> CodeMapReuseContext:
-    strategy_context = request.strategy_context if isinstance(request.strategy_context, dict) else {}
-    parent_solution_id = str(strategy_context.get("parent_solution_id") or "").strip() or None
+def _code_map_reuse_context_for_request(
+    request: AscendCAgenticCodegenRequest,
+) -> CodeMapReuseContext:
+    strategy_context = (
+        request.strategy_context if isinstance(request.strategy_context, dict) else {}
+    )
+    parent_solution_id = (
+        str(strategy_context.get("parent_solution_id") or "").strip() or None
+    )
     parent_branch_id = (
-        str(strategy_context.get("parent_branch_id") or strategy_context.get("parent_action_node_id") or "").strip()
+        str(
+            strategy_context.get("parent_branch_id")
+            or strategy_context.get("parent_action_node_id")
+            or ""
+        ).strip()
         or None
     )
     return CodeMapReuseContext(
         mode="action",
         parent_solution_id=parent_solution_id,
         parent_branch_id=parent_branch_id,
-        branch_id=str(strategy_context.get("action_node_id") or request.action_node_id or "").strip() or None,
+        branch_id=str(
+            strategy_context.get("action_node_id") or request.action_node_id or ""
+        ).strip()
+        or None,
     )
 
 
@@ -872,10 +961,14 @@ def _materialize_existing_code_map(
 ) -> bool:
     if store is None:
         return False
-    return store.materialize(CODE_MAP, project_dir, code_map_reuse_context=reuse_context)
+    return store.materialize(
+        CODE_MAP, project_dir, code_map_reuse_context=reuse_context
+    )
 
 
-def _materialize_existing_knowledge(store: MemoryStore | None, project_dir: Path) -> bool:
+def _materialize_existing_knowledge(
+    store: MemoryStore | None, project_dir: Path
+) -> bool:
     """Copy accumulated KNOWLEDGE.md into the worktree so designer/codegen can read it."""
     if store is None:
         return False
@@ -883,7 +976,12 @@ def _materialize_existing_knowledge(store: MemoryStore | None, project_dir: Path
 
 
 def _curator_enabled() -> bool:
-    return os.getenv("KSEARCH_ENABLE_CURATOR", "1").strip().lower() not in {"0", "false", "no", "off"}
+    return os.getenv("KSEARCH_ENABLE_CURATOR", "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
 
 def _build_curator_prompt(eval_result: Any, has_knowledge: bool) -> str:
@@ -969,7 +1067,9 @@ def _run_curator_after_eval(
         prompt = _build_curator_prompt(eval_result, has_knowledge)
         owned_telemetry_recorder = None
         if telemetry_recorder is None and telemetry_context is not None:
-            owned_telemetry_recorder = build_file_recorder(context=telemetry_context, prompt=prompt)
+            owned_telemetry_recorder = build_file_recorder(
+                context=telemetry_context, prompt=prompt
+            )
             telemetry_recorder = owned_telemetry_recorder
         try:
             editor_client.edit_project(
@@ -1022,7 +1122,8 @@ class AscendCAgenticPromptBuilder:
         }
         context_paths = request.context_paths
         strategy_summary = _truncate(
-            request.strategy_summary or _extract_bounded_strategy_summary(request.action_text),
+            request.strategy_summary
+            or _extract_bounded_strategy_summary(request.action_text),
             1200,
         )
         rendered_eval_summary = _render_eval_summary_for_prompt(request.eval_summary)
@@ -1034,7 +1135,9 @@ class AscendCAgenticPromptBuilder:
             else "CODE_MAP.md already exists: no. The configured stage prompt will create CODE_MAP.md when needed.\n"
         )
         if context_paths is not None:
-            dependency_status = _render_strategy_dependency_status(request.strategy_context)
+            dependency_status = _render_strategy_dependency_status(
+                request.strategy_context
+            )
             dependency_block = f"{dependency_status}\n\n" if dependency_status else ""
             context_block = (
                 "K-Search context files, relative to the candidate project root:\n"
@@ -1058,7 +1161,9 @@ class AscendCAgenticPromptBuilder:
             )
             action_block = context_block
             perf_block = "(see .ksearch/context/EVAL_SUMMARY.json)"
-            trace_block = "(see .ksearch/context/EVAL_LOG.md only when has_eval_log=true)"
+            trace_block = (
+                "(see .ksearch/context/EVAL_LOG.md only when has_eval_log=true)"
+            )
         else:
             action_block = sections["action"]
             perf_block = sections["perf_summary"] or "(none)"
@@ -1099,7 +1204,9 @@ class AscendCAgenticPromptBuilder:
             assert_no_absolute_paths_for_llm(strategy_summary)
             assert_no_absolute_paths_for_llm(rendered_eval_summary)
         if len(prompt) > self.max_chars:
-            sizes = ", ".join(f"{name}={len(value)}" for name, value in sorted(sections.items()))
+            sizes = ", ".join(
+                f"{name}={len(value)}" for name, value in sorted(sections.items())
+            )
             raise ValueError(
                 f"agentic prompt exceeded {self.max_chars} chars: prompt={len(prompt)}, sections: {sizes}"
             )
@@ -1120,7 +1227,9 @@ class AscendCAgenticCycle:
         self.runner = runner
         self.task = task
         self.request = request
-        self.task_name, self.run_id = _resolve_agentic_run_context(request=request, task=task)
+        self.task_name, self.run_id = _resolve_agentic_run_context(
+            request=request, task=task
+        )
         self.base_solution = base_solution
         self.wt_session: Any | None = None
         self.editor_session: ClaudeProjectEditorSession | Any | None = None
@@ -1130,7 +1239,10 @@ class AscendCAgenticCycle:
         self.curator_context: dict[str, str] = {}
         self.last_handoff_texts: dict[str, str] = {}
         self.last_edit_result: ClaudeProjectEditResult | None = None
-        self.code_map_reuse_manifest: dict[str, Any] = {"reused": False, "reason": "not_checked"}
+        self.code_map_reuse_manifest: dict[str, Any] = {
+            "reused": False,
+            "reason": "not_checked",
+        }
         self.last_stage_prompt_records: list[dict[str, Any]] = []
         self.stage_checkpoint_manager: StageCheckpointManager | None = None
         self.restored_stage_state: dict[str, Any] | None = None
@@ -1159,11 +1271,15 @@ class AscendCAgenticCycle:
             )
             overlay = getattr(self.task, "overlay_solution_sources", None)
             if callable(overlay):
-                overlay(project_dir=self.wt_session.project_dir, solution=self.base_solution)
+                overlay(
+                    project_dir=self.wt_session.project_dir, solution=self.base_solution
+                )
                 self.wt_session.commit_all("ksearch agentic overlay baseline")
             _materialize_native_assets_baseline(self.wt_session)
 
-            code_map_enabled = os.getenv("KSEARCH_ENABLE_CODE_MAP", "1").strip().lower() not in {
+            code_map_enabled = os.getenv(
+                "KSEARCH_ENABLE_CODE_MAP", "1"
+            ).strip().lower() not in {
                 "0",
                 "false",
                 "no",
@@ -1172,7 +1288,11 @@ class AscendCAgenticCycle:
             self.store = MemoryStore.for_task(self.task) if code_map_enabled else None
             reuse_context = _code_map_reuse_context_for_request(self.request)
             meta = self.store.load_meta(CODE_MAP) if self.store is not None else None
-            decision = evaluate_code_map_reuse(meta, reuse_context) if self.store is not None else None
+            decision = (
+                evaluate_code_map_reuse(meta, reuse_context)
+                if self.store is not None
+                else None
+            )
             self.code_map_reuse_manifest = (
                 decision.to_manifest()
                 if decision is not None
@@ -1192,7 +1312,7 @@ class AscendCAgenticCycle:
             checkpoint_config = self.runner.stage_checkpoint_config
             if checkpoint_config is not None and checkpoint_config.enabled:
                 self.stage_checkpoint_manager = StageCheckpointManager(
-                    artifacts_dir=get_ksearch_artifacts_dir(
+                    artifacts_dir=get_ksearch_run_dir(
                         base_dir=getattr(self.task, "artifacts_dir", None),
                         task_name=self.task_name,
                         run_id=self.run_id,
@@ -1213,7 +1333,9 @@ class AscendCAgenticCycle:
                     )
                     _materialize_native_assets_baseline(self.wt_session)
                     self.restored_stage_state = restored.stage_state
-                    self.has_code_map = (self.wt_session.project_dir / CODE_MAP.filename).is_file()
+                    self.has_code_map = (
+                        self.wt_session.project_dir / CODE_MAP.filename
+                    ).is_file()
         except BaseException:
             self.close()
             raise
@@ -1256,11 +1378,15 @@ class AscendCAgenticCycle:
         prompt = sanitize_worktree_paths(prompt)
         task_path = getattr(self.task, "task_path", None)
         if task_path is not None:
-            prompt = prompt.replace(str(Path(task_path).expanduser().resolve()), "<PROJECT_ROOT>")
+            prompt = prompt.replace(
+                str(Path(task_path).expanduser().resolve()), "<PROJECT_ROOT>"
+            )
         assert_no_absolute_paths_for_llm(prompt)
         return prompt
 
-    def _telemetry_context(self, *, stage: str, extra: dict[str, Any] | None = None) -> TelemetryContext:
+    def _telemetry_context(
+        self, *, stage: str, extra: dict[str, Any] | None = None
+    ) -> TelemetryContext:
         return TelemetryContext(
             run_id=self.run_id,
             task_name=self.task_name,
@@ -1285,6 +1411,7 @@ class AscendCAgenticCycle:
                 run_id=self.run_id,
                 round_num=self.request.round_num,
                 attempt_idx=self.request.attempt_idx,
+                action_node_id=self.request.action_node_id,
             )
         )
 
@@ -1317,7 +1444,9 @@ class AscendCAgenticCycle:
                 "mode": self.request.mode,
                 "artifact_mode": stage,
                 "target_gpu": self.request.target_gpu,
-                "blocked_strategy_nodes": list(self.request.blocked_strategy_nodes or []),
+                "blocked_strategy_nodes": list(
+                    self.request.blocked_strategy_nodes or []
+                ),
                 "strategy": dict(self.request.strategy_context or {}),
                 "flow_name": getattr(flow, "name", None),
             }
@@ -1351,7 +1480,9 @@ class AscendCAgenticCycle:
             flow="agentic_codegen_multi_turn",
         )
 
-    def _build_prompt(self, request: AscendCAgenticCodegenRequest, *, has_code_map: bool) -> str:
+    def _build_prompt(
+        self, request: AscendCAgenticCodegenRequest, *, has_code_map: bool
+    ) -> str:
         assert self.wt_session is not None
         if request.eval_summary is None or request.eval_log is None:
             eval_summary, eval_log = build_eval_context_for_llm(
@@ -1362,7 +1493,8 @@ class AscendCAgenticCycle:
             eval_summary = dict(request.eval_summary)
             eval_log = str(request.eval_log)
         strategy_summary = str(
-            request.strategy_summary or _extract_bounded_strategy_summary(request.action_text)
+            request.strategy_summary
+            or _extract_bounded_strategy_summary(request.action_text)
         ).strip()
         assert_no_absolute_paths_for_llm(strategy_summary)
         assert_no_absolute_paths_for_llm(eval_log)
@@ -1438,10 +1570,15 @@ class AscendCAgenticCycle:
             subagent_flow=flow,
         )
 
-    def _review_notes_state_for_flow(self, flow: SubagentFlowConfig) -> _ReviewNotesState | None:
+    def _review_notes_state_for_flow(
+        self, flow: SubagentFlowConfig
+    ) -> _ReviewNotesState | None:
         assert self.wt_session is not None
         required = _flow_handoff_files(flow)
-        if "REVIEW_NOTES.md" not in required and not (self.wt_session.project_dir / "REVIEW_NOTES.md").is_file():
+        if (
+            "REVIEW_NOTES.md" not in required
+            and not (self.wt_session.project_dir / "REVIEW_NOTES.md").is_file()
+        ):
             return None
         handoff_texts = _require_native_handoff_files(
             self.wt_session.project_dir,
@@ -1520,7 +1657,9 @@ class AscendCAgenticCycle:
     def run_initial(self) -> AscendCAgenticCodegenResult:
         self._require_open()
         if self._initial_has_run:
-            raise RuntimeError("run_initial() may only be called once per AscendCAgenticCycle")
+            raise RuntimeError(
+                "run_initial() may only be called once per AscendCAgenticCycle"
+            )
         self._initial_has_run = True
         prompt = self._build_prompt(self.request, has_code_map=bool(self.has_code_map))
         telemetry_recorder = build_file_recorder(
@@ -1538,13 +1677,15 @@ class AscendCAgenticCycle:
                 )
             finally:
                 telemetry_recorder.close()
-            edit_result, prompt, telemetry_recorder, flow = self._run_review_feedback_retries(
-                edit_result=edit_result,
-                prompt=prompt,
-                telemetry_recorder=telemetry_recorder,
-                flow=self.runner.subagent_flow,
-                mode=self.request.mode,
-                stage_prompt_records=stage_prompt_sink.records,
+            edit_result, prompt, telemetry_recorder, flow = (
+                self._run_review_feedback_retries(
+                    edit_result=edit_result,
+                    prompt=prompt,
+                    telemetry_recorder=telemetry_recorder,
+                    flow=self.runner.subagent_flow,
+                    mode=self.request.mode,
+                    stage_prompt_records=stage_prompt_sink.records,
+                )
             )
             return self._finalize_attempt_result(
                 edit_result=edit_result,
@@ -1568,11 +1709,17 @@ class AscendCAgenticCycle:
         self._require_open()
         if not self._initial_has_run:
             raise RuntimeError("continue_fix() requires run_initial() first")
-        if self.editor_session is None or not supports_configured_subagent_flow(self.runner.editor_client):
+        if self.editor_session is None or not supports_configured_subagent_flow(
+            self.runner.editor_client
+        ):
             raise RuntimeError("continue_fix() requires an open Claude agentic session")
-        self.task_name, self.run_id = _resolve_agentic_run_context(request=self.request, task=self.task)
+        self.task_name, self.run_id = _resolve_agentic_run_context(
+            request=self.request, task=self.task
+        )
         assert self.wt_session is not None
-        if not _write_runtime_file(self.wt_session.project_dir, CODE_MAP.filename, self.code_map_text):
+        if not _write_runtime_file(
+            self.wt_session.project_dir, CODE_MAP.filename, self.code_map_text
+        ):
             _materialize_existing_code_map(self.store, self.wt_session.project_dir)
         if not _write_runtime_file(
             self.wt_session.project_dir,
@@ -1605,13 +1752,15 @@ class AscendCAgenticCycle:
                 )
             finally:
                 telemetry_recorder.close()
-            edit_result, prompt, telemetry_recorder, flow = self._run_review_feedback_retries(
-                edit_result=edit_result,
-                prompt=prompt,
-                telemetry_recorder=telemetry_recorder,
-                flow=self.runner.repair_subagent_flow,
-                mode="fix",
-                stage_prompt_records=stage_prompt_sink.records,
+            edit_result, prompt, telemetry_recorder, flow = (
+                self._run_review_feedback_retries(
+                    edit_result=edit_result,
+                    prompt=prompt,
+                    telemetry_recorder=telemetry_recorder,
+                    flow=self.runner.repair_subagent_flow,
+                    mode="fix",
+                    stage_prompt_records=stage_prompt_sink.records,
+                )
             )
             return self._finalize_attempt_result(
                 edit_result=edit_result,
@@ -1635,11 +1784,19 @@ class AscendCAgenticCycle:
         self._require_open()
         if not self._initial_has_run:
             raise RuntimeError("continue_improve() requires run_initial() first")
-        if self.editor_session is None or not supports_configured_subagent_flow(self.runner.editor_client):
-            raise RuntimeError("continue_improve() requires an open Claude agentic session")
-        self.task_name, self.run_id = _resolve_agentic_run_context(request=self.request, task=self.task)
+        if self.editor_session is None or not supports_configured_subagent_flow(
+            self.runner.editor_client
+        ):
+            raise RuntimeError(
+                "continue_improve() requires an open Claude agentic session"
+            )
+        self.task_name, self.run_id = _resolve_agentic_run_context(
+            request=self.request, task=self.task
+        )
         assert self.wt_session is not None
-        if not _write_runtime_file(self.wt_session.project_dir, CODE_MAP.filename, self.code_map_text):
+        if not _write_runtime_file(
+            self.wt_session.project_dir, CODE_MAP.filename, self.code_map_text
+        ):
             _materialize_existing_code_map(self.store, self.wt_session.project_dir)
         if not _write_runtime_file(
             self.wt_session.project_dir,
@@ -1672,13 +1829,15 @@ class AscendCAgenticCycle:
                 )
             finally:
                 telemetry_recorder.close()
-            edit_result, prompt, telemetry_recorder, flow = self._run_review_feedback_retries(
-                edit_result=edit_result,
-                prompt=prompt,
-                telemetry_recorder=telemetry_recorder,
-                flow=self.runner.improve_subagent_flow,
-                mode="improve",
-                stage_prompt_records=stage_prompt_sink.records,
+            edit_result, prompt, telemetry_recorder, flow = (
+                self._run_review_feedback_retries(
+                    edit_result=edit_result,
+                    prompt=prompt,
+                    telemetry_recorder=telemetry_recorder,
+                    flow=self.runner.improve_subagent_flow,
+                    mode="improve",
+                    stage_prompt_records=stage_prompt_sink.records,
+                )
             )
             return self._finalize_attempt_result(
                 edit_result=edit_result,
@@ -1708,7 +1867,9 @@ class AscendCAgenticCycle:
             if result.eval_result.is_passed():
                 break
             self.request = replace(self.request, eval_result=result.eval_result)
-            result = self.continue_fix(_build_repair_prompt(result.eval_result, fix_round))
+            result = self.continue_fix(
+                _build_repair_prompt(result.eval_result, fix_round)
+            )
         return result
 
     def _run_eval(self) -> tuple[EvalResult, str | None]:
@@ -1738,13 +1899,19 @@ class AscendCAgenticCycle:
             self.code_map_text = produced_code_map
         _remove_native_handoff_files(self.wt_session.project_dir)
         self.curator_context = dict(handoff_texts)
-        self.curator_context.update(_capture_and_remove_non_candidate_files(self.wt_session.project_dir))
+        self.curator_context.update(
+            _capture_and_remove_non_candidate_files(self.wt_session.project_dir)
+        )
         self.last_handoff_texts = handoff_texts
         self.last_edit_result = edit_result
 
         project_changed_paths = self.wt_session.project_changed_paths()
-        changed_paths = _candidate_changed_paths(project_changed_paths or self.wt_session.changed_paths())
-        if not changed_paths and not _allows_empty_candidate_change(mode=mode, handoffs=handoff_texts):
+        changed_paths = _candidate_changed_paths(
+            project_changed_paths or self.wt_session.changed_paths()
+        )
+        if not changed_paths and not _allows_empty_candidate_change(
+            mode=mode, handoffs=handoff_texts
+        ):
             raise RuntimeError(
                 "Claude agentic codegen did not change any files inside the candidate worktree. "
                 "Rejecting this attempt instead of importing external task_path changes."
@@ -1752,7 +1919,9 @@ class AscendCAgenticCycle:
 
         diff_text = _candidate_diff_text(self.wt_session.project_diff_text())
         eval_result, eval_project_path = self._run_eval()
-        self.curator_context.update(getattr(eval_result, "_ksearch_debug_evidence", {}) or {})
+        self.curator_context.update(
+            getattr(eval_result, "_ksearch_debug_evidence", {}) or {}
+        )
         knowledge_text = _run_curator_after_eval(
             editor_client=self.runner.editor_client,
             project_dir=self.wt_session.project_dir,
@@ -1776,17 +1945,16 @@ class AscendCAgenticCycle:
         task_name = self.task_name
         run_id = self.run_id
         artifacts_dir = getattr(self.task, "artifacts_dir", None)
-        snapshot_archive_dir = (
-            get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=str(task_name), run_id=run_id)
-            / "snapshots"
-        )
+        snapshot_archive_dir = None
         project_snapshot = create_project_snapshot(
             project_dir=self.wt_session.project_dir,
             snapshot_id=snapshot_id,
             parent_snapshot_id=None,
             base_commit=self.wt_session.baseline_commit,
             created_by_round=self.request.round_num,
-            eval_result=eval_result.to_dict(include_log_excerpt=True, max_log_chars=8000),
+            eval_result=eval_result.to_dict(
+                include_log_excerpt=True, max_log_chars=8000
+            ),
             diff_from_parent=diff_text,
             archive_dir=snapshot_archive_dir,
             run_id=run_id,
@@ -1814,7 +1982,9 @@ class AscendCAgenticCycle:
                 "run_id": run_id,
                 "task_name": task_name,
                 "action_node_id": self.request.action_node_id,
-                "blocked_strategy_nodes": list(self.request.blocked_strategy_nodes or []),
+                "blocked_strategy_nodes": list(
+                    self.request.blocked_strategy_nodes or []
+                ),
                 "parent_candidate_id": self.request.parent_candidate_id,
                 "round_num": self.request.round_num,
                 "attempt_idx": self.request.attempt_idx,
@@ -1838,7 +2008,12 @@ class AscendCAgenticCycle:
                     else None
                 ),
                 "parent_strategy_lineage": (
-                    list((self.request.strategy_context or {}).get("parent_strategy_lineage") or [])
+                    list(
+                        (self.request.strategy_context or {}).get(
+                            "parent_strategy_lineage"
+                        )
+                        or []
+                    )
                     if isinstance(self.request.strategy_context, dict)
                     else []
                 ),
@@ -1854,7 +2029,9 @@ class AscendCAgenticCycle:
         return AscendCAgenticCodegenResult(
             solution=solution,
             eval_result=eval_result,
-            raw=self.task.code_for_world_model_from_raw(raw=cleaned, language="ascendc"),
+            raw=self.task.code_for_world_model_from_raw(
+                raw=cleaned, language="ascendc"
+            ),
             cleaned=cleaned,
             transcript=edit_result.transcript,
             prompt=prompt,
@@ -1868,8 +2045,10 @@ class AscendCAgenticCycle:
             candidate_patch=candidate_patch,
             project_snapshot=project_snapshot,
             artifact_paths=artifact_paths,
-            trace_path=edit_result.trace_path or telemetry_recorder.artifacts.trace_path,
-            timeline_path=edit_result.timeline_path or telemetry_recorder.artifacts.timeline_path,
+            trace_path=edit_result.trace_path
+            or telemetry_recorder.artifacts.trace_path,
+            timeline_path=edit_result.timeline_path
+            or telemetry_recorder.artifacts.timeline_path,
             cost_path=edit_result.cost_path or telemetry_recorder.artifacts.cost_path,
             session_id=edit_result.session_id,
             total_cost_usd=edit_result.total_cost_usd,
@@ -1896,15 +2075,21 @@ class AscendCAgenticCodegenRunner:
         stage_checkpoint_config: StageCheckpointConfig | None = None,
     ) -> None:
         self.model_name = str(model_name)
-        self.editor_client = editor_client or ClaudeAgentProjectEditorClient(model_name=self.model_name)
+        self.editor_client = editor_client or ClaudeAgentProjectEditorClient(
+            model_name=self.model_name
+        )
         self.stage_checkpoint_config = stage_checkpoint_config
         if stage_checkpoint_config is not None:
             if hasattr(self.editor_client, "enable_file_checkpointing"):
-                self.editor_client.enable_file_checkpointing = bool(stage_checkpoint_config.enable_claude_file_checkpointing)
+                self.editor_client.enable_file_checkpointing = bool(
+                    stage_checkpoint_config.enable_claude_file_checkpointing
+                )
         self.reader_editor_client = reader_editor_client
         self.prompt_builder = prompt_builder or AscendCAgenticPromptBuilder()
         flow_set = load_subagent_flows()
-        self.subagent_flow = subagent_flow or _configured_flow_or_default(flow_set, "initial_codegen")
+        self.subagent_flow = subagent_flow or _configured_flow_or_default(
+            flow_set, "initial_codegen"
+        )
         try:
             default_repair_flow = flow_set.get("eval_failure_repair")
         except KeyError:
@@ -1938,7 +2123,9 @@ class AscendCAgenticCodegenRunner:
         base_solution: Solution | None,
         max_fix_rounds: int = 3,
     ) -> AscendCAgenticCodegenResult:
-        with self.open_cycle(task=task, request=request, base_solution=base_solution) as cycle:
+        with self.open_cycle(
+            task=task, request=request, base_solution=base_solution
+        ) as cycle:
             result = cycle.run_initial()
             return cycle.run_repair_loop(result, max_fix_rounds=max_fix_rounds)
 

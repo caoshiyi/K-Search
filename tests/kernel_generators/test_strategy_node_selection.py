@@ -6,7 +6,10 @@ from k_search.kernel_generators.kernel_generator_world_model import (
     resolve_strategy_catalog_entry,
 )
 from k_search.kernel_generators.strategy_injection import StrategyCatalogEntry
-from k_search.kernel_generators.world_model import dump_world_model_obj, load_world_model_obj
+from k_search.kernel_generators.world_model import (
+    dump_world_model_obj,
+    load_world_model_obj,
+)
 from k_search.kernel_generators.world_model_manager import WorldModelManager
 
 
@@ -104,10 +107,14 @@ def test_strategy_selection_blocks_title_only_child_and_selects_catalog_node(tmp
     }
     generator = object.__new__(WorldModelKernelGeneratorWithBaseline)
     generator._strategy_catalog = catalog
-    generator._wm = WorldModelManager(llm_call=lambda prompt: "", target_gpu="ascend", language="ascendc")
+    generator._wm = WorldModelManager(
+        llm_call=lambda prompt: "", target_gpu="ascend", language="ascendc"
+    )
     generator._wm.set("task", dump_world_model_obj(wm_obj))
 
-    selected, blocked = generator._choose_executable_strategy_action_node_id(definition_name="task")
+    selected, blocked = generator._choose_executable_strategy_action_node_id(
+        definition_name="task"
+    )
 
     assert selected == "s1"
     assert blocked == [
@@ -118,7 +125,9 @@ def test_strategy_selection_blocks_title_only_child_and_selects_catalog_node(tmp
         }
     ]
     updated = load_world_model_obj(generator._wm.get("task") or "")
-    child = next(node for node in updated["decision_tree"]["nodes"] if node["node_id"] == "s2c1")
+    child = next(
+        node for node in updated["decision_tree"]["nodes"] if node["node_id"] == "s2c1"
+    )
     assert child["action"]["status"] == "blocked"
     assert "strategy_file_required_but_missing" in child["notes"]
 
@@ -167,10 +176,14 @@ def test_strategy_selection_blocks_dependency_until_prerequisite_adopted(tmp_pat
     }
     generator = object.__new__(WorldModelKernelGeneratorWithBaseline)
     generator._strategy_catalog = catalog
-    generator._wm = WorldModelManager(llm_call=lambda prompt: "", target_gpu="ascend", language="ascendc")
+    generator._wm = WorldModelManager(
+        llm_call=lambda prompt: "", target_gpu="ascend", language="ascendc"
+    )
     generator._wm.set("task", dump_world_model_obj(wm_obj))
 
-    selected, blocked = generator._choose_executable_strategy_action_node_id(definition_name="task")
+    selected, blocked = generator._choose_executable_strategy_action_node_id(
+        definition_name="task"
+    )
 
     assert selected == "s1"
     assert blocked == [
@@ -184,7 +197,9 @@ def test_strategy_selection_blocks_dependency_until_prerequisite_adopted(tmp_pat
     ]
 
 
-def test_strategy_selection_persists_blocked_actions_and_strategy_state(tmp_path, monkeypatch):
+def test_strategy_selection_persists_blocked_actions_and_strategy_state(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("KSEARCH_TASK_ID", "task-id")
     catalog = [
         _entry(tmp_path, "fa_qkv_two_level_l1_reuse", score=0.7),
@@ -224,7 +239,9 @@ def test_strategy_selection_persists_blocked_actions_and_strategy_state(tmp_path
     generator = object.__new__(WorldModelKernelGeneratorWithBaseline)
     generator._strategy_catalog = catalog
     generator._artifacts_dir = str(tmp_path / "artifacts")
-    generator._wm = WorldModelManager(llm_call=lambda prompt: "", target_gpu="ascend", language="ascendc")
+    generator._wm = WorldModelManager(
+        llm_call=lambda prompt: "", target_gpu="ascend", language="ascendc"
+    )
     generator._wm.set("task", dump_world_model_obj(wm_obj))
 
     class Task:
@@ -239,14 +256,22 @@ def test_strategy_selection_persists_blocked_actions_and_strategy_state(tmp_path
 
     assert selected == "s1"
     assert blocked[0]["reason"] == "missing_prerequisites"
-    world_model_dir = tmp_path / "artifacts" / "task" / "task-id" / "runs" / "run-id" / "artifacts" / "world_model"
-    blocked_lines = (world_model_dir / "blocked_actions.jsonl").read_text(encoding="utf-8").splitlines()
+    world_model_dir = (
+        tmp_path / "artifacts" / "task" / "task-id" / "runs" / "run-id" / "world_model"
+    )
+    blocked_lines = (
+        (world_model_dir / "blocked_actions.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
     blocked_event = json.loads(blocked_lines[0])
     assert blocked_event["action_node_id"] == "s2"
     assert blocked_event["reason"] == "missing_prerequisites"
     assert blocked_event["missing"] == ["fa_qkv_two_level_l1_reuse"]
 
-    state = json.loads((world_model_dir / "strategy_state.json").read_text(encoding="utf-8"))
+    state = json.loads(
+        (world_model_dir / "strategy_state.json").read_text(encoding="utf-8")
+    )
     assert state["adopted_strategy_ids"] == []
     assert state["blocked_actions"][0]["reason"] == "missing_prerequisites"
 
@@ -296,13 +321,19 @@ def test_strategy_selection_allows_dependency_after_prerequisite_adopted(tmp_pat
     }
     generator = object.__new__(WorldModelKernelGeneratorWithBaseline)
     generator._strategy_catalog = catalog
-    generator._wm = WorldModelManager(llm_call=lambda prompt: "", target_gpu="ascend", language="ascendc")
+    generator._wm = WorldModelManager(
+        llm_call=lambda prompt: "", target_gpu="ascend", language="ascendc"
+    )
     generator._wm.set("task", dump_world_model_obj(wm_obj))
 
-    selected, blocked = generator._choose_executable_strategy_action_node_id(definition_name="task")
+    selected, blocked = generator._choose_executable_strategy_action_node_id(
+        definition_name="task"
+    )
 
     assert selected == "s2"
     assert blocked == []
     updated = load_world_model_obj(generator._wm.get("task") or "")
-    selected_node = next(node for node in updated["decision_tree"]["nodes"] if node["node_id"] == "s2")
+    selected_node = next(
+        node for node in updated["decision_tree"]["nodes"] if node["node_id"] == "s2"
+    )
     assert selected_node["parent_id"] == "s1"

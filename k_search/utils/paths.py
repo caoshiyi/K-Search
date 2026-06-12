@@ -5,7 +5,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Union
 
-
 PathLike = Union[str, Path]
 _generated_task_id: Optional[str] = None
 
@@ -86,7 +85,10 @@ def get_ksearch_task_artifacts_dir(
     task_id: Optional[str] = None,
 ) -> Path:
     """Task-scoped artifacts root: `<base>/<task>/<task_id>/artifacts`."""
-    return get_ksearch_task_dir(base_dir=base_dir, task_name=task_name, task_id=task_id) / "artifacts"
+    return (
+        get_ksearch_task_dir(base_dir=base_dir, task_name=task_name, task_id=task_id)
+        / "artifacts"
+    )
 
 
 def get_ksearch_artifacts_dir(
@@ -107,8 +109,15 @@ def get_ksearch_artifacts_dir(
     `<base>/<task>/<task_id>/artifacts`.
     """
     if include_run:
-        return get_ksearch_run_dir(base_dir=base_dir, task_name=task_name, task_id=task_id, run_id=run_id) / "artifacts"
-    return get_ksearch_task_artifacts_dir(base_dir=base_dir, task_name=task_name, task_id=task_id)
+        return (
+            get_ksearch_run_dir(
+                base_dir=base_dir, task_name=task_name, task_id=task_id, run_id=run_id
+            )
+            / "artifacts"
+        )
+    return get_ksearch_task_artifacts_dir(
+        base_dir=base_dir, task_name=task_name, task_id=task_id
+    )
 
 
 def get_ksearch_run_dir(
@@ -123,7 +132,11 @@ def get_ksearch_run_dir(
     Artifacts, logs, and worktrees are siblings beneath this directory.
     """
     rid = safe_path_component(run_id or get_run_id(), default="run")
-    return get_ksearch_task_dir(base_dir=base_dir, task_name=task_name, task_id=task_id) / "runs" / rid
+    return (
+        get_ksearch_task_dir(base_dir=base_dir, task_name=task_name, task_id=task_id)
+        / "runs"
+        / rid
+    )
 
 
 def get_run_logs_dir(
@@ -139,10 +152,86 @@ def get_run_logs_dir(
     `sub` is typically "llm" or "telemetry". When omitted, returns the logs root
     (where summary.md / events.jsonl / run_meta.json live).
     """
-    path = get_ksearch_run_dir(base_dir=base_dir, task_name=task_name, task_id=task_id, run_id=run_id) / "logs"
+    path = (
+        get_ksearch_run_dir(
+            base_dir=base_dir, task_name=task_name, task_id=task_id, run_id=run_id
+        )
+        / "logs"
+    )
     if sub:
         path = path / safe_path_component(sub, default="sub")
     return path
+
+
+def get_run_attempts_dir(
+    *,
+    base_dir: Optional[PathLike] = None,
+    task_name: Optional[str] = None,
+    task_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> Path:
+    """Run-scoped attempt root: `<base>/<task>/<task_id>/runs/<run_id>/attempts`."""
+    return (
+        get_ksearch_run_dir(
+            base_dir=base_dir, task_name=task_name, task_id=task_id, run_id=run_id
+        )
+        / "attempts"
+    )
+
+
+def get_attempt_dir(
+    *,
+    base_dir: Optional[PathLike] = None,
+    task_name: Optional[str] = None,
+    task_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    round_num: int,
+    attempt_idx: int,
+    action_node_id: Optional[str] = None,
+) -> Path:
+    """Attempt-centric artifact root named like `r0001_a01_s1`."""
+    action = safe_path_component(
+        action_node_id or "action_unknown", default="action_unknown"
+    )
+    name = f"r{int(round_num):04d}_a{int(attempt_idx):02d}_{action}"
+    return (
+        get_run_attempts_dir(
+            base_dir=base_dir, task_name=task_name, task_id=task_id, run_id=run_id
+        )
+        / name
+    )
+
+
+def get_run_world_model_dir(
+    *,
+    base_dir: Optional[PathLike] = None,
+    task_name: Optional[str] = None,
+    task_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> Path:
+    """Run-scoped world-model root: `<run>/world_model`."""
+    return (
+        get_ksearch_run_dir(
+            base_dir=base_dir, task_name=task_name, task_id=task_id, run_id=run_id
+        )
+        / "world_model"
+    )
+
+
+def get_run_checkpoints_dir(
+    *,
+    base_dir: Optional[PathLike] = None,
+    task_name: Optional[str] = None,
+    task_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> Path:
+    """Run-scoped checkpoint root: `<run>/checkpoints`."""
+    return (
+        get_ksearch_run_dir(
+            base_dir=base_dir, task_name=task_name, task_id=task_id, run_id=run_id
+        )
+        / "checkpoints"
+    )
 
 
 def get_ksearch_worktrees_dir(
@@ -153,4 +242,9 @@ def get_ksearch_worktrees_dir(
     run_id: Optional[str] = None,
 ) -> Path:
     """Run-scoped worktree parent: `<base>/<task>/<task_id>/runs/<run_id>/worktrees`."""
-    return get_ksearch_run_dir(base_dir=base_dir, task_name=task_name, task_id=task_id, run_id=run_id) / "worktrees"
+    return (
+        get_ksearch_run_dir(
+            base_dir=base_dir, task_name=task_name, task_id=task_id, run_id=run_id
+        )
+        / "worktrees"
+    )

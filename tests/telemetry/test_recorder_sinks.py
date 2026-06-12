@@ -10,7 +10,11 @@ from k_search.telemetry.context import (
     telemetry_root,
 )
 from k_search.telemetry.events import TelemetryEvent
-from k_search.telemetry.recorder import TelemetryRecorder, build_file_recorder, noop_recorder
+from k_search.telemetry.recorder import (
+    TelemetryRecorder,
+    build_file_recorder,
+    noop_recorder,
+)
 from k_search.telemetry.sinks import CostJsonSink, JsonlSink, MarkdownTimelineSink
 
 
@@ -26,7 +30,7 @@ def test_build_attempt_dir_uses_sanitized_attempt_layout(tmp_path, monkeypatch):
 
     path = build_attempt_dir(context)
 
-    assert path == tmp_path / "task_name" / "run_alpha" / "telemetry" / "round_0007" / "action_n_12" / "attempt_0002"
+    assert path == tmp_path / "task_name" / "run_alpha" / "attempts" / "r0007_a02_n_12"
 
 
 def test_telemetry_root_defaults_to_unified_logs_dir(monkeypatch, tmp_path):
@@ -58,11 +62,8 @@ def test_build_attempt_dir_defaults_under_run_logs(monkeypatch, tmp_path):
         / "task_alpha"
         / "runs"
         / "run_alpha"
-        / "logs"
-        / "telemetry"
-        / "round_0007"
-        / "action_n_12"
-        / "attempt_0002"
+        / "attempts"
+        / "r0007_a02_n_12"
     )
 
 
@@ -138,9 +139,8 @@ def test_build_attempt_dir_with_none_fields(monkeypatch, tmp_path):
 
     path = build_attempt_dir(context)
 
-    assert "round_global" in str(path)
+    assert path.name == "r0000_a00_action_unknown"
     assert "action_unknown" in str(path)
-    assert "attempt_unknown" in str(path)
 
 
 def test_telemetry_context_to_dict_omits_none():
@@ -158,7 +158,11 @@ def test_jsonl_sink_writes_one_event_per_line(tmp_path):
     path = tmp_path / "agent_trace.jsonl"
     sink = JsonlSink(path)
     sink.write_event(TelemetryEvent(event_type="llm_start", model_name="claude"))
-    sink.write_event(TelemetryEvent(event_type="tool_use", tool_name="Glob", tool_input={"pattern": "**/*.h"}))
+    sink.write_event(
+        TelemetryEvent(
+            event_type="tool_use", tool_name="Glob", tool_input={"pattern": "**/*.h"}
+        )
+    )
     sink.close()
 
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
@@ -169,9 +173,23 @@ def test_jsonl_sink_writes_one_event_per_line(tmp_path):
 def test_markdown_timeline_sink_formats_tool_events(tmp_path):
     path = tmp_path / "tool_timeline.md"
     sink = MarkdownTimelineSink(path)
-    sink.write_event(TelemetryEvent(event_type="llm_start", provider="claude-agent", model_name="claude"))
-    sink.write_event(TelemetryEvent(event_type="tool_use", tool_name="Read", tool_input={"file_path": "kernel/foo.h"}))
-    sink.write_event(TelemetryEvent(event_type="tool_result", tool_name="Read", tool_result_excerpt="alpha"))
+    sink.write_event(
+        TelemetryEvent(
+            event_type="llm_start", provider="claude-agent", model_name="claude"
+        )
+    )
+    sink.write_event(
+        TelemetryEvent(
+            event_type="tool_use",
+            tool_name="Read",
+            tool_input={"file_path": "kernel/foo.h"},
+        )
+    )
+    sink.write_event(
+        TelemetryEvent(
+            event_type="tool_result", tool_name="Read", tool_result_excerpt="alpha"
+        )
+    )
     sink.close()
 
     text = path.read_text(encoding="utf-8")
@@ -229,9 +247,13 @@ def test_recorder_merges_context_and_swallows_sink_errors(tmp_path):
 
 
 def test_build_file_recorder_creates_prompt_and_artifact_paths(tmp_path):
-    context = TelemetryContext(task_name="task", run_id="run", round_index=1, attempt_index=1)
+    context = TelemetryContext(
+        task_name="task", run_id="run", round_index=1, attempt_index=1
+    )
 
-    recorder = build_file_recorder(context=context, prompt="hello prompt", root=tmp_path)
+    recorder = build_file_recorder(
+        context=context, prompt="hello prompt", root=tmp_path
+    )
     recorder.close()
 
     assert recorder.artifacts.trace_path is not None

@@ -13,12 +13,23 @@ from typing import Any, Optional
 
 from pathlib import Path
 
-from k_search.kernel_generators.ascendc_agentic_codegen import AscendCAgenticCodegenRequest
-from k_search.kernel_generators.checkpoint import CheckpointConfig, CheckpointManager, RestoredCheckpoint
+from k_search.kernel_generators.ascendc_agentic_codegen import (
+    AscendCAgenticCodegenRequest,
+)
+from k_search.kernel_generators.checkpoint import (
+    CheckpointConfig,
+    CheckpointManager,
+    RestoredCheckpoint,
+)
 from k_search.kernel_generators.kernel_generator import KernelGenerator
-from k_search.kernel_generators.llm_clients import LLMProviderFatalError, llm_log_context
+from k_search.kernel_generators.llm_clients import (
+    LLMProviderFatalError,
+    llm_log_context,
+)
 from k_search.tasks.task_base import code_from_solution
-from k_search.kernel_generators.kernel_generator_prompts import get_prompt_from_definition_text
+from k_search.kernel_generators.kernel_generator_prompts import (
+    get_prompt_from_definition_text,
+)
 from k_search.kernel_generators.world_model_prompts import (
     get_debug_and_improve_from_spec_prompt_from_text,
     get_debug_generated_code_prompt_from_text,
@@ -27,7 +38,11 @@ from k_search.kernel_generators.world_model_prompts import (
     get_improve_from_spec_prompt_from_text,
     get_improve_generated_code_prompt_from_text,
 )
-from k_search.kernel_generators.world_model_manager import WorldModelConfig, WorldModelManager, WorldModelSelectionPolicy
+from k_search.kernel_generators.world_model_manager import (
+    WorldModelConfig,
+    WorldModelManager,
+    WorldModelSelectionPolicy,
+)
 from k_search.kernel_generators.strategy_injection import StrategyCatalogEntry
 from k_search.tasks.task_base import EvalResult
 from k_search.kernel_generators.world_model import (
@@ -40,7 +55,13 @@ from k_search.kernel_generators.world_model import (
     render_world_model_status,
 )
 from k_search.utils.solution_db import SolutionDB
-from k_search.utils.paths import get_ksearch_artifacts_dir, get_run_id, get_run_logs_dir, get_task_id
+from k_search.utils.paths import (
+    get_ksearch_artifacts_dir,
+    get_ksearch_run_dir,
+    get_run_id,
+    get_run_world_model_dir,
+    get_task_id,
+)
 from k_search.telemetry.context import TelemetryContext, build_attempt_dir
 from k_search.telemetry.diagnostics import diagnose_tool_protocol_failure
 from k_search.telemetry.narrative import RunNarrativeLogger
@@ -68,7 +89,11 @@ def resolve_strategy_catalog_entry(
     if not isinstance(node, dict) or not strategy_catalog:
         return None
     action = node.get("action") if isinstance(node.get("action"), dict) else {}
-    strategy_ref = action.get("strategy_ref") if isinstance(action.get("strategy_ref"), dict) else {}
+    strategy_ref = (
+        action.get("strategy_ref")
+        if isinstance(action.get("strategy_ref"), dict)
+        else {}
+    )
     ref_id = str(strategy_ref.get("id") or "").strip()
     ref_markdown = str(strategy_ref.get("markdown_ref") or "").strip()
     node_id = str(node.get("node_id") or "").strip()
@@ -129,7 +154,9 @@ def _action_is_closed_for_strategy_selection(node: dict[str, Any]) -> bool:
     return bool(node.get("too_hard") is True or action.get("too_hard") is True)
 
 
-def _open_frontier_action_nodes(world_model_obj: dict[str, Any]) -> list[dict[str, Any]]:
+def _open_frontier_action_nodes(
+    world_model_obj: dict[str, Any],
+) -> list[dict[str, Any]]:
     dt = world_model_obj.get("decision_tree")
     if not isinstance(dt, dict):
         return []
@@ -165,7 +192,9 @@ def _open_frontier_action_nodes(world_model_obj: dict[str, Any]) -> list[dict[st
     return frontier
 
 
-def _frontier_action_event_items(world_model_obj: dict[str, Any], *, max_items: int = 20) -> list[dict[str, Any]]:
+def _frontier_action_event_items(
+    world_model_obj: dict[str, Any], *, max_items: int = 20
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for node in _open_frontier_action_nodes(world_model_obj)[: max(0, int(max_items))]:
         action = node.get("action") if isinstance(node.get("action"), dict) else {}
@@ -222,7 +251,11 @@ def _strategy_lineage_from_world_model(
         entry = resolve_strategy_catalog_entry(node, strategy_catalog)
         if entry is None or entry.id in seen:
             continue
-        sr = node.get("solution_ref") if isinstance(node.get("solution_ref"), dict) else {}
+        sr = (
+            node.get("solution_ref")
+            if isinstance(node.get("solution_ref"), dict)
+            else {}
+        )
         ev = sr.get("eval") if isinstance(sr.get("eval"), dict) else {}
         seen.add(entry.id)
         lineage.append(
@@ -307,17 +340,30 @@ def _max_allowed_strategy_difficulty(
             if not isinstance(node, dict):
                 continue
             sr = node.get("solution_ref")
-            ev = sr.get("eval") if isinstance(sr, dict) and isinstance(sr.get("eval"), dict) else None
-            if not isinstance(ev, dict) or str(ev.get("status", "") or "").strip().lower() != "passed":
+            ev = (
+                sr.get("eval")
+                if isinstance(sr, dict) and isinstance(sr.get("eval"), dict)
+                else None
+            )
+            if (
+                not isinstance(ev, dict)
+                or str(ev.get("status", "") or "").strip().lower() != "passed"
+            ):
                 continue
             try:
-                best_vs_base = max(best_vs_base, float(ev.get("mean_vs_baseline_factor")))
+                best_vs_base = max(
+                    best_vs_base, float(ev.get("mean_vs_baseline_factor"))
+                )
             except Exception:
                 pass
     max_allowed = int(getattr(selection_policy, "max_difficulty_1_to_5", 3) or 3)
     try:
-        if best_vs_base >= float(getattr(selection_policy, "relax_difficulty_if_best_vs_base_ge", 0.9) or 0.9):
-            max_allowed = int(getattr(selection_policy, "relaxed_max_difficulty_1_to_5", 4) or 4)
+        if best_vs_base >= float(
+            getattr(selection_policy, "relax_difficulty_if_best_vs_base_ge", 0.9) or 0.9
+        ):
+            max_allowed = int(
+                getattr(selection_policy, "relaxed_max_difficulty_1_to_5", 4) or 4
+            )
     except Exception:
         pass
     return max(1, min(5, max_allowed))
@@ -333,7 +379,9 @@ def _sort_executable_strategy_nodes(
         world_model_obj=world_model_obj,
         selection_policy=selection_policy,
     )
-    filtered = [item for item in executable if _difficulty_1_to_5(item[0]) <= max_allowed]
+    filtered = [
+        item for item in executable if _difficulty_1_to_5(item[0]) <= max_allowed
+    ]
     effective = filtered if filtered else list(executable)
     effective.sort(
         key=lambda item: (
@@ -382,7 +430,9 @@ def _definition_text_for_codegen_prompt(
 class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
     """Baseline-aware generator variant that maintains and injects a persistent world model."""
 
-    def _strategy_entry_for_node(self, node_obj: dict[str, Any] | None) -> StrategyCatalogEntry | None:
+    def _strategy_entry_for_node(
+        self, node_obj: dict[str, Any] | None
+    ) -> StrategyCatalogEntry | None:
         if not isinstance(node_obj, dict) or not self._strategy_catalog:
             return None
         return resolve_strategy_catalog_entry(node_obj, self._strategy_catalog)
@@ -393,7 +443,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         if entry is None:
             return ""
 
-        from k_search.kernel_generators.strategy_injection import render_strategy_action_text
+        from k_search.kernel_generators.strategy_injection import (
+            render_strategy_action_text,
+        )
 
         return render_strategy_action_text(entry=entry)
 
@@ -414,7 +466,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         if not isinstance(nodes, list):
             return
         for node in nodes:
-            if not isinstance(node, dict) or str(node.get("node_id") or "") != str(node_id):
+            if not isinstance(node, dict) or str(node.get("node_id") or "") != str(
+                node_id
+            ):
                 continue
             action = node.get("action") if isinstance(node.get("action"), dict) else {}
             action["status"] = "blocked"
@@ -423,9 +477,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             node["action"] = action
             node["blocked_reason"] = reason
             node["blocked_policy"] = policy
-            node["notes"] = (
-                f"Blocked by K-Search policy: {reason}; policy={policy}."
-            )
+            node["notes"] = f"Blocked by K-Search policy: {reason}; policy={policy}."
             break
         dumped = dump_world_model_obj(obj)
         if dumped:
@@ -449,7 +501,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         if not isinstance(nodes, list):
             return
         for node in nodes:
-            if not isinstance(node, dict) or str(node.get("node_id") or "") != str(node_id):
+            if not isinstance(node, dict) or str(node.get("node_id") or "") != str(
+                node_id
+            ):
                 continue
             action = node.get("action") if isinstance(node.get("action"), dict) else {}
             action["blocked_reason"] = reason
@@ -480,21 +534,28 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         if task is None or self._strategy_catalog is None:
             return
         try:
-            root = get_ksearch_artifacts_dir(
+            root = get_run_world_model_dir(
                 base_dir=self._artifacts_dir,
                 task_name=str(getattr(task, "name", "") or ""),
                 run_id=run_id,
             )
-            state_path = root / "world_model" / "strategy_state.json"
-            adopted = _adopted_strategy_ids_from_world_model(world_model_obj, self._strategy_catalog)
-            lineage = _strategy_lineage_from_world_model(world_model_obj, self._strategy_catalog)
+            state_path = root / "strategy_state.json"
+            adopted = _adopted_strategy_ids_from_world_model(
+                world_model_obj, self._strategy_catalog
+            )
+            lineage = _strategy_lineage_from_world_model(
+                world_model_obj, self._strategy_catalog
+            )
             current_parent_solution_id = None
             dt = world_model_obj.get("decision_tree")
             active = str(dt.get("active_leaf_id") or "") if isinstance(dt, dict) else ""
             nodes = dt.get("nodes") if isinstance(dt, dict) else None
             if active and isinstance(nodes, list):
                 for node in nodes:
-                    if isinstance(node, dict) and str(node.get("node_id") or "") == active:
+                    if (
+                        isinstance(node, dict)
+                        and str(node.get("node_id") or "") == active
+                    ):
                         current_parent_solution_id = _node_solution_id(node)
                         break
             payload = {
@@ -505,7 +566,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 "blocked_actions": list(blocked_actions or []),
             }
             state_path.parent.mkdir(parents=True, exist_ok=True)
-            state_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+            state_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+            )
         except Exception:
             pass
 
@@ -521,12 +584,12 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         if task is None or not blocked_actions:
             return
         try:
-            root = get_ksearch_artifacts_dir(
+            root = get_run_world_model_dir(
                 base_dir=self._artifacts_dir,
                 task_name=str(getattr(task, "name", "") or ""),
                 run_id=run_id,
             )
-            path = root / "world_model" / "blocked_actions.jsonl"
+            path = root / "blocked_actions.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as f:
                 for item in blocked_actions:
@@ -583,8 +646,12 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         parent_solution_id = None
         if parent_id:
             try:
-                sr = self._wm.get_solution_ref_for_node(definition_name=definition_name, node_id=parent_id)
-                parent_solution_id = sr.get("solution_id") if isinstance(sr, dict) else None
+                sr = self._wm.get_solution_ref_for_node(
+                    definition_name=definition_name, node_id=parent_id
+                )
+                parent_solution_id = (
+                    sr.get("solution_id") if isinstance(sr, dict) else None
+                )
             except Exception:
                 parent_solution_id = None
         return {
@@ -636,7 +703,12 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         adoption_reason: str = "selected_as_current_parent",
     ) -> str | None:
         """Commit a passed candidate to WM lineage immediately after evaluation."""
-        if task is None or solution is None or eval_result is None or self._solution_db is None:
+        if (
+            task is None
+            or solution is None
+            or eval_result is None
+            or self._solution_db is None
+        ):
             return None
         if not bool(getattr(eval_result, "is_passed", lambda: False)()):
             return None
@@ -653,12 +725,16 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             solution_id = None
         existing_ref: dict[str, Any] = {}
         try:
-            existing = self._wm.get_solution_ref_for_node(definition_name=definition_name, node_id=node_id)
+            existing = self._wm.get_solution_ref_for_node(
+                definition_name=definition_name, node_id=node_id
+            )
             existing_ref = existing if isinstance(existing, dict) else {}
         except Exception:
             existing_ref = {}
 
-        if not solution_id or str(existing_ref.get("solution_id") or "") != str(solution_id):
+        if not solution_id or str(existing_ref.get("solution_id") or "") != str(
+            solution_id
+        ):
             rec = self._solution_db.add(
                 solution=solution,
                 eval_result=eval_result,
@@ -666,7 +742,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 parent_solution_id=None,
             )
             solution_id = rec.solution_id
-            self._wm.set_active_leaf_id(definition_name=definition_name, node_id=node_id)
+            self._wm.set_active_leaf_id(
+                definition_name=definition_name, node_id=node_id
+            )
             self._wm.attach_solution_to_active_leaf(
                 definition_name=definition_name,
                 solution_id=rec.solution_id,
@@ -731,9 +809,13 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
 
         old_parent_id = str(selected.get("parent_id") or "")
         old_parent = by_id.get(old_parent_id)
-        if isinstance(old_parent, dict) and isinstance(old_parent.get("children"), list):
+        if isinstance(old_parent, dict) and isinstance(
+            old_parent.get("children"), list
+        ):
             old_parent["children"] = [
-                child_id for child_id in old_parent["children"] if str(child_id) != selected_node_id
+                child_id
+                for child_id in old_parent["children"]
+                if str(child_id) != selected_node_id
             ]
         selected["parent_id"] = target_parent_id
         children = target_parent.get("children")
@@ -760,7 +842,10 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
     ) -> tuple[str | None, list[dict[str, Any]]]:
         blocked: list[dict[str, Any]] = []
         if self._strategy_catalog is None:
-            return self._wm.choose_next_action_node_id(definition_name=definition_name), blocked
+            return (
+                self._wm.choose_next_action_node_id(definition_name=definition_name),
+                blocked,
+            )
         wm_json = self._wm.get(definition_name)
         wm_obj = load_world_model_obj(wm_json or "")
         if wm_obj is None:
@@ -791,7 +876,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 )
                 continue
 
-            if entry.id in adopted_strategy_ids and not _strategy_allow_reexecute(entry):
+            if entry.id in adopted_strategy_ids and not _strategy_allow_reexecute(
+                entry
+            ):
                 item = {
                     "node_id": node_id,
                     "strategy_id": entry.id,
@@ -807,7 +894,11 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 )
                 continue
 
-            missing = [req for req in _strategy_requires(entry) if req not in adopted_strategy_ids]
+            missing = [
+                req
+                for req in _strategy_requires(entry)
+                if req not in adopted_strategy_ids
+            ]
             if missing:
                 item = {
                     "node_id": node_id,
@@ -828,7 +919,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
 
             executable.append((node, entry))
 
-        wm_obj_after_blocks = load_world_model_obj(self._wm.get(definition_name) or "") or wm_obj
+        wm_obj_after_blocks = (
+            load_world_model_obj(self._wm.get(definition_name) or "") or wm_obj
+        )
         self._persist_blocked_actions_artifact(
             task=task,
             run_id=run_id,
@@ -855,7 +948,10 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         if not executable:
             raise NoExecutableStrategyNodeError(blocked)
 
-        policy = getattr(getattr(self._wm, "_cfg", None), "selection_policy", None) or WorldModelSelectionPolicy()
+        policy = (
+            getattr(getattr(self._wm, "_cfg", None), "selection_policy", None)
+            or WorldModelSelectionPolicy()
+        )
         selected = _sort_executable_strategy_nodes(
             executable,
             world_model_obj=wm_obj_after_blocks,
@@ -869,7 +965,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 selected_node_id=selected_id,
                 selected_strategy=selected_strategy,
             )
-            wm_obj_after_parent = load_world_model_obj(self._wm.get(definition_name) or "")
+            wm_obj_after_parent = load_world_model_obj(
+                self._wm.get(definition_name) or ""
+            )
             if isinstance(wm_obj_after_parent, dict):
                 self._persist_strategy_state_artifact(
                     task=task,
@@ -879,40 +977,50 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 )
         return selected_id or None, blocked
 
-    def _default_world_model_path(self, *, task: Any, run_id: str | None = None, include_run: bool = True) -> Optional[Path]:
+    def _default_world_model_path(
+        self, *, task: Any, run_id: str | None = None, include_run: bool = True
+    ) -> Optional[Path]:
         try:
+            if include_run:
+                return (
+                    get_run_world_model_dir(
+                        base_dir=self._artifacts_dir,
+                        task_name=str(getattr(task, "name", "") or ""),
+                        run_id=run_id,
+                    )
+                    / "world_model.json"
+                )
             root = get_ksearch_artifacts_dir(
                 base_dir=self._artifacts_dir,
                 task_name=str(getattr(task, "name", "") or ""),
-                run_id=run_id,
-                include_run=include_run,
+                include_run=False,
             )
             return root / "world_model" / "world_model.json"
         except Exception:
             return None
 
-    def _persist_world_model_snapshot(self, *, task: Any, run_id: str | None = None) -> None:
+    def _persist_world_model_snapshot(
+        self, *, task: Any, run_id: str | None = None
+    ) -> None:
         """Best-effort: persist the current WM JSON to disk so future runs can resume."""
         try:
             # Save to current run directory
-            p = self._default_world_model_path(task=task, run_id=run_id, include_run=True)
+            p = self._default_world_model_path(
+                task=task, run_id=run_id, include_run=True
+            )
             if p is not None:
-                wm_s = str(self._wm.get(str(getattr(task, "name", "") or "")) or "").strip()
+                wm_s = str(
+                    self._wm.get(str(getattr(task, "name", "") or "")) or ""
+                ).strip()
                 if wm_s:
                     p.parent.mkdir(parents=True, exist_ok=True)
                     p.write_text(wm_s, encoding="utf-8")
-
-            # Also save to top-level (backward compatibility - latest WM state)
-            p_top = self._default_world_model_path(task=task, run_id=None, include_run=False)
-            if p_top is not None:
-                wm_s = str(self._wm.get(str(getattr(task, "name", "") or "")) or "").strip()
-                if wm_s:
-                    p_top.parent.mkdir(parents=True, exist_ok=True)
-                    p_top.write_text(wm_s, encoding="utf-8")
         except Exception:
             pass
 
-    def _resume_world_model_from_snapshot(self, *, task: Any, ref: str, run_id: str | None = None) -> None:
+    def _resume_world_model_from_snapshot(
+        self, *, task: Any, ref: str, run_id: str | None = None
+    ) -> None:
         """
         Load+normalize a world model JSON snapshot and set it into the in-memory WorldModelManager.
         """
@@ -921,9 +1029,13 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             return
         if wm_ref.lower() == "auto":
             # Try run-specific path first, then fall back to top-level
-            p = self._default_world_model_path(task=task, run_id=run_id, include_run=True)
+            p = self._default_world_model_path(
+                task=task, run_id=run_id, include_run=True
+            )
             if p is None or not p.exists():
-                p = self._default_world_model_path(task=task, run_id=None, include_run=False)
+                p = self._default_world_model_path(
+                    task=task, run_id=None, include_run=False
+                )
             if p is None or not p.exists():
                 raise FileNotFoundError(
                     "continue-from-world-model=auto but no world_model.json found"
@@ -935,14 +1047,20 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         raw_wm = p.read_text(encoding="utf-8")
         obj = load_world_model_obj(raw_wm or "")
         if obj is None:
-            raise ValueError(f"Invalid world model JSON (could not parse/normalize): {p}")
+            raise ValueError(
+                f"Invalid world model JSON (could not parse/normalize): {p}"
+            )
         self._wm.set(str(getattr(task, "name", "") or ""), dump_world_model_obj(obj))
 
-    def _restore_world_model_from_checkpoint(self, *, task: Any, restored: RestoredCheckpoint) -> None:
+    def _restore_world_model_from_checkpoint(
+        self, *, task: Any, restored: RestoredCheckpoint
+    ) -> None:
         raw_wm = Path(restored.world_model_path).read_text(encoding="utf-8")
         obj = load_world_model_obj(raw_wm or "")
         if obj is None:
-            raise ValueError(f"Invalid checkpoint world model JSON: {restored.world_model_path}")
+            raise ValueError(
+                f"Invalid checkpoint world model JSON: {restored.world_model_path}"
+            )
         self._wm.set(str(getattr(task, "name", "") or ""), raw_wm)
 
     def _save_cycle_checkpoint_if_enabled(self, **kwargs: Any) -> None:
@@ -1005,7 +1123,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         # Load strategy catalog if provided.
         self._strategy_catalog: list[Any] | None = None
         if strategy_file:
-            from k_search.kernel_generators.strategy_injection import load_strategy_catalog
+            from k_search.kernel_generators.strategy_injection import (
+                load_strategy_catalog,
+            )
 
             if strategy_form not in (None, "", "natural_language"):
                 raise ValueError(
@@ -1014,7 +1134,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 )
             self._strategy_catalog = load_strategy_catalog(strategy_file)
             self._strategy_form = "natural_language"
-            print(f"[STRATEGY] Loaded {len(self._strategy_catalog)} strategies from {strategy_file}, form=natural_language")
+            print(
+                f"[STRATEGY] Loaded {len(self._strategy_catalog)} strategies from {strategy_file}, form=natural_language"
+            )
 
         def _llm_call(prompt: str) -> str:
             with llm_log_context(flow="world_model", phase="world_model_manager"):
@@ -1041,7 +1163,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         self,
         task: Any,
         max_opt_rounds: int = 10,
-        baseline_solution: Optional[str] = None,  # handled by task; kept for signature compatibility
+        baseline_solution: Optional[
+            str
+        ] = None,  # handled by task; kept for signature compatibility
         *,
         wm_stagnation_window: int = 5,
         num_debug_and_improve_rounds: int = 5,
@@ -1057,6 +1181,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         """
         import random
         import time
+
         try:
             max_dai = int(num_debug_and_improve_rounds)
         except Exception:
@@ -1066,6 +1191,7 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
 
         # Determine run_id: either explicit, from continue_from_run, or generate new
         from k_search.utils.paths import get_run_id
+
         if continue_from_run:
             effective_run_id = continue_from_run
         elif run_id:
@@ -1099,7 +1225,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     target_run_id=effective_run_id,
                 )
                 self._restored_checkpoint = restored_checkpoint
-                self._restore_world_model_from_checkpoint(task=task, restored=restored_checkpoint)
+                self._restore_world_model_from_checkpoint(
+                    task=task, restored=restored_checkpoint
+                )
                 if continue_from_solution:
                     _emit_msg = "--resume-from-checkpoint specified; ignoring continue_from_solution"
                     print(f"[WARN] {_emit_msg}", flush=True)
@@ -1143,7 +1271,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             _task_name = str(getattr(task, "name", "") or "")
             _run_id = effective_run_id
             self._narrative = RunNarrativeLogger(
-                get_run_logs_dir(base_dir=self._artifacts_dir, task_name=_task_name, run_id=_run_id),
+                get_ksearch_run_dir(
+                    base_dir=self._artifacts_dir, task_name=_task_name, run_id=_run_id
+                ),
                 meta={
                     "run_id": _run_id,
                     "task_name": _task_name,
@@ -1168,20 +1298,29 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         if self._solution_db is None:
             _stage("init SolutionDB")
             try:
-                if restored_checkpoint is not None and restored_checkpoint.solution_db_path is not None:
+                if (
+                    restored_checkpoint is not None
+                    and restored_checkpoint.solution_db_path is not None
+                ):
                     db_path = restored_checkpoint.solution_db_path
                 else:
                     db_path = (
-                        get_ksearch_artifacts_dir(
+                        get_run_world_model_dir(
                             base_dir=self._artifacts_dir,
                             task_name=str(getattr(task, "name", "") or ""),
                             run_id=effective_run_id,
                         )
-                        / "world_model"
                         / "solution_db.jsonl"
                     )
             except Exception:
-                db_path = get_ksearch_artifacts_dir(base_dir=self._artifacts_dir, task_name=None) / "world_model" / "solution_db.jsonl"
+                db_path = (
+                    get_run_world_model_dir(
+                        base_dir=self._artifacts_dir,
+                        task_name=None,
+                        run_id=effective_run_id,
+                    )
+                    / "solution_db.jsonl"
+                )
             self._solution_db = SolutionDB(
                 jsonl_path=db_path,
                 max_excerpt_chars=self._world_model_max_chars,
@@ -1204,7 +1343,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         # Optional: resume world model from a JSON snapshot on disk.
         wm_ref = str(continue_from_world_model or "").strip()
         if wm_ref and restored_checkpoint is None:
-            self._resume_world_model_from_snapshot(task=task, ref=wm_ref, run_id=effective_run_id)
+            self._resume_world_model_from_snapshot(
+                task=task, ref=wm_ref, run_id=effective_run_id
+            )
             _emit(render_world_model_status(self._wm.get(task.name)))
             self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
 
@@ -1230,7 +1371,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             _stage(f"resume from solution={continue_from_solution}")
             base_sol = task.get_solution(continue_from_solution)
             if base_sol is None:
-                raise ValueError(f"Solution '{continue_from_solution}' not found in TraceSet")
+                raise ValueError(
+                    f"Solution '{continue_from_solution}' not found in TraceSet"
+                )
             if base_sol.definition != task.name:
                 raise ValueError(
                     f"Solution '{continue_from_solution}' does not belong to definition '{task.name}'"
@@ -1269,20 +1412,32 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         self._wm.ensure_initialized(
                             definition_name=task.name,
                             definition_text=definition_text,
-                            current_code_excerpt=(str(wm_code) if isinstance(wm_code, str) and wm_code.strip() else None),
+                            current_code_excerpt=(
+                                str(wm_code)
+                                if isinstance(wm_code, str) and wm_code.strip()
+                                else None
+                            ),
                             eval_result=seed_eval,
                             seed_root_solution_id=str(rec_seed.solution_id),
                             seed_root_solution_name=str(rec_seed.solution_name),
                             seed_root_round_index=0,
                         )
-                    _emit("[WM] Initialized+seeded root from continue_from_solution (code+eval).")
+                    _emit(
+                        "[WM] Initialized+seeded root from continue_from_solution (code+eval)."
+                    )
                     _emit(render_world_model_status(self._wm.get(task.name)))
-                    self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
+                    self._persist_world_model_snapshot(
+                        task=task, run_id=effective_run_id
+                    )
             except LLMProviderFatalError as exc:
-                _emit(f"[ERROR] world model seed init failed with fatal provider error: {exc}")
+                _emit(
+                    f"[ERROR] world model seed init failed with fatal provider error: {exc}"
+                )
                 raise
             except Exception as exc:
-                _emit(f"[WARN] world model seed init failed: {type(exc).__name__}: {exc}")
+                _emit(
+                    f"[WARN] world model seed init failed: {type(exc).__name__}: {exc}"
+                )
         else:
             _stage("initialize world model")
             t0 = time.perf_counter()
@@ -1294,7 +1449,10 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     build_wm_from_strategies,
                 )
                 from k_search.kernel_generators.world_model import dump_world_model_obj
-                _emit(f"[STRATEGY] Building WM from strategy catalog ({len(self._strategy_catalog)} strategies, form=natural_language)")
+
+                _emit(
+                    f"[STRATEGY] Building WM from strategy catalog ({len(self._strategy_catalog)} strategies, form=natural_language)"
+                )
                 wm_obj = build_wm_from_strategies(
                     strategy_catalog=self._strategy_catalog,
                     definition_name=task.name,
@@ -1313,7 +1471,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     language=str(self.language),
                     target_gpu=str(self.target_gpu),
                 ):
-                    wm = self._wm.ensure_initialized(definition_name=task.name, definition_text=definition_text)
+                    wm = self._wm.ensure_initialized(
+                        definition_name=task.name, definition_text=definition_text
+                    )
 
             dt = time.perf_counter() - t0
             _emit(render_world_model_status(wm))
@@ -1349,12 +1509,30 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             max_opt_rounds=max_opt_rounds,
             wm_stagnation_window=wm_stagnation_window,
             max_dai=max_dai,
-            initial_raw_code=(current_raw_code if isinstance(current_raw_code, str) else None),
+            initial_raw_code=(
+                current_raw_code if isinstance(current_raw_code, str) else None
+            ),
             run_id=effective_run_id,
-            start_round=(restored_checkpoint.start_round if restored_checkpoint is not None else 1),
-            restored_best_solution=(restored_checkpoint.best_solution if restored_checkpoint is not None else None),
-            restored_best_eval=(restored_checkpoint.best_eval if restored_checkpoint is not None else None),
-            restored_best_score=(restored_checkpoint.best_score if restored_checkpoint is not None else None),
+            start_round=(
+                restored_checkpoint.start_round
+                if restored_checkpoint is not None
+                else 1
+            ),
+            restored_best_solution=(
+                restored_checkpoint.best_solution
+                if restored_checkpoint is not None
+                else None
+            ),
+            restored_best_eval=(
+                restored_checkpoint.best_eval
+                if restored_checkpoint is not None
+                else None
+            ),
+            restored_best_score=(
+                restored_checkpoint.best_score
+                if restored_checkpoint is not None
+                else None
+            ),
         )
         # (legacy loop removed; v2 runs all optimization rounds)
 
@@ -1379,12 +1557,17 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
         - attempts 2..N: debug_and_improve using logs from the previous attempt
         - cycle end: attach+refine best PASSED in this cycle; else mark action too hard
         """
-        effective_run_id = str(run_id or getattr(task, "_ksearch_run_id", None) or get_run_id())
-        agentic_task_name = str(
-            getattr(task, "name", "")
-            or getattr(task, "definition_name", "")
+        effective_run_id = str(
+            run_id or getattr(task, "_ksearch_run_id", None) or get_run_id()
+        )
+        agentic_task_name = (
+            str(
+                getattr(task, "name", "")
+                or getattr(task, "definition_name", "")
+                or "ascendc"
+            ).strip()
             or "ascendc"
-        ).strip() or "ascendc"
+        )
         get_def = getattr(task, "get_definition_text", None)
         if callable(get_def):
             definition_text = str(get_def(language=str(self.language)) or "").strip()
@@ -1398,7 +1581,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 f"Task '{getattr(task, 'name', '')}' does not provide get_definition_text(); "
                 "cannot build world-model prompts without a definition."
             )
-        baseline_targets_text = str(getattr(task, "get_baseline_targets_text", lambda: "")() or "").strip()
+        baseline_targets_text = str(
+            getattr(task, "get_baseline_targets_text", lambda: "")() or ""
+        ).strip()
 
         try:
             import wandb  # type: ignore
@@ -1433,7 +1618,8 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 return ""
             try:
                 return str(
-                    hook(language=str(self.language), target_gpu=str(self.target_gpu)) or ""
+                    hook(language=str(self.language), target_gpu=str(self.target_gpu))
+                    or ""
                 ).strip()
             except Exception:
                 return ""
@@ -1477,7 +1663,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
 
         best_solution: Optional[Any] = restored_best_solution
         best_eval: Optional[EvalResult] = restored_best_eval
-        best_score: float = float(restored_best_score) if restored_best_score is not None else -1.0
+        best_score: float = (
+            float(restored_best_score) if restored_best_score is not None else -1.0
+        )
         run_failed: bool = False
 
         current_raw_code: Any = str(initial_raw_code or "")
@@ -1495,7 +1683,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             if stagnation_window < 1:
                 stagnation_window = 1
 
-            _stage(f"world model: select next action (cycle start @ round {cycle_start_round})")
+            _stage(
+                f"world model: select next action (cycle start @ round {cycle_start_round})"
+            )
             # When strategy injection is active, skip LLM propose_action_nodes.
             # The action nodes are already seeded from the strategy catalog.
             if self._strategy_catalog is None:
@@ -1512,16 +1702,24 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         self._wm.propose_action_nodes(
                             definition_name=task.name,
                             definition_text=definition_text,
-                            current_code_excerpt=(str(wm_code) if str(wm_code).strip() else None),
-                            current_tree_path=self._wm.get_tree_path_text(definition_name=task.name),
+                            current_code_excerpt=(
+                                str(wm_code) if str(wm_code).strip() else None
+                            ),
+                            current_tree_path=self._wm.get_tree_path_text(
+                                definition_name=task.name
+                            ),
                             baseline_targets_text=baseline_targets_text,
                             round_index=cycle_start_round,
                         )
                 except LLMProviderFatalError as exc:
-                    _emit(f"[ERROR] world model action proposal failed with fatal provider error: {exc}")
+                    _emit(
+                        f"[ERROR] world model action proposal failed with fatal provider error: {exc}"
+                    )
                     raise
                 except Exception as exc:
-                    _emit(f"[WARN] world model action proposal failed: {type(exc).__name__}: {exc}")
+                    _emit(
+                        f"[WARN] world model action proposal failed: {type(exc).__name__}: {exc}"
+                    )
             wm_json = self._wm.get(task.name)
             _emit(render_world_model_status(wm_json))
             _emit(render_open_action_nodes_block(wm_json, max_items=8))
@@ -1529,17 +1727,23 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             blocked_strategy_nodes: list[dict[str, Any]] = []
             try:
                 if self._strategy_catalog is not None:
-                    chosen_leaf, blocked_strategy_nodes = self._choose_executable_strategy_action_node_id(
-                        definition_name=task.name,
-                        task=task,
-                        run_id=effective_run_id,
-                        round_index=cycle_start_round,
+                    chosen_leaf, blocked_strategy_nodes = (
+                        self._choose_executable_strategy_action_node_id(
+                            definition_name=task.name,
+                            task=task,
+                            run_id=effective_run_id,
+                            round_index=cycle_start_round,
+                        )
                     )
                 else:
-                    chosen_leaf = self._wm.choose_next_action_node_id(definition_name=task.name)
+                    chosen_leaf = self._wm.choose_next_action_node_id(
+                        definition_name=task.name
+                    )
             except NoExecutableStrategyNodeError as exc:
                 blocked_strategy_nodes = list(exc.blocked or [])
-                _emit("[WARN] No executable strategy-backed open action nodes found; stopping.")
+                _emit(
+                    "[WARN] No executable strategy-backed open action nodes found; stopping."
+                )
                 chosen_leaf = None
             except Exception:
                 chosen_leaf = None
@@ -1548,7 +1752,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 break
 
             self._wm.set_active_leaf_id(definition_name=task.name, node_id=chosen_leaf)
-            node_obj = self._wm.get_node_obj(definition_name=task.name, node_id=chosen_leaf)
+            node_obj = self._wm.get_node_obj(
+                definition_name=task.name, node_id=chosen_leaf
+            )
             chosen_action_text = None
             strategy_text = ""
             selected_strategy_entry = self._strategy_entry_for_node(node_obj)
@@ -1568,7 +1774,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 _nar = getattr(self, "_narrative", None)
                 if _nar is not None:
                     _no = node_obj if isinstance(node_obj, dict) else {}
-                    _act = _no.get("action") if isinstance(_no.get("action"), dict) else {}
+                    _act = (
+                        _no.get("action") if isinstance(_no.get("action"), dict) else {}
+                    )
                     _nar.action_selected(
                         node_id=chosen_leaf,
                         title=_act.get("title") or _no.get("choice"),
@@ -1587,10 +1795,14 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 node_obj=node_obj,
             )
             base_raw_code = ""
-            base_score: float = -1.0  # comparable to cycle_best_score (task-defined score)
+            base_score: float = (
+                -1.0
+            )  # comparable to cycle_best_score (task-defined score)
             base_eval: Optional[EvalResult] = None
             if self._solution_db is not None:
-                sr = self._wm.get_solution_ref_for_node(definition_name=task.name, node_id=parent_id)
+                sr = self._wm.get_solution_ref_for_node(
+                    definition_name=task.name, node_id=parent_id
+                )
                 sid = sr.get("solution_id") if isinstance(sr, dict) else None
                 # base_score from stored WM eval (no extra benchmarking)
                 try:
@@ -1600,26 +1812,46 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         try:
                             base_eval = EvalResult(
                                 status=str(ev.get("status", "") or ""),
-                                latency_ms=(float(ev["latency_ms"]) if isinstance(ev.get("latency_ms"), (int, float)) else None),
+                                latency_ms=(
+                                    float(ev["latency_ms"])
+                                    if isinstance(ev.get("latency_ms"), (int, float))
+                                    else None
+                                ),
                                 reference_latency_ms=(
                                     float(ev["reference_latency_ms"])
-                                    if isinstance(ev.get("reference_latency_ms"), (int, float))
+                                    if isinstance(
+                                        ev.get("reference_latency_ms"), (int, float)
+                                    )
                                     else None
                                 ),
                                 mean_vs_baseline_factor=(
                                     float(ev["mean_vs_baseline_factor"])
-                                    if isinstance(ev.get("mean_vs_baseline_factor"), (int, float))
+                                    if isinstance(
+                                        ev.get("mean_vs_baseline_factor"), (int, float)
+                                    )
                                     else None
                                 ),
                                 speedup_factor=(
-                                    float(ev["speedup_factor"]) if isinstance(ev.get("speedup_factor"), (int, float)) else None
+                                    float(ev["speedup_factor"])
+                                    if isinstance(
+                                        ev.get("speedup_factor"), (int, float)
+                                    )
+                                    else None
                                 ),
                                 log_excerpt=str(ev.get("log_excerpt", "") or ""),
-                                metrics=(ev.get("metrics") if isinstance(ev.get("metrics"), dict) else {}),
+                                metrics=(
+                                    ev.get("metrics")
+                                    if isinstance(ev.get("metrics"), dict)
+                                    else {}
+                                ),
                             )
                         except Exception:
                             base_eval = None
-                        m = ev.get("metrics") if isinstance(ev.get("metrics"), dict) else None
+                        m = (
+                            ev.get("metrics")
+                            if isinstance(ev.get("metrics"), dict)
+                            else None
+                        )
                         sc = m.get("score") if isinstance(m, dict) else None
                         base_score = float(sc) if isinstance(sc, (int, float)) else -1.0
                 except Exception:
@@ -1632,7 +1864,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                 get_baseline_code = getattr(task, "get_baseline_code_for_codegen", None)
                 if callable(get_baseline_code):
                     try:
-                        base_raw_code = str(get_baseline_code(language=str(self.language)) or "").strip()
+                        base_raw_code = str(
+                            get_baseline_code(language=str(self.language)) or ""
+                        ).strip()
                     except TypeError:
                         try:
                             base_raw_code = str(get_baseline_code() or "").strip()
@@ -1643,11 +1877,20 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
 
             prediction = None
             try:
-                act = (node_obj or {}).get("action") if isinstance((node_obj or {}).get("action"), dict) else {}
-                expected_speedup = act.get("expected_speedup") if isinstance(act.get("expected_speedup"), dict) else None
+                act = (
+                    (node_obj or {}).get("action")
+                    if isinstance((node_obj or {}).get("action"), dict)
+                    else {}
+                )
+                expected_speedup = (
+                    act.get("expected_speedup")
+                    if isinstance(act.get("expected_speedup"), dict)
+                    else None
+                )
                 evb = (
                     expected_speedup.get("factor")
-                    if isinstance(expected_speedup, dict) and expected_speedup.get("factor") is not None
+                    if isinstance(expected_speedup, dict)
+                    and expected_speedup.get("factor") is not None
                     else act.get("expected_vs_baseline_factor", None)
                 )
                 prediction = (
@@ -1713,13 +1956,25 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         )
                     # --- Agentic AscendC codegen branch ---
                     if self._should_use_ascendc_agentic_codegen(task):
-                        from k_search.kernel_generators.ascendc_agentic_codegen import _build_fix_prompt
-                        trace_excerpt = str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or "")
+                        from k_search.kernel_generators.ascendc_agentic_codegen import (
+                            _build_fix_prompt,
+                        )
+
+                        trace_excerpt = str(
+                            getattr(
+                                task, "get_last_round_trace_logs_for_prompt", lambda: ""
+                            )()
+                            or ""
+                        )
                         perf_lines: list[str] = []
                         if last_eval is not None:
-                            perf_lines.extend(last_eval.perf_summary_lines(prefix="last_attempt"))
+                            perf_lines.extend(
+                                last_eval.perf_summary_lines(prefix="last_attempt")
+                            )
                         if base_eval is not None:
-                            perf_lines.extend(base_eval.perf_summary_lines(prefix="base"))
+                            perf_lines.extend(
+                                base_eval.perf_summary_lines(prefix="base")
+                            )
                         perf_summary = "\n".join(perf_lines).strip()
 
                         if attempt_idx == 1:
@@ -1728,18 +1983,21 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             base_solution_for_agentic = None
                             if isinstance(base_raw_code, str) and base_raw_code.strip():
                                 try:
-                                    base_solution_for_agentic = task.solution_from_raw_code_for_agentic(
-                                        raw_code=base_raw_code,
-                                        round_num=round_num,
-                                        model_name=str(self.model_name),
-                                        target_gpu=str(self.target_gpu),
-                                        language=str(self.language),
+                                    base_solution_for_agentic = (
+                                        task.solution_from_raw_code_for_agentic(
+                                            raw_code=base_raw_code,
+                                            round_num=round_num,
+                                            model_name=str(self.model_name),
+                                            target_gpu=str(self.target_gpu),
+                                            language=str(self.language),
+                                        )
                                     )
                                 except Exception:
                                     base_solution_for_agentic = None
                         else:
                             last_attempt_passed = bool(
-                                last_eval is not None and getattr(last_eval, "is_passed", lambda: False)()
+                                last_eval is not None
+                                and getattr(last_eval, "is_passed", lambda: False)()
                             )
                             agentic_mode = "improve" if last_attempt_passed else "debug"
                             agentic_action = (
@@ -1747,11 +2005,17 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 + "\n\nContinue the same action. If the previous attempt failed, fix it first. "
                                 "If it passed, improve latency without broadening scope."
                             )
-                            base_solution_for_agentic = last_solution or cycle_best_solution
+                            base_solution_for_agentic = (
+                                last_solution or cycle_best_solution
+                            )
 
-                        definition_hook = getattr(task, "get_agentic_definition_text", None)
+                        definition_hook = getattr(
+                            task, "get_agentic_definition_text", None
+                        )
                         if callable(definition_hook):
-                            agentic_definition = str(definition_hook(language=str(self.language)) or "")
+                            agentic_definition = str(
+                                definition_hook(language=str(self.language)) or ""
+                            )
                         else:
                             agentic_definition = _definition_text_for_codegen_prompt(
                                 task,
@@ -1800,10 +2064,12 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 if agentic_cycle is None:
                                     # No existing session (first attempt failed to produce one);
                                     # fall back to a fresh session.
-                                    agentic_cycle_cm = self._agentic_runner().open_cycle(
-                                        task=task,
-                                        request=request,
-                                        base_solution=base_solution_for_agentic,
+                                    agentic_cycle_cm = (
+                                        self._agentic_runner().open_cycle(
+                                            task=task,
+                                            request=request,
+                                            base_solution=base_solution_for_agentic,
+                                        )
                                     )
                                     agentic_cycle = agentic_cycle_cm.__enter__()
                                     result = agentic_cycle.run_initial()
@@ -1818,7 +2084,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                             "If the implementation already matches the design and there is no clear "
                                             "performance opportunity, preserve the current implementation and explain that."
                                         )
-                                        result = agentic_cycle.continue_improve(improve_prompt)
+                                        result = agentic_cycle.continue_improve(
+                                            improve_prompt
+                                        )
                                     else:
                                         fix_base = _build_fix_prompt(
                                             eval_result=last_eval,
@@ -1831,15 +2099,21 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                         )
                                         result = agentic_cycle.continue_fix(fix_prompt)
                         except LLMProviderFatalError as exc:
-                            _emit(f"[ERROR] fatal LLM provider error during agentic codegen: {exc}")
+                            _emit(
+                                f"[ERROR] fatal LLM provider error during agentic codegen: {exc}"
+                            )
                             if agentic_cycle_cm is not None:
-                                agentic_cycle_cm.__exit__(type(exc), exc, exc.__traceback__)
+                                agentic_cycle_cm.__exit__(
+                                    type(exc), exc, exc.__traceback__
+                                )
                                 agentic_cycle_cm = None
                                 agentic_cycle = None
                             raise
                         except (TimeoutError, ValueError, RuntimeError) as exc:
                             if agentic_cycle_cm is not None:
-                                agentic_cycle_cm.__exit__(type(exc), exc, exc.__traceback__)
+                                agentic_cycle_cm.__exit__(
+                                    type(exc), exc, exc.__traceback__
+                                )
                                 agentic_cycle_cm = None
                                 agentic_cycle = None
                             diagnosis = diagnose_tool_protocol_failure(
@@ -1848,7 +2122,10 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                         TelemetryContext(
                                             run_id=effective_run_id,
                                             task_name=agentic_task_name,
-                                            definition=getattr(task, "definition_name", None) or agentic_task_name,
+                                            definition=getattr(
+                                                task, "definition_name", None
+                                            )
+                                            or agentic_task_name,
                                             flow="agentic_codegen_multi_turn",
                                             stage=str(agentic_mode),
                                             round_index=int(round_num),
@@ -1882,7 +2159,10 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                         f"recovery_prompt: {diagnosis.recovery_prompt}"
                                     )
                                 _emit(f"[WARN] {msg}")
-                                metrics: dict[str, Any] = {"score_name": "codegen", "score": -1.0}
+                                metrics: dict[str, Any] = {
+                                    "score_name": "codegen",
+                                    "score": -1.0,
+                                }
                                 if diagnosis is not None:
                                     metrics.update(diagnosis.to_dict())
                                 round_eval = EvalResult(
@@ -1894,14 +2174,17 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 try:
                                     _nar = getattr(self, "_narrative", None)
                                     if _nar is not None:
-                                        _nar.eval_result(round_num=round_num, eval_result=round_eval)
+                                        _nar.eval_result(
+                                            round_num=round_num, eval_result=round_eval
+                                        )
                                 except Exception:
                                     pass
                                 rounds_consumed = max(rounds_consumed, attempt_idx)
                                 if (
                                     diagnosis is not None
                                     and diagnosis.retryable
-                                    and (cycle_start_round + rounds_consumed) <= max_opt_rounds
+                                    and (cycle_start_round + rounds_consumed)
+                                    <= max_opt_rounds
                                 ):
                                     _emit(
                                         f"[RETRY] retryable tool protocol error in agentic attempt {attempt_idx}; "
@@ -1918,7 +2201,8 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                                 error_type="ToolProtocolError",
                                                 error_message=diagnosis.message,
                                                 retryable=diagnosis.retryable,
-                                                stage=diagnosis.stage or str(agentic_mode),
+                                                stage=diagnosis.stage
+                                                or str(agentic_mode),
                                                 detail=diagnosis.recovery_prompt,
                                                 extra={
                                                     "unknown_tool": diagnosis.unknown_tool,
@@ -1945,9 +2229,13 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 break
                         else:
                             solution = result.solution
-                            current_code, current_raw_code = code_from_solution(self.language, solution)
+                            current_code, current_raw_code = code_from_solution(
+                                self.language, solution
+                            )
                             last_solution = solution
-                            current_wm_code = _wm_guardrail(_code_for_wm_from_raw(current_raw_code))
+                            current_wm_code = _wm_guardrail(
+                                _code_for_wm_from_raw(current_raw_code)
+                            )
                             _emit(
                                 f"[LLM] agentic ascendc result round={round_num} "
                                 f"prompt_chars={result.prompt_chars} "
@@ -1956,15 +2244,23 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             )
                             _stage(f"use agentic worktree eval (round {round_num})")
                             round_eval = result.eval_result
-                            all_passed = bool(getattr(round_eval, "is_passed", lambda: False)())
-                            round_score = float(getattr(round_eval, "score", lambda: -1.0)())
+                            all_passed = bool(
+                                getattr(round_eval, "is_passed", lambda: False)()
+                            )
+                            round_score = float(
+                                getattr(round_eval, "score", lambda: -1.0)()
+                            )
                             last_eval = round_eval
                             try:
                                 _nar = getattr(self, "_narrative", None)
                                 if _nar is not None:
                                     _details = []
                                     if isinstance(result.artifact_paths, dict):
-                                        for _k in ("transcript_path", "prompt_path", "manifest_path"):
+                                        for _k in (
+                                            "transcript_path",
+                                            "prompt_path",
+                                            "manifest_path",
+                                        ):
                                             _v = result.artifact_paths.get(_k)
                                             if _v:
                                                 _details.append(str(_v))
@@ -1976,21 +2272,35 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                         diff=str(result.diff_text or ""),
                                         detail_paths=_details,
                                     )
-                                    _nar.eval_result(round_num=round_num, eval_result=round_eval)
+                                    _nar.eval_result(
+                                        round_num=round_num, eval_result=round_eval
+                                    )
                             except Exception:
                                 pass
                             if all_passed and round_score > best_score:
                                 best_score = float(round_score)
                                 best_eval = round_eval
                                 best_solution = solution
-                                from k_search.kernel_generators.memory import save_code_map_if_adopted, save_knowledge_if_adopted
+                                from k_search.kernel_generators.memory import (
+                                    save_code_map_if_adopted,
+                                    save_knowledge_if_adopted,
+                                )
+
                                 save_code_map_if_adopted(
                                     task=task,
-                                    code_map_text=getattr(result, "code_map_text", None),
+                                    code_map_text=getattr(
+                                        result, "code_map_text", None
+                                    ),
                                     adopted=True,
-                                    solution_id=solution.hash() if hasattr(solution, "hash") else None,
+                                    solution_id=(
+                                        solution.hash()
+                                        if hasattr(solution, "hash")
+                                        else None
+                                    ),
                                     parent_solution_id=(
-                                        selected_strategy_context.get("parent_solution_id")
+                                        selected_strategy_context.get(
+                                            "parent_solution_id"
+                                        )
                                         if isinstance(selected_strategy_context, dict)
                                         else None
                                     ),
@@ -1999,17 +2309,23 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                         if result.candidate_patch is not None
                                         else None
                                     ),
-                                    action_node_id=str(chosen_leaf) if chosen_leaf else None,
+                                    action_node_id=(
+                                        str(chosen_leaf) if chosen_leaf else None
+                                    ),
                                     strategy_id=(
                                         selected_strategy_context.get("strategy_id")
                                         if isinstance(selected_strategy_context, dict)
                                         else None
                                     ),
                                     branch_id=str(chosen_leaf) if chosen_leaf else None,
-                                    eval_status=str(getattr(round_eval, "status", "") or ""),
+                                    eval_status=str(
+                                        getattr(round_eval, "status", "") or ""
+                                    ),
                                     speedup_vs_parent=(
                                         round_eval.metrics.get("speedup_vs_parent")
-                                        if isinstance(getattr(round_eval, "metrics", None), dict)
+                                        if isinstance(
+                                            getattr(round_eval, "metrics", None), dict
+                                        )
                                         else None
                                     ),
                                     created_round=int(round_num),
@@ -2017,7 +2333,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 )
                                 save_knowledge_if_adopted(
                                     task=task,
-                                    knowledge_text=getattr(result, "knowledge_text", None),
+                                    knowledge_text=getattr(
+                                        result, "knowledge_text", None
+                                    ),
                                     adopted=True,
                                 )
                             if all_passed:
@@ -2034,14 +2352,24 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                         else None
                                     )
                                     cycle_best_manifest_path = (
-                                        (result.artifact_paths or {}).get("manifest_path")
+                                        (result.artifact_paths or {}).get(
+                                            "manifest_path"
+                                        )
                                         if isinstance(result.artifact_paths, dict)
                                         else None
                                     )
-                                    cycle_best_changed_paths = list(result.changed_paths or [])
-                                    cycle_best_diff_summary = str(result.diff_text or "")[:4000]
-                                    cycle_best_project_snapshot = getattr(result, "project_snapshot", None)
-                                    cycle_best_session_id = getattr(result, "session_id", None)
+                                    cycle_best_changed_paths = list(
+                                        result.changed_paths or []
+                                    )
+                                    cycle_best_diff_summary = str(
+                                        result.diff_text or ""
+                                    )[:4000]
+                                    cycle_best_project_snapshot = getattr(
+                                        result, "project_snapshot", None
+                                    )
+                                    cycle_best_session_id = getattr(
+                                        result, "session_id", None
+                                    )
                                     cycle_best_adopted_solution_id = self._adopt_passed_candidate_to_active_leaf(
                                         task=task,
                                         run_id=effective_run_id,
@@ -2075,7 +2403,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 next_attempt_idx=attempt_idx + 1,
                                 world_model_json=self._wm.get(task.name),
                                 solution_db_path=(
-                                    self._solution_db.jsonl_path if self._solution_db is not None else None
+                                    self._solution_db.jsonl_path
+                                    if self._solution_db is not None
+                                    else None
                                 ),
                                 best_solution=best_solution,
                                 best_eval=best_eval,
@@ -2090,12 +2420,16 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                     else None
                                 ),
                                 candidate_diff=str(result.diff_text or ""),
-                                project_snapshot=getattr(result, "project_snapshot", None),
+                                project_snapshot=getattr(
+                                    result, "project_snapshot", None
+                                ),
                                 claude_session={
                                     "schema_version": 1,
                                     "session_id": getattr(result, "session_id", None),
                                     "cwd": None,
-                                    "resume_supported": bool(getattr(result, "session_id", None)),
+                                    "resume_supported": bool(
+                                        getattr(result, "session_id", None)
+                                    ),
                                     "file_checkpointing_enabled": False,
                                     "session_store_enabled": False,
                                     "session_store_kind": None,
@@ -2104,23 +2438,32 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 max_opt_rounds=max_opt_rounds,
                                 wm_stagnation_window=wm_stagnation_window,
                                 wm_max_difficulty=getattr(
-                                    getattr(getattr(self._wm, "_cfg", None), "selection_policy", None),
+                                    getattr(
+                                        getattr(self._wm, "_cfg", None),
+                                        "selection_policy",
+                                        None,
+                                    ),
                                     "max_difficulty_1_to_5",
                                     None,
                                 ),
                             )
                             rounds_consumed += 1
-                            if no_improve_streak >= stagnation_window or no_improve_over_base_streak >= stagnation_window:
+                            if (
+                                no_improve_streak >= stagnation_window
+                                or no_improve_over_base_streak >= stagnation_window
+                            ):
                                 break
                             continue
                     elif attempt_idx == 1:
                         # If the action's parent has an attached solution (including root when continuing),
                         # start from that base_code; otherwise fall back to spec+action.
                         if isinstance(base_raw_code, str) and base_raw_code.strip():
-                            codegen_definition_text = _definition_text_for_codegen_prompt(
-                                task,
-                                language=str(self.language),
-                                has_explicit_base_code=True,
+                            codegen_definition_text = (
+                                _definition_text_for_codegen_prompt(
+                                    task,
+                                    language=str(self.language),
+                                    has_explicit_base_code=True,
+                                )
                             )
                             prompt = get_generate_code_from_action_prompt_from_text(
                                 self.language,
@@ -2131,10 +2474,12 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 target_gpu=self.target_gpu,
                             )
                         else:
-                            codegen_definition_text = _definition_text_for_codegen_prompt(
-                                task,
-                                language=str(self.language),
-                                has_explicit_base_code=False,
+                            codegen_definition_text = (
+                                _definition_text_for_codegen_prompt(
+                                    task,
+                                    language=str(self.language),
+                                    has_explicit_base_code=False,
+                                )
                             )
                             prompt = get_generate_code_from_spec_with_action_prompt_from_text(
                                 self.language,
@@ -2160,46 +2505,81 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
 
                             # Perf summary should match the code we include as `base_code` in the prompt.
                             base_perf_eval: Optional[EvalResult] = None
-                            if isinstance(base_for_debug, str) and base_for_debug.strip():
-                                if base_for_debug == cycle_best_raw and cycle_best_eval is not None:
+                            if (
+                                isinstance(base_for_debug, str)
+                                and base_for_debug.strip()
+                            ):
+                                if (
+                                    base_for_debug == cycle_best_raw
+                                    and cycle_best_eval is not None
+                                ):
                                     base_perf_eval = cycle_best_eval
-                                elif base_for_debug == base_raw_code and base_eval is not None:
+                                elif (
+                                    base_for_debug == base_raw_code
+                                    and base_eval is not None
+                                ):
                                     base_perf_eval = base_eval
 
                             perf_summary_lines: list[str] = []
                             if last_eval is not None:
-                                perf_summary_lines.extend(last_eval.perf_summary_lines(prefix="last_attempt"))
+                                perf_summary_lines.extend(
+                                    last_eval.perf_summary_lines(prefix="last_attempt")
+                                )
                             if base_perf_eval is not None:
-                                perf_summary_lines.extend(base_perf_eval.perf_summary_lines(prefix="base"))
+                                perf_summary_lines.extend(
+                                    base_perf_eval.perf_summary_lines(prefix="base")
+                                )
                             perf_summary = "\n".join(perf_summary_lines).strip()
-                            current_code_for_prompt = _code_for_codegen_prompt_from_raw(current_raw_code)
-                            codegen_definition_text = _definition_text_for_codegen_prompt(
-                                task,
-                                language=str(self.language),
-                                has_explicit_base_code=bool(
-                                    str(base_for_debug or "").strip()
-                                    and not str(base_for_debug).startswith("(no base code")
-                                ),
+                            current_code_for_prompt = _code_for_codegen_prompt_from_raw(
+                                current_raw_code
+                            )
+                            codegen_definition_text = (
+                                _definition_text_for_codegen_prompt(
+                                    task,
+                                    language=str(self.language),
+                                    has_explicit_base_code=bool(
+                                        str(base_for_debug or "").strip()
+                                        and not str(base_for_debug).startswith(
+                                            "(no base code"
+                                        )
+                                    ),
+                                )
                             )
                             if not has_passed_in_cycle:
-                                prompt = get_debug_and_improve_from_spec_prompt_from_text(
-                                    self.language,
-                                    definition_text=codegen_definition_text,
-                                    trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
-                                    current_code=current_code_for_prompt,
-                                    action_text=str(chosen_action_text or ""),
-                                    code_format=_code_format_text(),
-                                    debug_round=min(attempt_idx, max_dai),
-                                    max_rounds=max_dai,
-                                    target_gpu=self.target_gpu,
-                                    perf_summary=perf_summary,
-                                    base_code=base_for_debug,
+                                prompt = (
+                                    get_debug_and_improve_from_spec_prompt_from_text(
+                                        self.language,
+                                        definition_text=codegen_definition_text,
+                                        trace_logs=str(
+                                            getattr(
+                                                task,
+                                                "get_last_round_trace_logs_for_prompt",
+                                                lambda: "",
+                                            )()
+                                            or ""
+                                        ),
+                                        current_code=current_code_for_prompt,
+                                        action_text=str(chosen_action_text or ""),
+                                        code_format=_code_format_text(),
+                                        debug_round=min(attempt_idx, max_dai),
+                                        max_rounds=max_dai,
+                                        target_gpu=self.target_gpu,
+                                        perf_summary=perf_summary,
+                                        base_code=base_for_debug,
+                                    )
                                 )
                             else:
                                 prompt = get_improve_from_spec_prompt_from_text(
                                     self.language,
                                     definition_text=codegen_definition_text,
-                                    trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
+                                    trace_logs=str(
+                                        getattr(
+                                            task,
+                                            "get_last_round_trace_logs_for_prompt",
+                                            lambda: "",
+                                        )()
+                                        or ""
+                                    ),
                                     current_code=current_code_for_prompt,
                                     code_format=_code_format_text(),
                                     debug_round=min(attempt_idx, max_dai),
@@ -2220,29 +2600,55 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 base_for_debug = cycle_best_raw
 
                             base_perf_eval: Optional[EvalResult] = None
-                            if isinstance(base_for_debug, str) and base_for_debug.strip():
-                                if base_for_debug == cycle_best_raw and cycle_best_eval is not None:
+                            if (
+                                isinstance(base_for_debug, str)
+                                and base_for_debug.strip()
+                            ):
+                                if (
+                                    base_for_debug == cycle_best_raw
+                                    and cycle_best_eval is not None
+                                ):
                                     base_perf_eval = cycle_best_eval
-                                elif base_for_debug == base_raw_code and base_eval is not None:
+                                elif (
+                                    base_for_debug == base_raw_code
+                                    and base_eval is not None
+                                ):
                                     base_perf_eval = base_eval
 
                             perf_summary_lines: list[str] = []
                             if last_eval is not None:
-                                perf_summary_lines.extend(last_eval.perf_summary_lines(prefix="last_attempt"))
+                                perf_summary_lines.extend(
+                                    last_eval.perf_summary_lines(prefix="last_attempt")
+                                )
                             if base_perf_eval is not None:
-                                perf_summary_lines.extend(base_perf_eval.perf_summary_lines(prefix="base"))
+                                perf_summary_lines.extend(
+                                    base_perf_eval.perf_summary_lines(prefix="base")
+                                )
                             perf_summary = "\n".join(perf_summary_lines).strip()
-                            current_code_for_prompt = _code_for_codegen_prompt_from_raw(current_raw_code)
-                            codegen_definition_text = _definition_text_for_codegen_prompt(
-                                task,
-                                language=str(self.language),
-                                has_explicit_base_code=bool(str(base_for_debug or "").strip()),
+                            current_code_for_prompt = _code_for_codegen_prompt_from_raw(
+                                current_raw_code
+                            )
+                            codegen_definition_text = (
+                                _definition_text_for_codegen_prompt(
+                                    task,
+                                    language=str(self.language),
+                                    has_explicit_base_code=bool(
+                                        str(base_for_debug or "").strip()
+                                    ),
+                                )
                             )
                             if not has_passed_in_cycle:
                                 prompt = get_debug_generated_code_prompt_from_text(
                                     self.language,
                                     definition_text=codegen_definition_text,
-                                    trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
+                                    trace_logs=str(
+                                        getattr(
+                                            task,
+                                            "get_last_round_trace_logs_for_prompt",
+                                            lambda: "",
+                                        )()
+                                        or ""
+                                    ),
                                     base_code=base_for_debug,
                                     buggy_code=current_code_for_prompt,
                                     action_text=str(chosen_action_text or ""),
@@ -2256,7 +2662,14 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 prompt = get_improve_generated_code_prompt_from_text(
                                     self.language,
                                     definition_text=codegen_definition_text,
-                                    trace_logs=str(getattr(task, "get_last_round_trace_logs_for_prompt", lambda: "")() or ""),
+                                    trace_logs=str(
+                                        getattr(
+                                            task,
+                                            "get_last_round_trace_logs_for_prompt",
+                                            lambda: "",
+                                        )()
+                                        or ""
+                                    ),
                                     base_code=base_for_debug,
                                     current_code=current_code_for_prompt,
                                     code_format=_code_format_text(),
@@ -2266,7 +2679,14 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                     perf_summary=perf_summary,
                                 )
 
-                    prompt = prompt + "\n\n" + render_world_model_section(self._wm.get(task.name), max_chars=self._world_model_max_chars)
+                    prompt = (
+                        prompt
+                        + "\n\n"
+                        + render_world_model_section(
+                            self._wm.get(task.name),
+                            max_chars=self._world_model_max_chars,
+                        )
+                    )
                     prompt = _append_baseline_hint(prompt)
 
                     try:
@@ -2274,7 +2694,11 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             operator=str(getattr(task, "name", "") or ""),
                             flow="world_model",
                             round_index=round_num,
-                            stage=("action_codegen" if attempt_idx == 1 else "debug_codegen"),
+                            stage=(
+                                "action_codegen"
+                                if attempt_idx == 1
+                                else "debug_codegen"
+                            ),
                             action_node_id=str(chosen_leaf or ""),
                             debug_attempt=attempt_idx,
                             max_debug_attempts=max_dai,
@@ -2282,7 +2706,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             language=str(self.language),
                             target_gpu=str(self.target_gpu),
                         ):
-                            code_result = self._generate_code_from_prompt(prompt, task=task)
+                            code_result = self._generate_code_from_prompt(
+                                prompt, task=task
+                            )
                     except LLMProviderFatalError as exc:
                         _emit(f"[ERROR] fatal LLM provider error during codegen: {exc}")
                         raise
@@ -2308,7 +2734,11 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                     error_type=type(exc).__name__,
                                     error_message=str(exc),
                                     retryable=False,
-                                    stage=("action_codegen" if attempt_idx == 1 else "debug_codegen"),
+                                    stage=(
+                                        "action_codegen"
+                                        if attempt_idx == 1
+                                        else "debug_codegen"
+                                    ),
                                     detail=msg,
                                 )
                         except Exception:
@@ -2318,15 +2748,24 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     current_raw_code = code_result["raw"]
                     _emit_kernel_cu(current_code)
                     current_wm_code = (
-                        (current_code.get("kernel.cu") if isinstance(current_code, dict) else None)
+                        (
+                            current_code.get("kernel.cu")
+                            if isinstance(current_code, dict)
+                            else None
+                        )
                         if (self.language or "").lower() == "cuda"
                         else None
                     )
-                    if not isinstance(current_wm_code, str) or not current_wm_code.strip():
+                    if (
+                        not isinstance(current_wm_code, str)
+                        or not current_wm_code.strip()
+                    ):
                         current_wm_code = _code_for_wm_from_raw(current_raw_code)
                     current_wm_code = _wm_guardrail(str(current_wm_code or ""))
 
-                    _stage(f"create Solution object from current code (round {round_num})")
+                    _stage(
+                        f"create Solution object from current code (round {round_num})"
+                    )
                     solution = self._create_solution_from_code(
                         cleaned_code=current_code,
                         raw_code=current_raw_code,
@@ -2346,11 +2785,15 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             _nar.llm_codegen(
                                 round_num=round_num,
                                 attempt=attempt_idx,
-                                mode=("action" if attempt_idx == 1 else "debug/improve"),
+                                mode=(
+                                    "action" if attempt_idx == 1 else "debug/improve"
+                                ),
                                 prompt=prompt,
                                 response=str(current_raw_code or ""),
                             )
-                            _nar.eval_result(round_num=round_num, eval_result=round_eval)
+                            _nar.eval_result(
+                                round_num=round_num, eval_result=round_eval
+                            )
                     except Exception:
                         pass
 
@@ -2362,7 +2805,11 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
 
                     # If all workloads passed in this round, log a W&B artifact containing the generated code
                     # (and a WM snapshot) for traceability.
-                    if all_passed and wandb is not None and getattr(wandb, "run", None) is not None:
+                    if (
+                        all_passed
+                        and wandb is not None
+                        and getattr(wandb, "run", None) is not None
+                    ):
                         try:
                             import tempfile
 
@@ -2387,7 +2834,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                         p = tmpdir_p / filename
                                         p.parent.mkdir(parents=True, exist_ok=True)
                                         p.write_text(str(content or ""))
-                                        artifact.add_file(str(p), name=f"clean/{filename}")
+                                        artifact.add_file(
+                                            str(p), name=f"clean/{filename}"
+                                        )
                                 else:
                                     p = tmpdir_p / "main.py"
                                     p.parent.mkdir(parents=True, exist_ok=True)
@@ -2396,13 +2845,21 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
 
                                 # Raw code (as generated from the LLM before cleaning)
                                 raw_path = tmpdir_p / "raw_code.txt"
-                                raw_path.write_text(str(current_raw_code) if current_raw_code is not None else "")
-                                artifact.add_file(str(raw_path), name="raw/raw_code.txt")
+                                raw_path.write_text(
+                                    str(current_raw_code)
+                                    if current_raw_code is not None
+                                    else ""
+                                )
+                                artifact.add_file(
+                                    str(raw_path), name="raw/raw_code.txt"
+                                )
 
                                 # World model snapshot (best-effort)
                                 wm_path = tmpdir_p / "world_model.json"
                                 wm_path.write_text(str(self._wm.get(task.name) or ""))
-                                artifact.add_file(str(wm_path), name="wm/world_model.json")
+                                artifact.add_file(
+                                    str(wm_path), name="wm/world_model.json"
+                                )
 
                                 # Round-level eval summary (best-effort)
                                 summary_path = tmpdir_p / "round_summary.txt"
@@ -2416,7 +2873,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                         f"latency_ms={getattr(round_eval, 'latency_ms', None)}\n"
                                     )
                                 )
-                                artifact.add_file(str(summary_path), name="eval/round_summary.txt")
+                                artifact.add_file(
+                                    str(summary_path), name="eval/round_summary.txt"
+                                )
 
                             wandb.log_artifact(artifact)
                         except Exception:
@@ -2437,14 +2896,16 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             cycle_best_raw = str(current_raw_code or "")
                             cycle_best_wm_code = str(current_wm_code or "")
                             cycle_best_round = int(round_num)
-                            cycle_best_adopted_solution_id = self._adopt_passed_candidate_to_active_leaf(
-                                task=task,
-                                run_id=effective_run_id,
-                                action_node_id=str(chosen_leaf or ""),
-                                solution=cycle_best_solution,
-                                eval_result=cycle_best_eval,
-                                round_index=cycle_best_round,
-                                code_text=cycle_best_raw,
+                            cycle_best_adopted_solution_id = (
+                                self._adopt_passed_candidate_to_active_leaf(
+                                    task=task,
+                                    run_id=effective_run_id,
+                                    action_node_id=str(chosen_leaf or ""),
+                                    solution=cycle_best_solution,
+                                    eval_result=cycle_best_eval,
+                                    round_index=cycle_best_round,
+                                    code_text=cycle_best_raw,
+                                )
                             )
                             no_improve_streak = 0
                         else:
@@ -2470,7 +2931,11 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         next_round=round_num + 1,
                         next_attempt_idx=attempt_idx + 1,
                         world_model_json=self._wm.get(task.name),
-                        solution_db_path=(self._solution_db.jsonl_path if self._solution_db is not None else None),
+                        solution_db_path=(
+                            self._solution_db.jsonl_path
+                            if self._solution_db is not None
+                            else None
+                        ),
                         best_solution=best_solution,
                         best_eval=best_eval,
                         best_score=best_score,
@@ -2481,7 +2946,11 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         max_opt_rounds=max_opt_rounds,
                         wm_stagnation_window=wm_stagnation_window,
                         wm_max_difficulty=getattr(
-                            getattr(getattr(self._wm, "_cfg", None), "selection_policy", None),
+                            getattr(
+                                getattr(self._wm, "_cfg", None),
+                                "selection_policy",
+                                None,
+                            ),
                             "max_difficulty_1_to_5",
                             None,
                         ),
@@ -2494,7 +2963,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             try:
                                 round_sn = (
                                     round_eval.metrics.get("score_name")
-                                    if isinstance(getattr(round_eval, "metrics", None), dict)
+                                    if isinstance(
+                                        getattr(round_eval, "metrics", None), dict
+                                    )
                                     else None
                                 )
                             except Exception:
@@ -2505,7 +2976,13 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 else f"{task.name}/generate/round_score"
                             )
                             wandb.log(
-                                {round_key: (float(round_score) if (all_passed and round_score > 0) else None)},
+                                {
+                                    round_key: (
+                                        float(round_score)
+                                        if (all_passed and round_score > 0)
+                                        else None
+                                    )
+                                },
                                 step=round_num,
                             )
 
@@ -2516,12 +2993,24 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                                 if best_eval is not None
                                 else f"{task.name}/generate/best_score"
                             )
-                            wandb.log({key: (float(best_score) if best_eval is not None else None)}, step=round_num)
+                            wandb.log(
+                                {
+                                    key: (
+                                        float(best_score)
+                                        if best_eval is not None
+                                        else None
+                                    )
+                                },
+                                step=round_num,
+                            )
                         except Exception:
                             pass
 
                     rounds_consumed += 1
-                    if no_improve_streak >= stagnation_window or no_improve_over_base_streak >= stagnation_window:
+                    if (
+                        no_improve_streak >= stagnation_window
+                        or no_improve_over_base_streak >= stagnation_window
+                    ):
                         break
 
                 # Close any open multi-turn agentic cycle at cycle end.
@@ -2537,7 +3026,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     agentic_cycle = None
 
             if cycle_best_solution is not None and cycle_best_eval is not None:
-                _stage(f"cycle end: attach+refine best PASSED (round {cycle_best_round}, score={cycle_best_score:.3f})")
+                _stage(
+                    f"cycle end: attach+refine best PASSED (round {cycle_best_round}, score={cycle_best_score:.3f})"
+                )
                 if self._solution_db is not None and not cycle_best_adopted_solution_id:
                     rec_best = self._solution_db.add(
                         solution=cycle_best_solution,
@@ -2545,7 +3036,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         code_text=str(cycle_best_raw or ""),
                         parent_solution_id=None,
                     )
-                    self._wm.set_active_leaf_id(definition_name=task.name, node_id=chosen_leaf)
+                    self._wm.set_active_leaf_id(
+                        definition_name=task.name, node_id=chosen_leaf
+                    )
                     self._wm.attach_solution_to_active_leaf(
                         definition_name=task.name,
                         solution_id=rec_best.solution_id,
@@ -2562,8 +3055,12 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         adoption_reason="selected_as_current_parent",
                     )
                     _emit(render_world_model_status(self._wm.get(task.name)))
-                    self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
-                    wm_after_attach = load_world_model_obj(self._wm.get(task.name) or "")
+                    self._persist_world_model_snapshot(
+                        task=task, run_id=effective_run_id
+                    )
+                    wm_after_attach = load_world_model_obj(
+                        self._wm.get(task.name) or ""
+                    )
                     if isinstance(wm_after_attach, dict):
                         self._persist_strategy_state_artifact(
                             task=task,
@@ -2584,8 +3081,12 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                         definition_name=task.name,
                         definition_text=definition_text,
                         chosen_action_text=chosen_action_text,
-                        current_code_excerpt=_wm_guardrail(str(cycle_best_wm_code or "")),
-                        current_tree_path=self._wm.get_tree_path_text(definition_name=task.name),
+                        current_code_excerpt=_wm_guardrail(
+                            str(cycle_best_wm_code or "")
+                        ),
+                        current_tree_path=self._wm.get_tree_path_text(
+                            definition_name=task.name
+                        ),
                         eval_result=cycle_best_eval,
                         prediction=prediction,
                         round_index=cycle_best_round,
@@ -2610,7 +3111,11 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     action_node_id=str(chosen_leaf or ""),
                     next_round=cycle_start_round + max(1, rounds_consumed),
                     world_model_json=self._wm.get(task.name),
-                    solution_db_path=(self._solution_db.jsonl_path if self._solution_db is not None else None),
+                    solution_db_path=(
+                        self._solution_db.jsonl_path
+                        if self._solution_db is not None
+                        else None
+                    ),
                     best_solution=best_solution,
                     best_eval=best_eval,
                     best_score=best_score,
@@ -2635,7 +3140,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     max_opt_rounds=max_opt_rounds,
                     wm_stagnation_window=wm_stagnation_window,
                     wm_max_difficulty=getattr(
-                        getattr(getattr(self._wm, "_cfg", None), "selection_policy", None),
+                        getattr(
+                            getattr(self._wm, "_cfg", None), "selection_policy", None
+                        ),
                         "max_difficulty_1_to_5",
                         None,
                     ),
@@ -2662,8 +3169,12 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             definition_name=task.name,
                             definition_text=definition_text,
                             chosen_action_text=chosen_action_text,
-                            current_code_excerpt=_wm_guardrail(str(_code_for_wm_from_raw(current_raw_code) or "")),
-                            current_tree_path=self._wm.get_tree_path_text(definition_name=task.name),
+                            current_code_excerpt=_wm_guardrail(
+                                str(_code_for_wm_from_raw(current_raw_code) or "")
+                            ),
+                            current_tree_path=self._wm.get_tree_path_text(
+                                definition_name=task.name
+                            ),
                             eval_result=er_fail,
                             debug_and_improve_round=min(rounds_consumed, max_dai),
                             debug_and_improve_max_rounds=max_dai,
@@ -2671,22 +3182,29 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                             round_index=cycle_start_round + max(0, rounds_consumed - 1),
                         )
                     _emit(render_world_model_status(self._wm.get(task.name)))
-                    self._persist_world_model_snapshot(task=task, run_id=effective_run_id)
+                    self._persist_world_model_snapshot(
+                        task=task, run_id=effective_run_id
+                    )
                     try:
                         _nar = getattr(self, "_narrative", None)
                         if _nar is not None:
                             _nar.world_model_update(
                                 kind="too_hard",
-                                round_num=cycle_start_round + max(0, rounds_consumed - 1),
+                                round_num=cycle_start_round
+                                + max(0, rounds_consumed - 1),
                                 detail=f"action {chosen_leaf} marked too hard after {rounds_consumed} round(s)",
                             )
                     except Exception:
                         pass
                 except LLMProviderFatalError as exc:
-                    _emit(f"[ERROR] world model too-hard update failed with fatal provider error: {exc}")
+                    _emit(
+                        f"[ERROR] world model too-hard update failed with fatal provider error: {exc}"
+                    )
                     raise
                 except Exception as exc:
-                    _emit(f"[WARN] world model too-hard update failed: {type(exc).__name__}: {exc}")
+                    _emit(
+                        f"[WARN] world model too-hard update failed: {type(exc).__name__}: {exc}"
+                    )
                 self._save_cycle_checkpoint_if_enabled(
                     task=task,
                     round_index=cycle_start_round + max(0, rounds_consumed - 1),
@@ -2694,7 +3212,11 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     action_node_id=str(chosen_leaf or ""),
                     next_round=cycle_start_round + max(1, rounds_consumed),
                     world_model_json=self._wm.get(task.name),
-                    solution_db_path=(self._solution_db.jsonl_path if self._solution_db is not None else None),
+                    solution_db_path=(
+                        self._solution_db.jsonl_path
+                        if self._solution_db is not None
+                        else None
+                    ),
                     best_solution=best_solution,
                     best_eval=best_eval,
                     best_score=best_score,
@@ -2705,7 +3227,9 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
                     max_opt_rounds=max_opt_rounds,
                     wm_stagnation_window=wm_stagnation_window,
                     wm_max_difficulty=getattr(
-                        getattr(getattr(self._wm, "_cfg", None), "selection_policy", None),
+                        getattr(
+                            getattr(self._wm, "_cfg", None), "selection_policy", None
+                        ),
                         "max_difficulty_1_to_5",
                         None,
                     ),
@@ -2719,9 +3243,11 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             if _nar is not None and not run_failed:
                 _be = best_eval
                 _nar.run_end(
-                    best_round=getattr(_be, "metrics", {}).get("round")
-                    if isinstance(getattr(_be, "metrics", None), dict)
-                    else None,
+                    best_round=(
+                        getattr(_be, "metrics", {}).get("round")
+                        if isinstance(getattr(_be, "metrics", None), dict)
+                        else None
+                    ),
                     latency_ms=getattr(_be, "latency_ms", None),
                     vs_baseline=getattr(_be, "mean_vs_baseline_factor", None),
                     total_rounds=cycle_start_round - 1,
@@ -2734,4 +3260,6 @@ class WorldModelKernelGeneratorWithBaseline(KernelGenerator):
             return best_solution
         if last_solution is not None:
             return last_solution
-        raise ValueError(f"[{task.name}] No solution was generated (best_solution and last_solution are None).")
+        raise ValueError(
+            f"[{task.name}] No solution was generated (best_solution and last_solution are None)."
+        )

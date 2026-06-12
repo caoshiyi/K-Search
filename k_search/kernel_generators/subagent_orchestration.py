@@ -11,6 +11,7 @@ from typing import Any
 
 from k_search.kernel_generators.claude_agent_project_editor import ClaudeProjectEditResult
 from k_search.kernel_generators.prompt_hygiene import check_prompt_hygiene_or_raise
+from k_search.kernel_generators.stage_transaction import StageTransactionExecutor
 from k_search.kernel_generators.worktree_context import assert_no_absolute_paths_for_llm
 from k_search.telemetry.events import TelemetryEvent
 
@@ -278,6 +279,20 @@ def run_configured_subagent_flow(
     owns_session = session is None
     if session is None:
         session = editor_client.open_session(project_dir=project_root, telemetry_recorder=telemetry_recorder)
+    transaction_executor = (
+        StageTransactionExecutor(
+            editor_client=editor_client,
+            project_dir=project_root,
+            telemetry_recorder=telemetry_recorder,
+            stage_checkpoint_manager=stage_checkpoint_manager,
+            checkpoint_task=checkpoint_task,
+            round_num=round_num if round_num is not None else 0,
+            attempt_idx=attempt_idx if attempt_idx is not None else 0,
+            runtime_state=runtime_state or {},
+        )
+        if stage_checkpoint_manager is not None
+        else None
+    )
     stage_results: list[ClaudeProjectEditResult] = []
     transcript = ""
     try:
@@ -297,46 +312,29 @@ def run_configured_subagent_flow(
             )
             if stage_prompt_sink is not None:
                 stage_prompt_sink.write(index=index, stage=stage, prompt=prompt, hygiene=hygiene)
-            if stage_checkpoint_manager is not None:
-                stage_checkpoint_manager.save_stage_start(
-                    task=checkpoint_task,
-                    project_dir=project_root,
+            if transaction_executor is not None:
+                outcome = transaction_executor.run_stage(
+                    session=session,
                     flow=flow,
                     stage=stage,
                     stage_index=flow_stage_index,
-                    round_num=round_num if round_num is not None else 0,
-                    attempt_idx=attempt_idx if attempt_idx is not None else 0,
                     prompt=prompt,
-                    session=session,
-                    runtime_state=runtime_state or {},
                 )
-            event_start = len(getattr(telemetry_recorder, "events", []) or [])
-            result = editor_client.send_prompt(
-                session,
-                prompt=prompt,
-                telemetry_recorder=telemetry_recorder,
-            )
-            _validate_stage_completion(
-                project_root=project_root,
-                stage=stage,
-                telemetry_recorder=telemetry_recorder,
-                event_start=event_start,
-                require_agent_tool_use=bool(getattr(editor_client, "require_agent_tool_use", False)),
-            )
-            if stage_checkpoint_manager is not None:
-                stage_checkpoint_manager.save_stage_completed(
-                    task=checkpoint_task,
-                    project_dir=project_root,
-                    flow=flow,
-                    stage=stage,
-                    stage_index=flow_stage_index,
-                    round_num=round_num if round_num is not None else 0,
-                    attempt_idx=attempt_idx if attempt_idx is not None else 0,
+                session = outcome.session
+                result = outcome.result
+            else:
+                event_start = len(getattr(telemetry_recorder, "events", []) or [])
+                result = editor_client.send_prompt(
+                    session,
                     prompt=prompt,
-                    result=result,
-                    session=session,
                     telemetry_recorder=telemetry_recorder,
-                    runtime_state=runtime_state or {},
+                )
+                _validate_stage_completion(
+                    project_root=project_root,
+                    stage=stage,
+                    telemetry_recorder=telemetry_recorder,
+                    event_start=event_start,
+                    require_agent_tool_use=bool(getattr(editor_client, "require_agent_tool_use", False)),
                 )
             stage_results.append(result)
             transcript = _merge_transcript(transcript, result.transcript)
@@ -352,6 +350,7 @@ def run_configured_subagent_flow(
         prompt=str(base_prompt or ""),
         prompt_chars=len(str(base_prompt or "")),
         prompt_lines=(str(base_prompt or "").count("\n") + 1 if base_prompt else 0),
+        session=session,
     )
 
 

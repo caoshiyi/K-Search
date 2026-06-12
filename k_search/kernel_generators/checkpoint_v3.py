@@ -88,6 +88,15 @@ class RestoredStageCheckpoint:
     session_id: str | None
 
 
+@dataclass(frozen=True)
+class RollbackRestoreResult:
+    checkpoint_id: str
+    manifest_path: Path
+    target_project_dir: Path
+    restored_snapshot_path: Path
+    restored_file_count: int
+
+
 def validate_stage_checkpoint_config(
     config: StageCheckpointConfig,
     *,
@@ -279,6 +288,67 @@ class StageCheckpointManager:
             next_stage_name=next_name,
             all_stages_completed=all_completed,
             session_id=session_id,
+        )
+
+    def restore_stage_start_to_project(
+        self,
+        checkpoint_manifest_path: str | Path,
+        target_project_dir: str | Path,
+    ) -> RollbackRestoreResult:
+        manifest_path = Path(checkpoint_manifest_path).expanduser()
+        if manifest_path.is_dir():
+            manifest_path = manifest_path / "manifest.json"
+        manifest_path = manifest_path.resolve()
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"stage_start checkpoint manifest not found: {manifest_path}"
+            )
+        checkpoint_root = manifest_path.parent
+        manifest = _read_json(manifest_path)
+        checkpoint_id = str(manifest.get("checkpoint_id") or checkpoint_root.name)
+        if str(manifest.get("checkpoint_kind") or "") != "stage_start":
+            raise ValueError(
+                "rollback restore requires a stage_start checkpoint manifest: "
+                f"{checkpoint_id}"
+            )
+
+        snapshot_ref = str(
+            (manifest.get("paths") or {}).get("pre_stage_project_snapshot") or ""
+        ).strip()
+        if not snapshot_ref:
+            stage_state = _read_json(checkpoint_root / "stage_state.json")
+            snapshot_ref = _snapshot_path_for_restore(stage_state, manifest) or ""
+        if not snapshot_ref:
+            raise FileNotFoundError(
+                f"stage_start checkpoint has no pre_stage_project_snapshot: {checkpoint_id}"
+            )
+        snapshot_path = (checkpoint_root / snapshot_ref).resolve()
+        snapshot = load_project_snapshot(snapshot_path)
+
+        target = Path(target_project_dir).expanduser().resolve()
+        target.mkdir(parents=True, exist_ok=True)
+        tmp_restore = (
+            target.parent
+            / f".rollback_restore_{safe_path_component(checkpoint_id, default='checkpoint')}_{os.getpid()}"
+        )
+        if tmp_restore.exists():
+            shutil.rmtree(tmp_restore)
+        try:
+            materialize_project_snapshot(snapshot, tmp_restore)
+            _clear_project_dir_except_git(target)
+            _copy_tree_contents(tmp_restore, target)
+            _restore_handoff_files(checkpoint_root=checkpoint_root, destination=target)
+        finally:
+            if tmp_restore.exists():
+                shutil.rmtree(tmp_restore)
+
+        restored_count = sum(1 for _ in target.rglob("*") if _.is_file() or _.is_symlink())
+        return RollbackRestoreResult(
+            checkpoint_id=checkpoint_id,
+            manifest_path=manifest_path,
+            target_project_dir=target,
+            restored_snapshot_path=snapshot_path,
+            restored_file_count=restored_count,
         )
 
     def _save_stage_checkpoint(
@@ -541,6 +611,35 @@ def _restore_handoff_files(*, checkpoint_root: Path, destination: Path) -> None:
         dst = destination / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
+
+
+def _clear_project_dir_except_git(project_dir: Path) -> None:
+    project_dir.mkdir(parents=True, exist_ok=True)
+    for child in sorted(project_dir.iterdir(), key=lambda item: item.name):
+        if child.name == ".git":
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
+def _copy_tree_contents(src_dir: Path, dst_dir: Path) -> None:
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for src in sorted(src_dir.iterdir(), key=lambda item: item.name):
+        dst = dst_dir / src.name
+        if src.is_dir() and not src.is_symlink():
+            shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
+        elif src.is_symlink():
+            if dst.exists() or dst.is_symlink():
+                if dst.is_dir() and not dst.is_symlink():
+                    shutil.rmtree(dst)
+                else:
+                    dst.unlink()
+            os.symlink(os.readlink(src), dst)
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
 
 
 def _build_stage_records(

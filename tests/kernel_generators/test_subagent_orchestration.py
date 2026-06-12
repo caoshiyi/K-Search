@@ -5,6 +5,10 @@ from types import SimpleNamespace
 import pytest
 
 from k_search.kernel_generators.claude_agent_project_editor import ClaudeProjectEditResult
+from k_search.kernel_generators.checkpoint_v3 import (
+    StageCheckpointConfig,
+    StageCheckpointManager,
+)
 from k_search.kernel_generators.subagent_orchestration import (
     SubagentFlowConfig,
     SubagentStageConfig,
@@ -572,6 +576,353 @@ def test_run_configured_subagent_flow_saves_stage_checkpoints_in_order(tmp_path)
         ("start", "reviewer", 2, 4, 2),
         ("completed", "reviewer", 2, 4, 2),
     ]
+
+
+def test_run_configured_subagent_flow_rolls_back_missing_required_output_and_retries_fresh_session(tmp_path):
+    project_dir = tmp_path / "project"
+    (project_dir / "kernel").mkdir(parents=True)
+    (project_dir / "kernel" / "foo.h").write_text("alpha\n", encoding="utf-8")
+    flow = SubagentFlowConfig(
+        name="test-flow",
+        description="Test flow.",
+        stages=(
+            SubagentStageConfig(
+                name="codegen",
+                agent="codegen",
+                instruction="Create implementation handoff.",
+                required_files=("IMPLEMENTATION_HANDOFF.md",),
+            ),
+        ),
+    )
+    manager = StageCheckpointManager(
+        artifacts_dir=tmp_path / "artifacts",
+        task_name="task",
+        task_id="task-id",
+        run_id="run-id",
+        config=StageCheckpointConfig(enabled=True),
+    )
+
+    class SessionClient:
+        def __init__(self):
+            self.opened: list[object] = []
+            self.closed: list[object] = []
+            self.prompts: list[str] = []
+
+        def open_session(self, *, project_dir, telemetry_recorder=None):
+            session = SimpleNamespace(
+                project_dir=Path(project_dir),
+                session_id=f"session-{len(self.opened) + 1}",
+                _closed=False,
+            )
+            self.opened.append(session)
+            return session
+
+        def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+            self.prompts.append(prompt)
+            root = Path(session.project_dir)
+            if len(self.prompts) == 1:
+                (root / "kernel" / "foo.h").write_text("dirty partial edit\n", encoding="utf-8")
+                return ClaudeProjectEditResult(
+                    text="forgot handoff",
+                    transcript="forgot handoff",
+                    prompt=prompt,
+                    prompt_chars=len(prompt),
+                    prompt_lines=prompt.count("\n") + 1,
+                )
+            assert (root / "kernel" / "foo.h").read_text(encoding="utf-8") == "alpha\n"
+            (root / "kernel" / "foo.h").write_text("clean retry edit\n", encoding="utf-8")
+            (root / "IMPLEMENTATION_HANDOFF.md").write_text(
+                "# handoff\nretry produced required handoff\n",
+                encoding="utf-8",
+            )
+            return ClaudeProjectEditResult(
+                text="retry done",
+                transcript="retry done",
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+        def close_session(self, session):
+            session._closed = True
+            self.closed.append(session)
+
+    client = SessionClient()
+
+    result = run_configured_subagent_flow(
+        editor_client=client,
+        project_dir=project_dir,
+        base_prompt="BASE",
+        flow=flow,
+        stage_checkpoint_manager=manager,
+        checkpoint_task=SimpleNamespace(name="task"),
+        round_num=3,
+        attempt_idx=1,
+        runtime_state={"attempt": {"flow_name": "test-flow"}},
+    )
+
+    assert result.text == "retry done"
+    assert [session.session_id for session in client.opened] == ["session-1", "session-2"]
+    assert [session.session_id for session in client.closed] == ["session-1", "session-2"]
+    assert len(client.prompts) == 2
+    assert (project_dir / "kernel" / "foo.h").read_text(encoding="utf-8") == "clean retry edit\n"
+
+    failure_roots = sorted((tmp_path / "artifacts" / "failures").iterdir())
+    assert len(failure_roots) == 1
+    scene_root = failure_roots[0]
+    scene_manifest = json.loads((scene_root / "scene_manifest.json").read_text(encoding="utf-8"))
+    assert scene_manifest["stage"] == "codegen"
+    assert scene_manifest["stage_retry_index"] == 0
+    assert scene_manifest["rollback_reason"] == "MISSING_REQUIRED_OUTPUT"
+    assert (
+        scene_root / "raw" / "project_before_rollback" / "kernel" / "foo.h"
+    ).read_text(encoding="utf-8") == "dirty partial edit\n"
+
+
+def test_run_configured_subagent_flow_rolls_back_invalid_review_notes_missing_eval_ready(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    flow = SubagentFlowConfig(
+        name="test-flow",
+        description="Test flow.",
+        stages=(
+            SubagentStageConfig(
+                name="reviewer",
+                agent="reviewer",
+                instruction="Create review notes.",
+                required_files=("REVIEW_NOTES.md",),
+            ),
+        ),
+    )
+    manager = StageCheckpointManager(
+        artifacts_dir=tmp_path / "artifacts",
+        task_name="task",
+        task_id="task-id",
+        run_id="run-id",
+        config=StageCheckpointConfig(enabled=True),
+    )
+
+    class SessionClient:
+        def __init__(self):
+            self.opened: list[object] = []
+            self.closed: list[object] = []
+            self.prompts: list[str] = []
+
+        def open_session(self, *, project_dir, telemetry_recorder=None):
+            session = SimpleNamespace(
+                project_dir=Path(project_dir),
+                session_id=f"session-{len(self.opened) + 1}",
+                _closed=False,
+            )
+            self.opened.append(session)
+            return session
+
+        def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+            self.prompts.append(prompt)
+            root = Path(session.project_dir)
+            if len(self.prompts) == 1:
+                (root / "REVIEW_NOTES.md").write_text("status: ok\n", encoding="utf-8")
+                return ClaudeProjectEditResult(
+                    text="invalid review",
+                    transcript="invalid review",
+                    prompt=prompt,
+                    prompt_chars=len(prompt),
+                    prompt_lines=prompt.count("\n") + 1,
+                )
+            assert not (root / "REVIEW_NOTES.md").exists()
+            (root / "REVIEW_NOTES.md").write_text(
+                "status: needs_fix\neval_ready: false\nrequired_fixes: fix tiling\n",
+                encoding="utf-8",
+            )
+            return ClaudeProjectEditResult(
+                text="review feedback",
+                transcript="review feedback",
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+        def close_session(self, session):
+            session._closed = True
+            self.closed.append(session)
+
+    client = SessionClient()
+
+    result = run_configured_subagent_flow(
+        editor_client=client,
+        project_dir=project_dir,
+        base_prompt="BASE",
+        flow=flow,
+        stage_checkpoint_manager=manager,
+        checkpoint_task=SimpleNamespace(name="task"),
+        round_num=3,
+        attempt_idx=1,
+        runtime_state={"attempt": {"flow_name": "test-flow"}},
+    )
+
+    assert result.text == "review feedback"
+    assert len(client.prompts) == 2
+    assert [session.session_id for session in client.opened] == ["session-1", "session-2"]
+    assert "eval_ready: false" in (project_dir / "REVIEW_NOTES.md").read_text(encoding="utf-8")
+    scene_manifest = json.loads(
+        next((tmp_path / "artifacts" / "failures").iterdir()).joinpath("scene_manifest.json").read_text(encoding="utf-8")
+    )
+    assert scene_manifest["rollback_reason"] == "INVALID_HANDOFF"
+
+
+def test_run_configured_subagent_flow_keeps_reviewer_eval_ready_false_without_rollback(tmp_path):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    flow = SubagentFlowConfig(
+        name="test-flow",
+        description="Test flow.",
+        stages=(
+            SubagentStageConfig(
+                name="reviewer",
+                agent="reviewer",
+                instruction="Create review notes.",
+                required_files=("REVIEW_NOTES.md",),
+            ),
+        ),
+    )
+    manager = StageCheckpointManager(
+        artifacts_dir=tmp_path / "artifacts",
+        task_name="task",
+        task_id="task-id",
+        run_id="run-id",
+        config=StageCheckpointConfig(enabled=True),
+    )
+
+    class SessionClient:
+        def __init__(self):
+            self.opened: list[object] = []
+            self.prompts: list[str] = []
+
+        def open_session(self, *, project_dir, telemetry_recorder=None):
+            session = SimpleNamespace(
+                project_dir=Path(project_dir),
+                session_id=f"session-{len(self.opened) + 1}",
+                _closed=False,
+            )
+            self.opened.append(session)
+            return session
+
+        def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+            self.prompts.append(prompt)
+            Path(session.project_dir, "REVIEW_NOTES.md").write_text(
+                "status: needs_fix\neval_ready: false\nrequired_fixes: fix tiling\n",
+                encoding="utf-8",
+            )
+            return ClaudeProjectEditResult(
+                text="review feedback",
+                transcript="review feedback",
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+        def close_session(self, session):
+            session._closed = True
+
+    client = SessionClient()
+
+    result = run_configured_subagent_flow(
+        editor_client=client,
+        project_dir=project_dir,
+        base_prompt="BASE",
+        flow=flow,
+        stage_checkpoint_manager=manager,
+        checkpoint_task=SimpleNamespace(name="task"),
+        round_num=3,
+        attempt_idx=1,
+        runtime_state={"attempt": {"flow_name": "test-flow"}},
+    )
+
+    assert result.text == "review feedback"
+    assert len(client.prompts) == 1
+    assert [session.session_id for session in client.opened] == ["session-1"]
+    assert not (tmp_path / "artifacts" / "failures").exists()
+
+
+def test_run_configured_subagent_flow_rolls_back_codegen_without_candidate_diff(tmp_path):
+    project_dir = tmp_path / "project"
+    (project_dir / "kernel").mkdir(parents=True)
+    (project_dir / "kernel" / "foo.h").write_text("alpha\n", encoding="utf-8")
+    flow = SubagentFlowConfig(
+        name="test-flow",
+        description="Test flow.",
+        stages=(
+            SubagentStageConfig(
+                name="codegen",
+                agent="codegen",
+                instruction="Create implementation.",
+                required_files=("IMPLEMENTATION_HANDOFF.md",),
+            ),
+        ),
+    )
+    manager = StageCheckpointManager(
+        artifacts_dir=tmp_path / "artifacts",
+        task_name="task",
+        task_id="task-id",
+        run_id="run-id",
+        config=StageCheckpointConfig(enabled=True),
+    )
+
+    class SessionClient:
+        def __init__(self):
+            self.opened: list[object] = []
+            self.prompts: list[str] = []
+
+        def open_session(self, *, project_dir, telemetry_recorder=None):
+            session = SimpleNamespace(
+                project_dir=Path(project_dir),
+                session_id=f"session-{len(self.opened) + 1}",
+                _closed=False,
+            )
+            self.opened.append(session)
+            return session
+
+        def send_prompt(self, session, *, prompt, telemetry_recorder=None):
+            self.prompts.append(prompt)
+            root = Path(session.project_dir)
+            (root / "IMPLEMENTATION_HANDOFF.md").write_text(
+                "# handoff\nimplementation stage completed\n",
+                encoding="utf-8",
+            )
+            if len(self.prompts) == 2:
+                (root / "kernel" / "foo.h").write_text("alpha\nBETA\n", encoding="utf-8")
+            return ClaudeProjectEditResult(
+                text="codegen result",
+                transcript="codegen result",
+                prompt=prompt,
+                prompt_chars=len(prompt),
+                prompt_lines=prompt.count("\n") + 1,
+            )
+
+        def close_session(self, session):
+            session._closed = True
+
+    client = SessionClient()
+
+    result = run_configured_subagent_flow(
+        editor_client=client,
+        project_dir=project_dir,
+        base_prompt="BASE",
+        flow=flow,
+        stage_checkpoint_manager=manager,
+        checkpoint_task=SimpleNamespace(name="task"),
+        round_num=3,
+        attempt_idx=1,
+        runtime_state={"attempt": {"flow_name": "test-flow"}},
+    )
+
+    assert result.text == "codegen result"
+    assert len(client.prompts) == 2
+    assert (project_dir / "kernel" / "foo.h").read_text(encoding="utf-8") == "alpha\nBETA\n"
+    scene_manifest = json.loads(
+        next((tmp_path / "artifacts" / "failures").iterdir()).joinpath("scene_manifest.json").read_text(encoding="utf-8")
+    )
+    assert scene_manifest["rollback_reason"] == "DIFF_POLICY_VIOLATION"
 
 
 def test_filter_stages_after_restore_skips_completed_and_starts_at_next_pending(tmp_path):

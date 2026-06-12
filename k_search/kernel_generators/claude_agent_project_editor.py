@@ -389,6 +389,7 @@ class ClaudeProjectEditResult:
     user_message_uuids: list[str] | None = None
     subagent_agent_ids: list[str] | None = None
     subagent_invocations: list[dict[str, Any]] | None = None
+    session: Any | None = None
 
 
 @dataclass

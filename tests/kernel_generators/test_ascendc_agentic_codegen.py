@@ -196,6 +196,7 @@ class NativeSessionClient:
     def __init__(self):
         self.prompts = []
         self.project_dir: Path | None = None
+        self.source_edit_count = 0
 
     def open_session(self, *, project_dir, telemetry_recorder=None):
         from types import SimpleNamespace
@@ -222,12 +223,14 @@ class NativeSessionClient:
                 "- risk_checks: correctness, dtype, tail, offsets, workspace, synchronization checked.\n",
                 encoding="utf-8",
             )
-        text = (
-            "alpha\nBETA\ngamma\n"
-            if len(self.prompts) == 1
-            else "alpha\nGAMMA\ngamma\n"
-        )
-        (root / "kernel" / "foo.h").write_text(text, encoding="utf-8")
+        if "Current agent: codegen" in prompt or "Current agent: bug-fixer" in prompt:
+            self.source_edit_count += 1
+            text = (
+                "alpha\nBETA\ngamma\n"
+                if self.source_edit_count == 1
+                else "alpha\nGAMMA\ngamma\n"
+            )
+            (root / "kernel" / "foo.h").write_text(text, encoding="utf-8")
         return ClaudeProjectEditResult(
             text="status: ok\nfiles_written: kernel/foo.h, CODE_MAP.md, ASCENDC_DESIGN.md, IMPLEMENTATION_EXECUTION_PLAN.md, IMPLEMENTATION_HANDOFF.md, REVIEW_NOTES.md\nnext: python_eval",
             transcript="native session completed",

@@ -1595,7 +1595,7 @@ class AscendCAgenticCycle:
         if supports_configured_subagent_flow(self.runner.editor_client):
             restored_stage_state = self.restored_stage_state
             self.restored_stage_state = None
-            return run_configured_subagent_flow(
+            result = run_configured_subagent_flow(
                 editor_client=self.runner.editor_client,
                 project_dir=self.wt_session.project_dir,
                 base_prompt=prompt,
@@ -1625,6 +1625,10 @@ class AscendCAgenticCycle:
                     },
                 },
             )
+            current_session = getattr(result, "session", None)
+            if current_session is not None:
+                self.editor_session = current_session
+            return result
         return _edit_project_with_optional_telemetry(
             self.runner.editor_client,
             project_dir=self.wt_session.project_dir,

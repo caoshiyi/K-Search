@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Iterable
+import json
 
 from k_search.telemetry.context import (
     TelemetryArtifacts,
@@ -11,6 +12,29 @@ from k_search.telemetry.context import (
 )
 from k_search.telemetry.events import TelemetryEvent
 from k_search.telemetry.sinks import CostJsonSink, JsonlSink, MarkdownTimelineSink, TelemetrySink
+from k_search.utils.paths import get_run_logs_dir
+
+
+def _record_logging_sink_failure(context: TelemetryContext | None, sink: object, exc: BaseException) -> None:
+    try:
+        ctx = context or TelemetryContext()
+        logs_dir = get_run_logs_dir(task_name=ctx.task_name, run_id=ctx.run_id)
+        path = logs_dir / "logging_errors.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        sink_path = getattr(sink, "path", None) or getattr(sink, "file_path", None)
+        payload = {
+            "schema_version": 1,
+            "event_type": "logging_sink_failure",
+            "sink": type(sink).__name__,
+            "path": str(sink_path) if sink_path is not None else None,
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+            "severity": "warning",
+        }
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    except Exception:
+        pass
 
 
 class TelemetryRecorder:
@@ -38,8 +62,8 @@ class TelemetryRecorder:
         for sink in self.sinks:
             try:
                 sink.write_event(event)
-            except Exception:
-                pass
+            except Exception as exc:
+                _record_logging_sink_failure(self.context, sink, exc)
 
     def close(self) -> None:
         if not self.enabled:
@@ -47,8 +71,8 @@ class TelemetryRecorder:
         for sink in self.sinks:
             try:
                 sink.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                _record_logging_sink_failure(self.context, sink, exc)
 
 
 def noop_recorder() -> TelemetryRecorder:

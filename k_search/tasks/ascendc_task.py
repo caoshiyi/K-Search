@@ -14,9 +14,16 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
+from k_search.tasks.ascendc_eval_artifacts import (
+    active_eval_artifact_dir,
+    write_command_artifacts,
+    write_combined_log,
+    write_eval_result_artifact,
+)
 from k_search.tasks.ascendc_patch import (
     ASCENDC_PATCH_FORMAT_TEXT,
     parse_ascendc_project_patch,
@@ -784,6 +791,74 @@ Generate the corrected and optimized implementation:"""
         if err:
             logs.append(f"[{label} stderr]\n{err}")
 
+    def _run_phase_with_artifacts(
+        self,
+        *,
+        label: str,
+        cmd: str,
+        workdir: Path,
+        eval_artifact_dir: Path | None,
+        logs: list[str],
+    ) -> subprocess.CompletedProcess[str] | None:
+        started = time.time()
+        proc = self._run_shell(cmd, cwd=workdir)
+        duration_ms = int((time.time() - started) * 1000)
+        self._append_command_log(logs, label, proc)
+        if eval_artifact_dir is not None:
+            write_command_artifacts(
+                eval_artifact_dir,
+                stage=label,
+                cmd=cmd,
+                cwd=workdir,
+                proc=proc,
+                duration_ms=duration_ms,
+                timeout_seconds=self.timeout_seconds,
+            )
+        return proc
+
+    def _eval_metrics(
+        self,
+        *,
+        workdir: Path,
+        round_num: int | None,
+        eval_artifact_dir: Path | None,
+        failure_class: str | None = None,
+        failure_stage: str | None = None,
+        build: subprocess.CompletedProcess[str] | None = None,
+        correctness: subprocess.CompletedProcess[str] | None = None,
+        benchmark: subprocess.CompletedProcess[str] | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        metrics: dict[str, Any] = {
+            "workdir": str(workdir),
+            "round": round_num,
+            "eval_artifact_dir": str(eval_artifact_dir) if eval_artifact_dir is not None else None,
+            "build_returncode": None if build is None else build.returncode,
+            "correctness_returncode": None if correctness is None else correctness.returncode,
+            "benchmark_returncode": None if benchmark is None else benchmark.returncode,
+        }
+        if failure_class:
+            metrics["failure_class"] = failure_class
+        if failure_stage:
+            metrics["failure_stage"] = failure_stage
+        if extra:
+            metrics.update(extra)
+        return metrics
+
+    def _record_eval_with_artifacts(
+        self,
+        result: EvalResult,
+        *,
+        eval_artifact_dir: Path | None,
+        logs: list[str],
+    ) -> EvalResult:
+        if eval_artifact_dir is not None:
+            combined_path = write_combined_log(eval_artifact_dir, logs)
+            result.metrics = dict(result.metrics or {})
+            result.metrics["combined_log_path"] = combined_path
+            result.metrics["eval_result_path"] = write_eval_result_artifact(eval_artifact_dir, result)
+        return self._record_eval(result)
+
     def _run_benchmark_in_workdir(
         self,
         *,
@@ -792,49 +867,112 @@ Generate the corrected and optimized implementation:"""
     ) -> EvalResult:
         logs: list[str] = []
         logs.append(f"[workdir] {workdir}")
+        eval_artifact_dir = active_eval_artifact_dir()
+        if eval_artifact_dir is not None:
+            eval_artifact_dir.mkdir(parents=True, exist_ok=True)
 
+        build: subprocess.CompletedProcess[str] | None = None
+        test: subprocess.CompletedProcess[str] | None = None
+        bench: subprocess.CompletedProcess[str] | None = None
         try:
-            build = self._run_shell(self.build_cmd, cwd=workdir)
-            self._append_command_log(logs, "build", build)
+            build = self._run_phase_with_artifacts(
+                label="build",
+                cmd=self.build_cmd,
+                workdir=workdir,
+                eval_artifact_dir=eval_artifact_dir,
+                logs=logs,
+            )
             if build is not None and build.returncode != 0:
-                return self._record_eval(
+                return self._record_eval_with_artifacts(
                     EvalResult(
                         status="compile_failed",
                         log_excerpt=self._truncate_log(logs),
-                        metrics={"workdir": str(workdir), "round": round_num},
-                    )
+                        metrics=self._eval_metrics(
+                            workdir=workdir,
+                            round_num=round_num,
+                            eval_artifact_dir=eval_artifact_dir,
+                            failure_class="ASCENDC_COMPILE_FAILED",
+                            failure_stage="build",
+                            build=build,
+                        ),
+                    ),
+                    eval_artifact_dir=eval_artifact_dir,
+                    logs=logs,
                 )
 
-            test = self._run_shell(self.test_cmd, cwd=workdir)
-            self._append_command_log(logs, "correctness", test)
+            test = self._run_phase_with_artifacts(
+                label="correctness",
+                cmd=self.test_cmd,
+                workdir=workdir,
+                eval_artifact_dir=eval_artifact_dir,
+                logs=logs,
+            )
             if test is not None and test.returncode != 0:
-                return self._record_eval(
+                return self._record_eval_with_artifacts(
                     EvalResult(
                         status="failed",
                         log_excerpt=self._truncate_log(logs),
-                        metrics={"workdir": str(workdir), "round": round_num},
-                    )
+                        metrics=self._eval_metrics(
+                            workdir=workdir,
+                            round_num=round_num,
+                            eval_artifact_dir=eval_artifact_dir,
+                            failure_class="ASCENDC_CORRECTNESS_FAILED",
+                            failure_stage="correctness",
+                            build=build,
+                            correctness=test,
+                        ),
+                    ),
+                    eval_artifact_dir=eval_artifact_dir,
+                    logs=logs,
                 )
 
-            bench = self._run_shell(self.bench_cmd, cwd=workdir)
-            self._append_command_log(logs, "benchmark", bench)
+            bench = self._run_phase_with_artifacts(
+                label="benchmark",
+                cmd=self.bench_cmd,
+                workdir=workdir,
+                eval_artifact_dir=eval_artifact_dir,
+                logs=logs,
+            )
             if bench is not None and bench.returncode != 0:
-                return self._record_eval(
+                return self._record_eval_with_artifacts(
                     EvalResult(
                         status="benchmark_failed",
                         log_excerpt=self._truncate_log(logs),
-                        metrics={"workdir": str(workdir), "round": round_num},
-                    )
+                        metrics=self._eval_metrics(
+                            workdir=workdir,
+                            round_num=round_num,
+                            eval_artifact_dir=eval_artifact_dir,
+                            failure_class="ASCENDC_BENCHMARK_FAILED",
+                            failure_stage="benchmark",
+                            build=build,
+                            correctness=test,
+                            benchmark=bench,
+                        ),
+                    ),
+                    eval_artifact_dir=eval_artifact_dir,
+                    logs=logs,
                 )
 
             latency_ms = _parse_latency_ms(((bench.stdout or "") + "\n" + (bench.stderr or "")) if bench else "")
             if bench is not None and latency_ms is None:
-                return self._record_eval(
+                logs.append("[benchmark] missing latency_ms in output")
+                return self._record_eval_with_artifacts(
                     EvalResult(
                         status="benchmark_failed",
-                        log_excerpt=self._truncate_log(logs + ["[benchmark] missing latency_ms in output"]),
-                        metrics={"workdir": str(workdir), "round": round_num},
-                    )
+                        log_excerpt=self._truncate_log(logs),
+                        metrics=self._eval_metrics(
+                            workdir=workdir,
+                            round_num=round_num,
+                            eval_artifact_dir=eval_artifact_dir,
+                            failure_class="ASCENDC_BENCHMARK_FAILED",
+                            failure_stage="benchmark",
+                            build=build,
+                            correctness=test,
+                            benchmark=bench,
+                        ),
+                    ),
+                    eval_artifact_dir=eval_artifact_dir,
+                    logs=logs,
                 )
 
             score = 0.0
@@ -849,7 +987,16 @@ Generate the corrected and optimized implementation:"""
                     score = 1.0 / float(latency_ms)
                     score_name = "inv_latency"
 
-            return self._record_eval(
+            metrics = self._eval_metrics(
+                workdir=workdir,
+                round_num=round_num,
+                eval_artifact_dir=eval_artifact_dir,
+                build=build,
+                correctness=test,
+                benchmark=bench,
+                extra={"score": score, "score_name": score_name},
+            )
+            return self._record_eval_with_artifacts(
                 EvalResult(
                     status="passed",
                     latency_ms=latency_ms,
@@ -857,31 +1004,50 @@ Generate the corrected and optimized implementation:"""
                     mean_vs_baseline_factor=speedup,
                     speedup_factor=speedup,
                     log_excerpt=self._truncate_log(logs),
-                    metrics={
-                        "score": score,
-                        "score_name": score_name,
-                        "workdir": str(workdir),
-                        "round": round_num,
-                    },
-                )
+                    metrics=metrics,
+                ),
+                eval_artifact_dir=eval_artifact_dir,
+                logs=logs,
             )
         except subprocess.TimeoutExpired as e:
             logs.append(f"[timeout] command exceeded {self.timeout_seconds}s: {e}")
-            return self._record_eval(
+            return self._record_eval_with_artifacts(
                 EvalResult(
                     status="timeout",
                     log_excerpt=self._truncate_log(logs),
-                    metrics={"workdir": str(workdir), "round": round_num},
-                )
+                    metrics=self._eval_metrics(
+                        workdir=workdir,
+                        round_num=round_num,
+                        eval_artifact_dir=eval_artifact_dir,
+                        failure_class="ASCENDC_EVAL_TIMEOUT",
+                        failure_stage="evaluate_solution",
+                        build=build,
+                        correctness=test,
+                        benchmark=bench,
+                    ),
+                ),
+                eval_artifact_dir=eval_artifact_dir,
+                logs=logs,
             )
         except Exception as e:
             logs.append(f"[error] {type(e).__name__}: {e}")
-            return self._record_eval(
+            return self._record_eval_with_artifacts(
                 EvalResult(
                     status="failed",
                     log_excerpt=self._truncate_log(logs),
-                    metrics={"workdir": str(workdir), "round": round_num},
-                )
+                    metrics=self._eval_metrics(
+                        workdir=workdir,
+                        round_num=round_num,
+                        eval_artifact_dir=eval_artifact_dir,
+                        failure_class="ASCENDC_CORRECTNESS_FAILED",
+                        failure_stage="evaluate_solution",
+                        build=build,
+                        correctness=test,
+                        benchmark=bench,
+                    ),
+                ),
+                eval_artifact_dir=eval_artifact_dir,
+                logs=logs,
             )
 
     def run_benchmark_in_project_dir(

@@ -630,6 +630,24 @@ class CheckpointManager:
                 ),
             },
             "integrity": {"files": integrity},
+            "meta_harness": {
+                "schema_version": 1,
+                "run_id": self.run_id,
+                "checkpoint_id": checkpoint_id,
+                "checkpoint_kind": "cycle_boundary",
+                "round_index": int(kwargs.get("round_index") or 0),
+                "attempt_index": None,
+                "action_node_id": str(kwargs.get("action_node_id") or ""),
+                "candidate_id": kwargs.get("candidate_id"),
+                "restore_command_hint": f"--resume-from-checkpoint {checkpoint_id}",
+                "compatible_scope": {
+                    "task_source": task_source,
+                    "language": str(kwargs.get("language") or "ascendc"),
+                    "llm_provider": str(kwargs.get("llm_provider") or "claude-agent"),
+                },
+                "latest_failure_signature_path": kwargs.get("latest_failure_signature_path"),
+                "recommended_resume_action": "select_next_action",
+            },
         }
 
     def _write_attempt_payload(
@@ -665,6 +683,16 @@ class CheckpointManager:
         if isinstance(manifest.get("search"), dict):
             manifest["search"]["attempt_idx"] = attempt_idx
             manifest["search"]["next_attempt_idx"] = next_attempt_idx
+        if isinstance(manifest.get("meta_harness"), dict):
+            manifest["meta_harness"].update(
+                {
+                    "checkpoint_kind": "attempt_boundary",
+                    "attempt_index": attempt_idx,
+                    "candidate_id": kwargs.get("candidate_id")
+                    or f"round_{int(round_index):04d}_attempt_{int(attempt_idx):02d}",
+                    "recommended_resume_action": "continue_current_action",
+                }
+            )
         integrity: dict[str, str] = {}
         for path in sorted(p for p in tmp_dir.rglob("*") if p.is_file()):
             rel = str(path.relative_to(tmp_dir)).replace("\\", "/")

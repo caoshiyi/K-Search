@@ -10,10 +10,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from k_search.kernel_generators.checkpoint_index import (
+    append_or_update_checkpoint_index,
+    sync_pruned_entries,
+)
 from k_search.kernel_generators.project_snapshot import ProjectSnapshot
-from k_search.tasks.task_base import BuildSpec, EvalResult, Solution, SourceFile, SupportedLanguages
-from k_search.utils.paths import get_ksearch_artifacts_dir
-
+from k_search.tasks.task_base import (
+    BuildSpec,
+    EvalResult,
+    Solution,
+    SourceFile,
+    SupportedLanguages,
+)
+from k_search.utils.paths import get_run_checkpoints_dir, get_run_world_model_dir
 
 CheckpointEvery = Literal["cycle", "attempt"]
 ResumeMode = Literal["same-run", "new-run"]
@@ -61,12 +70,20 @@ class RestoredCheckpoint:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
 
 def _sha256_file(path: Path) -> str:
@@ -151,7 +168,11 @@ def _solution_from_payload(payload: dict[str, Any] | None) -> Solution | None:
         name=str(raw.get("name") or "restored_solution"),
         definition=str(raw.get("definition") or ""),
         author=str(raw.get("author") or "checkpoint"),
-        description=(raw.get("description") if raw.get("description") is None else str(raw.get("description"))),
+        description=(
+            raw.get("description")
+            if raw.get("description") is None
+            else str(raw.get("description"))
+        ),
         spec=BuildSpec(
             language=spec_language,  # type: ignore[arg-type]
             target_hardware=[str(x) for x in (spec_raw.get("target_hardware") or [])],
@@ -159,7 +180,9 @@ def _solution_from_payload(payload: dict[str, Any] | None) -> Solution | None:
             dependencies=[str(x) for x in (spec_raw.get("dependencies") or [])],
         ),
         sources=[
-            SourceFile(path=str(item.get("path") or ""), content=str(item.get("content") or ""))
+            SourceFile(
+                path=str(item.get("path") or ""), content=str(item.get("content") or "")
+            )
             for item in sources_raw
             if isinstance(item, dict)
         ],
@@ -174,7 +197,11 @@ def _eval_from_payload(payload: dict[str, Any] | None) -> EvalResult | None:
         return None
     return EvalResult(
         status=str(raw.get("status") or ""),
-        latency_ms=(float(raw["latency_ms"]) if isinstance(raw.get("latency_ms"), (int, float)) else None),
+        latency_ms=(
+            float(raw["latency_ms"])
+            if isinstance(raw.get("latency_ms"), (int, float))
+            else None
+        ),
         reference_latency_ms=(
             float(raw["reference_latency_ms"])
             if isinstance(raw.get("reference_latency_ms"), (int, float))
@@ -186,7 +213,9 @@ def _eval_from_payload(payload: dict[str, Any] | None) -> EvalResult | None:
             else None
         ),
         speedup_factor=(
-            float(raw["speedup_factor"]) if isinstance(raw.get("speedup_factor"), (int, float)) else None
+            float(raw["speedup_factor"])
+            if isinstance(raw.get("speedup_factor"), (int, float))
+            else None
         ),
         log_excerpt=str(raw.get("log_excerpt") or ""),
         metrics=(raw.get("metrics") if isinstance(raw.get("metrics"), dict) else {}),
@@ -211,30 +240,32 @@ class CheckpointManager:
         if config.checkpoint_dir:
             self.checkpoint_root = Path(config.checkpoint_dir).expanduser().resolve()
         else:
-            self.checkpoint_root = (
-                get_ksearch_artifacts_dir(
-                    base_dir=artifacts_dir,
-                    task_name=self.task_name,
-                    task_id=self.task_id,
-                    run_id=self.run_id,
-                )
-                / "checkpoints"
+            self.checkpoint_root = get_run_checkpoints_dir(
+                base_dir=artifacts_dir,
+                task_name=self.task_name,
+                task_id=self.task_id,
+                run_id=self.run_id,
             )
 
     def save_cycle_checkpoint(self, **kwargs: Any) -> Path:
-        checkpoint_id = self._next_checkpoint_id(kind="cycle", round_index=int(kwargs.get("round_index") or 0))
+        checkpoint_id = self._next_checkpoint_id(
+            kind="cycle", round_index=int(kwargs.get("round_index") or 0)
+        )
         tmp_dir = self.checkpoint_root / f".{checkpoint_id}.{uuid.uuid4().hex}.tmp"
         final_dir = self.checkpoint_root / checkpoint_id
         if final_dir.exists():
             raise FileExistsError(f"checkpoint already exists: {final_dir}")
         tmp_dir.mkdir(parents=True, exist_ok=False)
         try:
-            manifest = self._write_cycle_payload(tmp_dir=tmp_dir, checkpoint_id=checkpoint_id, **kwargs)
+            manifest = self._write_cycle_payload(
+                tmp_dir=tmp_dir, checkpoint_id=checkpoint_id, **kwargs
+            )
             manifest_path = tmp_dir / "manifest.json"
             _write_json(manifest_path, manifest)
             os.replace(tmp_dir, final_dir)
             final_manifest_path = final_dir / "manifest.json"
             self._write_latest(checkpoint_id=checkpoint_id)
+            append_or_update_checkpoint_index(self.checkpoint_root, final_manifest_path)
             self.prune_old_checkpoints()
             return final_manifest_path
         except Exception:
@@ -242,19 +273,24 @@ class CheckpointManager:
             raise
 
     def save_attempt_checkpoint(self, **kwargs: Any) -> Path:
-        checkpoint_id = self._next_checkpoint_id(kind="attempt", round_index=int(kwargs.get("round_index") or 0))
+        checkpoint_id = self._next_checkpoint_id(
+            kind="attempt", round_index=int(kwargs.get("round_index") or 0)
+        )
         tmp_dir = self.checkpoint_root / f".{checkpoint_id}.{uuid.uuid4().hex}.tmp"
         final_dir = self.checkpoint_root / checkpoint_id
         if final_dir.exists():
             raise FileExistsError(f"checkpoint already exists: {final_dir}")
         tmp_dir.mkdir(parents=True, exist_ok=False)
         try:
-            manifest = self._write_attempt_payload(tmp_dir=tmp_dir, checkpoint_id=checkpoint_id, **kwargs)
+            manifest = self._write_attempt_payload(
+                tmp_dir=tmp_dir, checkpoint_id=checkpoint_id, **kwargs
+            )
             manifest_path = tmp_dir / "manifest.json"
             _write_json(manifest_path, manifest)
             os.replace(tmp_dir, final_dir)
             final_manifest_path = final_dir / "manifest.json"
             self._write_latest(checkpoint_id=checkpoint_id)
+            append_or_update_checkpoint_index(self.checkpoint_root, final_manifest_path)
             self.prune_old_checkpoints()
             return final_manifest_path
         except Exception:
@@ -266,7 +302,9 @@ class CheckpointManager:
         if not raw or raw == "latest":
             latest_path = self.checkpoint_root / "latest.json"
             if not latest_path.is_file():
-                raise FileNotFoundError(f"checkpoint latest.json not found: {latest_path}")
+                raise FileNotFoundError(
+                    f"checkpoint latest.json not found: {latest_path}"
+                )
             latest = json.loads(latest_path.read_text(encoding="utf-8"))
             raw = str(latest.get("latest_checkpoint_path") or "")
             if not raw:
@@ -293,25 +331,33 @@ class CheckpointManager:
             manifest=manifest,
         )
 
-    def restore_to_run(self, ref: CheckpointRef, *, target_run_id: str) -> RestoredCheckpoint:
+    def restore_to_run(
+        self, ref: CheckpointRef, *, target_run_id: str
+    ) -> RestoredCheckpoint:
         manifest = dict(ref.manifest or {})
         if int(manifest.get("schema_version") or 0) != 1:
             raise ValueError("unsupported checkpoint schema_version")
         checkpoint_kind = str(manifest.get("checkpoint_kind") or "")
         if checkpoint_kind not in {"cycle_boundary", "attempt_boundary"}:
-            raise ValueError(f"unsupported checkpoint_kind for checkpoint restore: {checkpoint_kind}")
-        task_meta = manifest.get("task") if isinstance(manifest.get("task"), dict) else {}
+            raise ValueError(
+                f"unsupported checkpoint_kind for checkpoint restore: {checkpoint_kind}"
+            )
+        task_meta = (
+            manifest.get("task") if isinstance(manifest.get("task"), dict) else {}
+        )
         llm_meta = manifest.get("llm") if isinstance(manifest.get("llm"), dict) else {}
         if str(task_meta.get("task_source") or "").strip() != "ascendc":
             raise ValueError("checkpoint currently supports only task_source=ascendc")
         if str(llm_meta.get("provider") or "").strip() != "claude-agent":
-            raise ValueError("checkpoint currently supports only llm provider claude-agent")
+            raise ValueError(
+                "checkpoint currently supports only llm provider claude-agent"
+            )
         if str(llm_meta.get("language") or "").strip() != "ascendc":
             raise ValueError("checkpoint currently supports only language=ascendc")
 
         paths = manifest.get("paths") if isinstance(manifest.get("paths"), dict) else {}
         runtime_state = self._read_relative_json(ref, paths.get("runtime_state"))
-        target_artifacts = get_ksearch_artifacts_dir(
+        target_world_model = get_run_world_model_dir(
             base_dir=self.artifacts_dir,
             task_name=self.task_name,
             task_id=self.task_id,
@@ -321,21 +367,33 @@ class CheckpointManager:
         source_wm = self._relative_path(ref, paths.get("world_model"))
         if source_wm is None or not source_wm.is_file():
             raise FileNotFoundError("checkpoint world_model file is missing")
-        world_model_path = target_artifacts / "world_model" / "world_model.json"
+        world_model_path = target_world_model / "world_model.json"
         _copy_file(source_wm, world_model_path)
 
         solution_db_path: Path | None = None
         source_solution_db = self._relative_path(ref, paths.get("solution_db"))
         if source_solution_db is not None and source_solution_db.is_file():
-            solution_db_path = target_artifacts / "world_model" / "solution_db.jsonl"
+            solution_db_path = target_world_model / "solution_db.jsonl"
             _copy_file(source_solution_db, solution_db_path)
 
-        best_payload = self._read_relative_json(ref, paths.get("best_solution"), missing_ok=True)
-        current_payload = self._read_relative_json(ref, paths.get("current_solution"), missing_ok=True)
-        best_score = manifest.get("search", {}).get("best_score") if isinstance(manifest.get("search"), dict) else None
+        best_payload = self._read_relative_json(
+            ref, paths.get("best_solution"), missing_ok=True
+        )
+        current_payload = self._read_relative_json(
+            ref, paths.get("current_solution"), missing_ok=True
+        )
+        best_score = (
+            manifest.get("search", {}).get("best_score")
+            if isinstance(manifest.get("search"), dict)
+            else None
+        )
         if not isinstance(best_score, (int, float)):
-            best_score = best_payload.get("score") if isinstance(best_payload, dict) else -1.0
-        runtime_next_round = runtime_state.get("next_round") if isinstance(runtime_state, dict) else None
+            best_score = (
+                best_payload.get("score") if isinstance(best_payload, dict) else -1.0
+            )
+        runtime_next_round = (
+            runtime_state.get("next_round") if isinstance(runtime_state, dict) else None
+        )
         return RestoredCheckpoint(
             checkpoint_id=ref.checkpoint_id,
             checkpoint_version=str(manifest.get("checkpoint_version") or "v1"),
@@ -346,7 +404,9 @@ class CheckpointManager:
             solution_db_path=solution_db_path,
             best_solution=_solution_from_payload(best_payload),
             best_eval=_eval_from_payload(best_payload),
-            best_score=float(best_score) if isinstance(best_score, (int, float)) else -1.0,
+            best_score=(
+                float(best_score) if isinstance(best_score, (int, float)) else -1.0
+            ),
             current_solution=_solution_from_payload(current_payload),
             start_round=int(runtime_next_round or 1),
             resume_in_cycle=checkpoint_kind == "attempt_boundary",
@@ -360,20 +420,30 @@ class CheckpointManager:
         if keep <= 0 or not self.checkpoint_root.exists():
             return
         checkpoints = sorted(
-            [p for p in self.checkpoint_root.iterdir() if p.is_dir() and p.name.startswith("ckpt_")]
+            [
+                p
+                for p in self.checkpoint_root.iterdir()
+                if p.is_dir() and p.name.startswith("ckpt_")
+            ]
         )
         for path in checkpoints[:-keep]:
             shutil.rmtree(path, ignore_errors=True)
 
-    def _write_cycle_payload(self, *, tmp_dir: Path, checkpoint_id: str, **kwargs: Any) -> dict[str, Any]:
+    def _write_cycle_payload(
+        self, *, tmp_dir: Path, checkpoint_id: str, **kwargs: Any
+    ) -> dict[str, Any]:
         created_at = _utc_now()
         world_model_path = tmp_dir / "world_model" / "world_model.json"
         world_model_path.parent.mkdir(parents=True, exist_ok=True)
-        world_model_path.write_text(str(kwargs.get("world_model_json") or ""), encoding="utf-8")
+        world_model_path.write_text(
+            str(kwargs.get("world_model_json") or ""), encoding="utf-8"
+        )
 
         source_solution_db = kwargs.get("solution_db_path")
         if source_solution_db:
-            _copy_file(Path(source_solution_db), tmp_dir / "world_model" / "solution_db.jsonl")
+            _copy_file(
+                Path(source_solution_db), tmp_dir / "world_model" / "solution_db.jsonl"
+            )
 
         best_solution = kwargs.get("best_solution")
         best_eval = kwargs.get("best_eval")
@@ -384,15 +454,22 @@ class CheckpointManager:
             eval_result=best_eval,
             score=kwargs.get("best_score"),
         )
-        current_payload = _solution_payload(solution=current_solution, eval_result=current_eval)
+        current_payload = _solution_payload(
+            solution=current_solution, eval_result=current_eval
+        )
         if best_payload is not None:
             _write_json(tmp_dir / "solutions" / "best_solution.json", best_payload)
         if current_payload is not None:
-            _write_json(tmp_dir / "solutions" / "current_solution.json", current_payload)
+            _write_json(
+                tmp_dir / "solutions" / "current_solution.json", current_payload
+            )
         if kwargs.get("last_solution") is not None:
             _write_json(
                 tmp_dir / "solutions" / "last_solution.json",
-                _solution_payload(solution=kwargs.get("last_solution"), eval_result=kwargs.get("last_eval")),
+                _solution_payload(
+                    solution=kwargs.get("last_solution"),
+                    eval_result=kwargs.get("last_eval"),
+                ),
             )
         if kwargs.get("cycle_best_solution") is not None:
             _write_json(
@@ -406,10 +483,16 @@ class CheckpointManager:
 
         candidate_manifest_path = kwargs.get("candidate_manifest_path")
         if candidate_manifest_path:
-            _copy_file(Path(candidate_manifest_path), tmp_dir / "candidate" / "manifest.json")
+            _copy_file(
+                Path(candidate_manifest_path), tmp_dir / "candidate" / "manifest.json"
+            )
         if current_eval is not None:
-            _write_json(tmp_dir / "candidate" / "eval.json", _eval_to_dict(current_eval) or {})
-        diff_text = str(kwargs.get("candidate_diff") or kwargs.get("diff_summary") or "")
+            _write_json(
+                tmp_dir / "candidate" / "eval.json", _eval_to_dict(current_eval) or {}
+            )
+        diff_text = str(
+            kwargs.get("candidate_diff") or kwargs.get("diff_summary") or ""
+        )
         if diff_text:
             diff_path = tmp_dir / "candidate" / "diff.patch"
             diff_path.parent.mkdir(parents=True, exist_ok=True)
@@ -417,8 +500,14 @@ class CheckpointManager:
 
         project_snapshot = kwargs.get("project_snapshot")
         if isinstance(project_snapshot, ProjectSnapshot):
-            _write_json(tmp_dir / "project" / "snapshot_manifest.json", project_snapshot.to_dict())
-            if self.config.include_project_snapshot_payload and project_snapshot.archive_path:
+            _write_json(
+                tmp_dir / "project" / "snapshot_manifest.json",
+                project_snapshot.to_dict(),
+            )
+            if (
+                self.config.include_project_snapshot_payload
+                and project_snapshot.archive_path
+            ):
                 src = Path(project_snapshot.archive_path)
                 dst = tmp_dir / "project" / "snapshot"
                 if src.is_dir():
@@ -435,7 +524,9 @@ class CheckpointManager:
             "resume_action": "select_next_action",
             "next_round": int(kwargs.get("next_round") or 1),
             "last_completed_action_node_id": str(kwargs.get("action_node_id") or ""),
-            "last_completed_cycle_start_round": int(kwargs.get("cycle_start_round") or kwargs.get("round_index") or 1),
+            "last_completed_cycle_start_round": int(
+                kwargs.get("cycle_start_round") or kwargs.get("round_index") or 1
+            ),
             "last_completed_cycle_end_round": int(kwargs.get("round_index") or 1),
             "best_score": _score_or_default(kwargs.get("best_score")),
             "best_solution_id": _solution_id(best_solution),
@@ -476,7 +567,9 @@ class CheckpointManager:
             integrity[rel] = _sha256_file(path)
 
         task = kwargs.get("task")
-        task_source = str(getattr(task, "task_source", "") or kwargs.get("task_source") or "ascendc")
+        task_source = str(
+            getattr(task, "task_source", "") or kwargs.get("task_source") or "ascendc"
+        )
         task_path = str(getattr(task, "task_path", "") or kwargs.get("task_path") or "")
         best_eval_dict = _eval_to_dict(best_eval) or {}
         return {
@@ -507,7 +600,9 @@ class CheckpointManager:
             "search": {
                 "round_index": int(kwargs.get("round_index") or 0),
                 "attempt_idx": None,
-                "cycle_start_round": int(kwargs.get("cycle_start_round") or kwargs.get("round_index") or 1),
+                "cycle_start_round": int(
+                    kwargs.get("cycle_start_round") or kwargs.get("round_index") or 1
+                ),
                 "action_node_id": str(kwargs.get("action_node_id") or ""),
                 "active_leaf_id": str(kwargs.get("action_node_id") or ""),
                 "max_opt_rounds": kwargs.get("max_opt_rounds"),
@@ -522,18 +617,27 @@ class CheckpointManager:
                 "status": best_eval_dict.get("status"),
                 "latency_ms": best_eval_dict.get("latency_ms"),
                 "reference_latency_ms": best_eval_dict.get("reference_latency_ms"),
-                "score": best_eval.score() if isinstance(best_eval, EvalResult) else kwargs.get("best_score"),
+                "score": (
+                    best_eval.score()
+                    if isinstance(best_eval, EvalResult)
+                    else kwargs.get("best_score")
+                ),
                 "score_name": (
                     best_eval.metrics.get("score_name")
-                    if isinstance(best_eval, EvalResult) and isinstance(best_eval.metrics, dict)
+                    if isinstance(best_eval, EvalResult)
+                    and isinstance(best_eval.metrics, dict)
                     else None
                 ),
             },
             "integrity": {"files": integrity},
         }
 
-    def _write_attempt_payload(self, *, tmp_dir: Path, checkpoint_id: str, **kwargs: Any) -> dict[str, Any]:
-        manifest = self._write_cycle_payload(tmp_dir=tmp_dir, checkpoint_id=checkpoint_id, **kwargs)
+    def _write_attempt_payload(
+        self, *, tmp_dir: Path, checkpoint_id: str, **kwargs: Any
+    ) -> dict[str, Any]:
+        manifest = self._write_cycle_payload(
+            tmp_dir=tmp_dir, checkpoint_id=checkpoint_id, **kwargs
+        )
         attempt_idx = int(kwargs.get("attempt_idx") or 0)
         next_attempt_idx = int(kwargs.get("next_attempt_idx") or (attempt_idx + 1))
         round_index = int(kwargs.get("round_index") or 0)
@@ -547,7 +651,9 @@ class CheckpointManager:
             "last_completed_attempt_idx": attempt_idx,
             "last_completed_round": round_index,
             "last_completed_action_node_id": str(kwargs.get("action_node_id") or ""),
-            "cycle_start_round": int(kwargs.get("cycle_start_round") or round_index or 1),
+            "cycle_start_round": int(
+                kwargs.get("cycle_start_round") or round_index or 1
+            ),
             "best_score": _score_or_default(kwargs.get("best_score")),
             "best_solution_id": _solution_id(kwargs.get("best_solution")),
             "current_solution_id": _solution_id(kwargs.get("current_solution")),

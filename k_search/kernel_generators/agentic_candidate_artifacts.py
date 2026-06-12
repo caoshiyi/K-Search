@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
 from k_search.kernel_generators.candidate_patch import CandidatePatch
 from k_search.kernel_generators.project_snapshot import ProjectSnapshot
-from k_search.utils.paths import get_ksearch_artifacts_dir
+from k_search.utils.paths import get_attempt_dir, get_ksearch_run_dir
 
 
 def _jsonable(value: Any) -> Any:
@@ -38,10 +39,99 @@ def get_agentic_candidate_artifact_dir(
     run_id: str,
     round_num: int,
     attempt_idx: int,
+    action_node_id: str | None = None,
 ) -> Path:
-    root = get_ksearch_artifacts_dir(base_dir=artifacts_dir, task_name=task_name, run_id=run_id)
-    candidate_id = f"round_{int(round_num):04d}_attempt_{int(attempt_idx):02d}"
-    return root / "candidates" / candidate_id
+    return get_attempt_dir(
+        base_dir=artifacts_dir,
+        task_name=task_name,
+        run_id=run_id,
+        round_num=round_num,
+        attempt_idx=attempt_idx,
+        action_node_id=action_node_id,
+    )
+
+
+def _rel(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root)).replace("\\", "/")
+    except ValueError:
+        return str(path)
+
+
+def _write_snapshot_archive(
+    project_snapshot: ProjectSnapshot, snapshot_dir: Path
+) -> str | None:
+    src_raw = project_snapshot.archive_path or project_snapshot.project_root
+    if not src_raw:
+        return None
+    src = Path(src_raw).expanduser().resolve()
+    if not src.exists() or not src.is_dir():
+        return None
+    archive_base = snapshot_dir / "project"
+    archive_path = snapshot_dir / "project.tar.gz"
+    if archive_path.exists():
+        archive_path.unlink()
+    shutil.make_archive(str(archive_base), "gztar", root_dir=src)
+    return str(archive_path)
+
+
+def _update_artifact_index(
+    *,
+    artifacts_dir: str | Path | None,
+    task_name: str,
+    run_id: str,
+    attempt_dir: Path,
+    manifest_path: Path,
+    round_num: int,
+    attempt_idx: int,
+    action_node_id: str | None,
+) -> None:
+    try:
+        run_dir = get_ksearch_run_dir(
+            base_dir=artifacts_dir, task_name=task_name, run_id=run_id
+        )
+        index_path = run_dir / "artifact_index.json"
+        if index_path.is_file():
+            data = json.loads(index_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                data = {}
+        else:
+            data = {}
+        attempts = [a for a in data.get("attempts", []) if isinstance(a, dict)]
+        rel_attempt = _rel(attempt_dir, run_dir)
+        attempts = [a for a in attempts if a.get("attempt_dir") != rel_attempt]
+        attempts.append(
+            {
+                "round_num": int(round_num),
+                "attempt_idx": int(attempt_idx),
+                "action_node_id": action_node_id,
+                "attempt_dir": rel_attempt,
+                "manifest_path": _rel(manifest_path, run_dir),
+            }
+        )
+        data.update(
+            {
+                "schema_version": 1,
+                "summary_path": "summary.md",
+                "events_path": "events.jsonl",
+                "world_model_dir": "world_model",
+                "checkpoints_dir": "checkpoints",
+                "attempts": sorted(
+                    attempts,
+                    key=lambda a: (
+                        a.get("round_num") or 0,
+                        a.get("attempt_idx") or 0,
+                        str(a.get("action_node_id") or ""),
+                    ),
+                ),
+            }
+        )
+        index_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
 
 def write_agentic_candidate_artifacts(
@@ -73,6 +163,7 @@ def write_agentic_candidate_artifacts(
         run_id=run_id,
         round_num=round_num,
         attempt_idx=attempt_idx,
+        action_node_id=action_node_id,
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -82,17 +173,29 @@ def write_agentic_candidate_artifacts(
         "changed_paths_path": out_dir / "changed_paths.txt",
         "diff_path": out_dir / "diff.patch",
         "eval_path": out_dir / "eval.json",
-        "snapshot_manifest_path": out_dir / "snapshot.json",
+        "snapshot_manifest_path": out_dir / "snapshot" / "snapshot.json",
+        "snapshot_archive_path": out_dir / "snapshot" / "project.tar.gz",
         "manifest_path": out_dir / "manifest.json",
     }
     paths["prompt_path"].write_text(str(prompt or ""), encoding="utf-8")
     paths["transcript_path"].write_text(str(transcript or ""), encoding="utf-8")
-    paths["changed_paths_path"].write_text("\n".join(changed_paths) + ("\n" if changed_paths else ""), encoding="utf-8")
+    paths["changed_paths_path"].write_text(
+        "\n".join(changed_paths) + ("\n" if changed_paths else ""), encoding="utf-8"
+    )
     paths["diff_path"].write_text(str(diff_text or ""), encoding="utf-8")
     eval_dict = eval_result_to_dict(eval_result)
-    paths["eval_path"].write_text(json.dumps(eval_dict, indent=2, sort_keys=True), encoding="utf-8")
+    paths["eval_path"].write_text(
+        json.dumps(eval_dict, indent=2, sort_keys=True), encoding="utf-8"
+    )
+    paths["snapshot_manifest_path"].parent.mkdir(parents=True, exist_ok=True)
+    archive_path = _write_snapshot_archive(
+        project_snapshot, paths["snapshot_manifest_path"].parent
+    )
+    snapshot_dict = project_snapshot.to_dict()
+    if archive_path:
+        snapshot_dict["archive_path"] = _rel(Path(archive_path), out_dir)
     paths["snapshot_manifest_path"].write_text(
-        json.dumps(project_snapshot.to_dict(), indent=2, sort_keys=True),
+        json.dumps(snapshot_dict, indent=2, sort_keys=True),
         encoding="utf-8",
     )
     handoff_paths: dict[str, str] = {}
@@ -103,7 +206,7 @@ def write_agentic_candidate_artifacts(
         p = out_dir / "handoff" / safe_name
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(str(text or ""), encoding="utf-8")
-        handoff_paths[safe_name] = str(p)
+        handoff_paths[safe_name] = _rel(p, out_dir)
 
     candidate = CandidatePatch(
         candidate_id=candidate_id,
@@ -125,16 +228,32 @@ def write_agentic_candidate_artifacts(
     )
     manifest = {
         **asdict(candidate),
-        "diff_path": str(paths["diff_path"]),
-        "changed_paths_path": str(paths["changed_paths_path"]),
-        "snapshot_archive_path": project_snapshot.archive_path,
+        "diff_path": _rel(paths["diff_path"], out_dir),
+        "changed_paths_path": _rel(paths["changed_paths_path"], out_dir),
+        "snapshot_archive_path": (
+            _rel(paths["snapshot_archive_path"], out_dir)
+            if paths["snapshot_archive_path"].exists()
+            else None
+        ),
         **(metadata or {}),
     }
     if handoff_paths:
         manifest["native_handoff_paths"] = handoff_paths
     if stage_prompt_records is not None:
         manifest["stage_prompt_paths"] = list(stage_prompt_records)
-    paths["manifest_path"].write_text(json.dumps(_jsonable(manifest), indent=2, sort_keys=True), encoding="utf-8")
+    paths["manifest_path"].write_text(
+        json.dumps(_jsonable(manifest), indent=2, sort_keys=True), encoding="utf-8"
+    )
+    _update_artifact_index(
+        artifacts_dir=artifacts_dir,
+        task_name=task_name,
+        run_id=run_id,
+        attempt_dir=out_dir,
+        manifest_path=paths["manifest_path"],
+        round_num=round_num,
+        attempt_idx=attempt_idx,
+        action_node_id=action_node_id,
+    )
     return candidate, {key: str(path) for key, path in paths.items()}
 
 
@@ -163,6 +282,7 @@ def write_agentic_failed_attempt_manifest(
         run_id=run_id,
         round_num=round_num,
         attempt_idx=attempt_idx,
+        action_node_id=action_node_id,
     )
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -192,5 +312,17 @@ def write_agentic_failed_attempt_manifest(
     }
     if metadata:
         manifest.update(dict(metadata))
-    manifest_path.write_text(json.dumps(_jsonable(manifest), indent=2, sort_keys=True), encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(_jsonable(manifest), indent=2, sort_keys=True), encoding="utf-8"
+    )
+    _update_artifact_index(
+        artifacts_dir=artifacts_dir,
+        task_name=task_name,
+        run_id=run_id,
+        attempt_dir=out_dir,
+        manifest_path=manifest_path,
+        round_num=round_num,
+        attempt_idx=attempt_idx,
+        action_node_id=action_node_id,
+    )
     return manifest

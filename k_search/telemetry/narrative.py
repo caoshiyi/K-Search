@@ -1,10 +1,9 @@
 """Run-level narrative summary log for the world-model optimization loop.
 
 Produces a single human-readable timeline (`summary.md`) plus a machine-readable
-event stream (`events.jsonl`) under the unified run logs dir
-`<base>/logs/<task>/<run_id>/`. Long content (full prompts/responses, full diffs,
-full eval logs) is intentionally summarized here — drill down into the detailed
-`llm/` and `telemetry/` logs for the complete records.
+event stream (`events.jsonl`) under the run root. Long content (full prompts/responses,
+full diffs, full eval logs) is intentionally summarized here — drill down into the
+attempt-centric directories for complete records.
 
 Design rules:
 - Never raise into the caller: every public method is wrapped in try/except.
@@ -48,7 +47,9 @@ def _fmt_num(value: Any, fmt: str = "{:.4f}") -> str:
 class RunNarrativeLogger:
     """Append structured, summarized events to summary.md + events.jsonl."""
 
-    def __init__(self, run_dir: str | Path, *, meta: Optional[Mapping[str, Any]] = None) -> None:
+    def __init__(
+        self, run_dir: str | Path, *, meta: Optional[Mapping[str, Any]] = None
+    ) -> None:
         self.run_dir = Path(run_dir)
         self.summary_path = self.run_dir / "summary.md"
         self.events_path = self.run_dir / "events.jsonl"
@@ -97,7 +98,8 @@ class RunNarrativeLogger:
             return
         try:
             self.meta_path.write_text(
-                json.dumps(meta, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+                json.dumps(meta, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
             )
         except Exception:
             pass
@@ -181,9 +183,17 @@ class RunNarrativeLogger:
             lines.append(f"- 可重试: {'是' if retryable else '否'}")
             if error_type_s or error_message_s:
                 label = error_type_s or "Error"
-                lines.append(f"- 错误: {label}: {_excerpt(error_message_s, self.excerpt_chars)}")
+                lines.append(
+                    f"- 错误: {label}: {_excerpt(error_message_s, self.excerpt_chars)}"
+                )
             if detail:
-                lines += ["- 诊断:", "", "```", _excerpt(detail, self.excerpt_chars), "```"]
+                lines += [
+                    "- 诊断:",
+                    "",
+                    "```",
+                    _excerpt(detail, self.excerpt_chars),
+                    "```",
+                ]
             lines.append(f"- 结束: {ended}")
             lines.append("")
             self._append_md("\n".join(lines))
@@ -202,7 +212,13 @@ class RunNarrativeLogger:
         except Exception:
             pass
 
-    def world_model_init(self, *, node_count: Any = None, summary: str = "", actions: Optional[Iterable[Mapping[str, Any]]] = None) -> None:
+    def world_model_init(
+        self,
+        *,
+        node_count: Any = None,
+        summary: str = "",
+        actions: Optional[Iterable[Mapping[str, Any]]] = None,
+    ) -> None:
         try:
             acts = list(actions or [])
             lines = [f"## [{self._clock()}] 世界模型初始化"]
@@ -294,14 +310,26 @@ class RunNarrativeLogger:
                 head += " (" + ", ".join(extra) + ")"
             lines = [head]
             if prompt:
-                lines += ["- prompt 摘要:", "", "```", _excerpt(prompt, self.excerpt_chars), "```"]
+                lines += [
+                    "- prompt 摘要:",
+                    "",
+                    "```",
+                    _excerpt(prompt, self.excerpt_chars),
+                    "```",
+                ]
             if response:
-                lines += ["- response 摘要:", "", "```", _excerpt(response, self.excerpt_chars), "```"]
+                lines += [
+                    "- response 摘要:",
+                    "",
+                    "```",
+                    _excerpt(response, self.excerpt_chars),
+                    "```",
+                ]
             if changed:
                 lines.append(f"- 改动文件: {', '.join(str(p) for p in changed)}")
             if diff:
                 lines += ["- diff 摘要:", "", "```diff", _excerpt(diff, 2000), "```"]
-            for dp in (detail_paths or []):
+            for dp in detail_paths or []:
                 lines.append(f"- 详细日志: {dp}")
             lines.append("")
             self._append_md("\n".join(lines))
@@ -325,7 +353,9 @@ class RunNarrativeLogger:
         try:
             ev = eval_result
             status = str(getattr(ev, "status", "") or "")
-            is_passed = bool(getattr(ev, "is_passed", lambda: status.lower() == "passed")())
+            is_passed = bool(
+                getattr(ev, "is_passed", lambda: status.lower() == "passed")()
+            )
             compile_ok = status.lower() not in {"compile_failed", "timeout"}
             latency = getattr(ev, "latency_ms", None)
             vs_base = getattr(ev, "mean_vs_baseline_factor", None)
@@ -350,7 +380,13 @@ class RunNarrativeLogger:
                 excerpt = getattr(ev, "log_excerpt", "") or ""
                 if excerpt:
                     label = "编译日志" if not compile_ok else "精度/运行日志"
-                    lines += [f"- {label}(摘要):", "", "```", _excerpt(excerpt, 2000), "```"]
+                    lines += [
+                        f"- {label}(摘要):",
+                        "",
+                        "```",
+                        _excerpt(excerpt, 2000),
+                        "```",
+                    ]
             lines.append("")
             self._append_md("\n".join(lines))
             self._append_event(
@@ -360,14 +396,25 @@ class RunNarrativeLogger:
                     "status": status,
                     "compile_ok": compile_ok,
                     "passed": is_passed,
-                    "latency_ms": latency if isinstance(latency, (int, float)) else None,
-                    "vs_baseline": vs_base if isinstance(vs_base, (int, float)) else None,
+                    "latency_ms": (
+                        latency if isinstance(latency, (int, float)) else None
+                    ),
+                    "vs_baseline": (
+                        vs_base if isinstance(vs_base, (int, float)) else None
+                    ),
                 },
             )
         except Exception:
             pass
 
-    def world_model_update(self, *, kind: str = "", round_num: Any = None, detail: str = "", prediction: Any = None) -> None:
+    def world_model_update(
+        self,
+        *,
+        kind: str = "",
+        round_num: Any = None,
+        detail: str = "",
+        prediction: Any = None,
+    ) -> None:
         try:
             head = f"### [{self._clock()}] 世界模型更新"
             if kind:
@@ -428,7 +475,15 @@ class RunNarrativeLogger:
         except Exception:
             pass
 
-    def run_end(self, *, best_round: Any = None, latency_ms: Any = None, vs_baseline: Any = None, total_rounds: Any = None, note: str = "") -> None:
+    def run_end(
+        self,
+        *,
+        best_round: Any = None,
+        latency_ms: Any = None,
+        vs_baseline: Any = None,
+        total_rounds: Any = None,
+        note: str = "",
+    ) -> None:
         try:
             meta = dict(self.meta)
             meta["status"] = "completed"
@@ -455,8 +510,12 @@ class RunNarrativeLogger:
                 "run_end",
                 {
                     "best_round": best_round,
-                    "latency_ms": latency_ms if isinstance(latency_ms, (int, float)) else None,
-                    "vs_baseline": vs_baseline if isinstance(vs_baseline, (int, float)) else None,
+                    "latency_ms": (
+                        latency_ms if isinstance(latency_ms, (int, float)) else None
+                    ),
+                    "vs_baseline": (
+                        vs_baseline if isinstance(vs_baseline, (int, float)) else None
+                    ),
                     "total_rounds": total_rounds,
                 },
             )

@@ -87,11 +87,21 @@ def test_resolve_output_base_priority(monkeypatch, tmp_path):
 def test_get_run_logs_dir_layout(monkeypatch, tmp_path):
     monkeypatch.delenv("KSEARCH_ARTIFACTS_DIR", raising=False)
     monkeypatch.setenv("KSEARCH_TASK_ID", "task:alpha")
-    p = get_run_logs_dir(base_dir=tmp_path, task_name="vec/add", run_id="run:1", sub="llm")
-    assert p == (tmp_path / "vec_add" / "task_alpha" / "runs" / "run_1" / "logs" / "llm").resolve()
+    p = get_run_logs_dir(
+        base_dir=tmp_path, task_name="vec/add", run_id="run:1", sub="llm"
+    )
+    assert (
+        p
+        == (
+            tmp_path / "vec_add" / "task_alpha" / "runs" / "run_1" / "logs" / "llm"
+        ).resolve()
+    )
     # No sub -> run logs root.
     root = get_run_logs_dir(base_dir=tmp_path, task_name="vec/add", run_id="run:1")
-    assert root == (tmp_path / "vec_add" / "task_alpha" / "runs" / "run_1" / "logs").resolve()
+    assert (
+        root
+        == (tmp_path / "vec_add" / "task_alpha" / "runs" / "run_1" / "logs").resolve()
+    )
 
 
 def test_run_artifacts_logs_and_worktrees_share_one_run_root(monkeypatch, tmp_path):
@@ -103,16 +113,27 @@ def test_run_artifacts_logs_and_worktrees_share_one_run_root(monkeypatch, tmp_pa
 
     assert task_root == (tmp_path / "vec_add" / "task_alpha").resolve()
     assert run_root == task_root / "runs" / "run_1"
-    assert get_ksearch_task_artifacts_dir(base_dir=tmp_path, task_name="vec/add") == task_root / "artifacts"
-    assert get_ksearch_artifacts_dir(base_dir=tmp_path, task_name="vec/add") == run_root / "artifacts"
+    assert (
+        get_ksearch_task_artifacts_dir(base_dir=tmp_path, task_name="vec/add")
+        == task_root / "artifacts"
+    )
+    assert (
+        get_ksearch_artifacts_dir(base_dir=tmp_path, task_name="vec/add")
+        == run_root / "artifacts"
+    )
     assert get_run_logs_dir(base_dir=tmp_path, task_name="vec/add") == run_root / "logs"
-    assert get_ksearch_worktrees_dir(base_dir=tmp_path, task_name="vec/add") == run_root / "worktrees"
+    assert (
+        get_ksearch_worktrees_dir(base_dir=tmp_path, task_name="vec/add")
+        == run_root / "worktrees"
+    )
 
 
 def test_artifacts_dir_can_use_task_layout_without_run(monkeypatch, tmp_path):
     monkeypatch.delenv("KSEARCH_ARTIFACTS_DIR", raising=False)
     monkeypatch.setenv("KSEARCH_TASK_ID", "task:alpha")
-    p = get_ksearch_artifacts_dir(base_dir=tmp_path, task_name="vec/add", include_run=False)
+    p = get_ksearch_artifacts_dir(
+        base_dir=tmp_path, task_name="vec/add", include_run=False
+    )
     assert p == (tmp_path / "vec_add" / "task_alpha" / "artifacts").resolve()
 
 
@@ -176,3 +197,36 @@ def test_safe_path_component_basics():
     assert safe_path_component("", default="fallback") == "fallback"
     assert safe_path_component("a/b c", default="x") == "a_b_c"
     assert len(safe_path_component("a" * 200, default="x")) == 96
+
+
+def test_attempt_world_model_and_checkpoint_dirs_are_run_level(monkeypatch, tmp_path):
+    from k_search.utils.paths import (
+        get_attempt_dir,
+        get_run_attempts_dir,
+        get_run_checkpoints_dir,
+        get_run_world_model_dir,
+    )
+
+    monkeypatch.setenv("KSEARCH_TASK_ID", "task:alpha")
+    attempt = get_attempt_dir(
+        base_dir=tmp_path,
+        task_name="vec/add",
+        run_id="run:1",
+        round_num=7,
+        attempt_idx=2,
+        action_node_id="s/1:bad",
+    )
+    run_root = tmp_path / "vec_add" / "task_alpha" / "runs" / "run_1"
+    assert (
+        get_run_attempts_dir(base_dir=tmp_path, task_name="vec/add", run_id="run:1")
+        == run_root / "attempts"
+    )
+    assert attempt == run_root / "attempts" / "r0007_a02_s_1_bad"
+    assert (
+        get_run_world_model_dir(base_dir=tmp_path, task_name="vec/add", run_id="run:1")
+        == run_root / "world_model"
+    )
+    assert (
+        get_run_checkpoints_dir(base_dir=tmp_path, task_name="vec/add", run_id="run:1")
+        == run_root / "checkpoints"
+    )

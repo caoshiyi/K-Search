@@ -4,7 +4,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from k_search.tasks.task_base import BuildSpec, EvalResult, Solution, SourceFile, SupportedLanguages
+from k_search.tasks.task_base import (
+    BuildSpec,
+    EvalResult,
+    Solution,
+    SourceFile,
+    SupportedLanguages,
+)
 
 
 def _solution(name: str = "sol", content: str = "kernel") -> Solution:
@@ -49,7 +55,10 @@ def _world_model_json() -> str:
 
 
 def test_cycle_checkpoint_writes_manifest_latest_and_restores_to_target_run(tmp_path):
-    from k_search.kernel_generators.checkpoint import CheckpointConfig, CheckpointManager
+    from k_search.kernel_generators.checkpoint import (
+        CheckpointConfig,
+        CheckpointManager,
+    )
 
     source_db = tmp_path / "source_solution_db.jsonl"
     source_db.write_text('{"solution_id": "abc"}\n', encoding="utf-8")
@@ -97,10 +106,14 @@ def test_cycle_checkpoint_writes_manifest_latest_and_restores_to_target_run(tmp_
     assert manifest_path.name == "manifest.json"
     checkpoint_dir = manifest_path.parent
     assert checkpoint_dir.name == "ckpt_000001_cycle_r0003"
-    latest = json.loads((checkpoint_dir.parent / "latest.json").read_text(encoding="utf-8"))
+    latest = json.loads(
+        (checkpoint_dir.parent / "latest.json").read_text(encoding="utf-8")
+    )
     assert latest["latest_checkpoint_id"] == checkpoint_dir.name
     assert latest["latest_checkpoint_path"] == f"{checkpoint_dir.name}/manifest.json"
-    assert not any(path.name.endswith(".tmp") for path in checkpoint_dir.parent.iterdir())
+    assert not any(
+        path.name.endswith(".tmp") for path in checkpoint_dir.parent.iterdir()
+    )
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["checkpoint_kind"] == "cycle_boundary"
@@ -111,15 +124,7 @@ def test_cycle_checkpoint_writes_manifest_latest_and_restores_to_target_run(tmp_
     ref = manager.resolve("latest")
     restored = manager.restore_to_run(ref, target_run_id="run-2")
 
-    target_artifacts = (
-        tmp_path
-        / "artifacts"
-        / "vec_add"
-        / "task-1"
-        / "runs"
-        / "run-2"
-        / "artifacts"
-    )
+    target_artifacts = tmp_path / "artifacts" / "vec_add" / "task-1" / "runs" / "run-2"
     assert restored.checkpoint_id == checkpoint_dir.name
     assert restored.start_round == 4
     assert restored.resume_in_cycle is False
@@ -129,14 +134,26 @@ def test_cycle_checkpoint_writes_manifest_latest_and_restores_to_target_run(tmp_
     assert restored.current_solution.name == "current"
     assert restored.best_eval is not None
     assert restored.best_eval.score() == 2.0
-    assert restored.world_model_path == target_artifacts / "world_model" / "world_model.json"
-    assert restored.solution_db_path == target_artifacts / "world_model" / "solution_db.jsonl"
+    assert (
+        restored.world_model_path
+        == target_artifacts / "world_model" / "world_model.json"
+    )
+    assert (
+        restored.solution_db_path
+        == target_artifacts / "world_model" / "solution_db.jsonl"
+    )
     assert restored.world_model_path.read_text(encoding="utf-8") == _world_model_json()
-    assert restored.solution_db_path.read_text(encoding="utf-8") == '{"solution_id": "abc"}\n'
+    assert (
+        restored.solution_db_path.read_text(encoding="utf-8")
+        == '{"solution_id": "abc"}\n'
+    )
 
 
 def test_attempt_checkpoint_writes_v2_manifest_and_restores_in_cycle(tmp_path):
-    from k_search.kernel_generators.checkpoint import CheckpointConfig, CheckpointManager
+    from k_search.kernel_generators.checkpoint import (
+        CheckpointConfig,
+        CheckpointManager,
+    )
 
     source_db = tmp_path / "source_solution_db.jsonl"
     source_db.write_text('{"solution_id": "attempt"}\n', encoding="utf-8")
@@ -187,7 +204,9 @@ def test_attempt_checkpoint_writes_v2_manifest_and_restores_in_cycle(tmp_path):
     checkpoint_dir = manifest_path.parent
     assert checkpoint_dir.name == "ckpt_000001_attempt_r0007"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    runtime = json.loads((checkpoint_dir / "runtime_state.json").read_text(encoding="utf-8"))
+    runtime = json.loads(
+        (checkpoint_dir / "runtime_state.json").read_text(encoding="utf-8")
+    )
     assert manifest["checkpoint_version"] == "v2"
     assert manifest["checkpoint_kind"] == "attempt_boundary"
     assert manifest["search"]["attempt_idx"] == 2
@@ -248,8 +267,13 @@ def test_checkpoint_cli_validation_accepts_only_ascendc_claude_world_model():
     cli._validate_checkpoint_args(args, llm_provider="claude-agent")
 
 
-def test_world_model_generate_uses_checkpoint_restore_as_authoritative_state(tmp_path, monkeypatch):
-    from k_search.kernel_generators.checkpoint import CheckpointConfig, RestoredCheckpoint
+def test_world_model_generate_uses_checkpoint_restore_as_authoritative_state(
+    tmp_path, monkeypatch
+):
+    from k_search.kernel_generators.checkpoint import (
+        CheckpointConfig,
+        RestoredCheckpoint,
+    )
     from k_search.kernel_generators.kernel_generator_world_model import (
         WorldModelKernelGeneratorWithBaseline,
     )
@@ -350,8 +374,12 @@ def test_world_model_generate_uses_checkpoint_restore_as_authoritative_state(tmp
     assert fake_wm.set_calls == [("vec_add", _world_model_json())]
 
 
-def test_world_model_generate_saves_cycle_checkpoint_under_run_artifacts(tmp_path, monkeypatch):
-    from k_search.kernel_generators.ascendc_agentic_codegen import AscendCAgenticCodegenResult
+def test_world_model_generate_saves_cycle_checkpoint_under_run_artifacts(
+    tmp_path, monkeypatch
+):
+    from k_search.kernel_generators.ascendc_agentic_codegen import (
+        AscendCAgenticCodegenResult,
+    )
     from k_search.kernel_generators.checkpoint import CheckpointConfig
     from k_search.kernel_generators.kernel_generator_world_model import (
         WorldModelKernelGeneratorWithBaseline,
@@ -377,7 +405,9 @@ def test_world_model_generate_saves_cycle_checkpoint_under_run_artifacts(tmp_pat
             return ""
 
         def code_for_world_model_from_raw(self, *, raw, language):
-            return json.dumps(raw, sort_keys=True) if isinstance(raw, dict) else str(raw)
+            return (
+                json.dumps(raw, sort_keys=True) if isinstance(raw, dict) else str(raw)
+            )
 
         def make_solution_from_project_dir(self, **kwargs):
             raise AssertionError("fake runner supplies solution directly")
@@ -488,13 +518,14 @@ def test_world_model_generate_saves_cycle_checkpoint_under_run_artifacts(tmp_pat
         / "task-save"
         / "runs"
         / "run-save"
-        / "artifacts"
         / "checkpoints"
     )
     latest = json.loads((checkpoint_root / "latest.json").read_text(encoding="utf-8"))
     manifest_path = checkpoint_root / latest["latest_checkpoint_path"]
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    runtime = json.loads((manifest_path.parent / "runtime_state.json").read_text(encoding="utf-8"))
+    runtime = json.loads(
+        (manifest_path.parent / "runtime_state.json").read_text(encoding="utf-8")
+    )
     assert manifest["checkpoint_kind"] == "cycle_boundary"
     assert manifest["llm"]["provider"] == "claude-agent"
     assert manifest["search"]["round_index"] == 1
@@ -503,8 +534,12 @@ def test_world_model_generate_saves_cycle_checkpoint_under_run_artifacts(tmp_pat
     assert (manifest_path.parent / "solutions" / "best_solution.json").is_file()
 
 
-def test_world_model_generate_saves_attempt_checkpoint_under_run_artifacts(tmp_path, monkeypatch):
-    from k_search.kernel_generators.ascendc_agentic_codegen import AscendCAgenticCodegenResult
+def test_world_model_generate_saves_attempt_checkpoint_under_run_artifacts(
+    tmp_path, monkeypatch
+):
+    from k_search.kernel_generators.ascendc_agentic_codegen import (
+        AscendCAgenticCodegenResult,
+    )
     from k_search.kernel_generators.checkpoint import CheckpointConfig
     from k_search.kernel_generators.kernel_generator_world_model import (
         WorldModelKernelGeneratorWithBaseline,
@@ -530,7 +565,9 @@ def test_world_model_generate_saves_attempt_checkpoint_under_run_artifacts(tmp_p
             return ""
 
         def code_for_world_model_from_raw(self, *, raw, language):
-            return json.dumps(raw, sort_keys=True) if isinstance(raw, dict) else str(raw)
+            return (
+                json.dumps(raw, sort_keys=True) if isinstance(raw, dict) else str(raw)
+            )
 
         def make_solution_from_project_dir(self, **kwargs):
             raise AssertionError("fake runner supplies solution directly")
@@ -641,13 +678,14 @@ def test_world_model_generate_saves_attempt_checkpoint_under_run_artifacts(tmp_p
         / "task-save"
         / "runs"
         / "run-save"
-        / "artifacts"
         / "checkpoints"
     )
     latest = json.loads((checkpoint_root / "latest.json").read_text(encoding="utf-8"))
     manifest_path = checkpoint_root / latest["latest_checkpoint_path"]
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    runtime = json.loads((manifest_path.parent / "runtime_state.json").read_text(encoding="utf-8"))
+    runtime = json.loads(
+        (manifest_path.parent / "runtime_state.json").read_text(encoding="utf-8")
+    )
     assert manifest["checkpoint_version"] == "v2"
     assert manifest["checkpoint_kind"] == "attempt_boundary"
     assert manifest["search"]["attempt_idx"] == 1
@@ -656,8 +694,12 @@ def test_world_model_generate_saves_attempt_checkpoint_under_run_artifacts(tmp_p
     assert (manifest_path.parent / "solutions" / "current_solution.json").is_file()
 
 
-def test_world_model_adopts_passed_attempt_before_later_improve_interrupt(tmp_path, monkeypatch):
-    from k_search.kernel_generators.ascendc_agentic_codegen import AscendCAgenticCodegenResult
+def test_world_model_adopts_passed_attempt_before_later_improve_interrupt(
+    tmp_path, monkeypatch
+):
+    from k_search.kernel_generators.ascendc_agentic_codegen import (
+        AscendCAgenticCodegenResult,
+    )
     from k_search.kernel_generators.kernel_generator_world_model import (
         WorldModelKernelGeneratorWithBaseline,
     )
@@ -666,7 +708,9 @@ def test_world_model_adopts_passed_attempt_before_later_improve_interrupt(tmp_pa
     monkeypatch.setenv("KSEARCH_TASK_ID", "task-adopt")
 
     strategy_md = tmp_path / "fa_qkv_two_level_l1_reuse.md"
-    strategy_md.write_text("# QKV two-level L1 reuse\n\nUse L1 reuse.", encoding="utf-8")
+    strategy_md.write_text(
+        "# QKV two-level L1 reuse\n\nUse L1 reuse.", encoding="utf-8"
+    )
     strategy = StrategyCatalogEntry(
         id="fa_qkv_two_level_l1_reuse",
         title="QKV two-level L1 reuse",
@@ -694,7 +738,9 @@ def test_world_model_adopts_passed_attempt_before_later_improve_interrupt(tmp_pa
             return ""
 
         def code_for_world_model_from_raw(self, *, raw, language):
-            return json.dumps(raw, sort_keys=True) if isinstance(raw, dict) else str(raw)
+            return (
+                json.dumps(raw, sort_keys=True) if isinstance(raw, dict) else str(raw)
+            )
 
         def make_solution_from_project_dir(self, **kwargs):
             raise AssertionError("fake runner supplies solution directly")
@@ -765,9 +811,10 @@ def test_world_model_adopts_passed_attempt_before_later_improve_interrupt(tmp_pa
         / "task-adopt"
         / "runs"
         / "run-adopt"
-        / "artifacts"
         / "world_model"
     )
-    state = json.loads((world_model_dir / "strategy_state.json").read_text(encoding="utf-8"))
+    state = json.loads(
+        (world_model_dir / "strategy_state.json").read_text(encoding="utf-8")
+    )
     assert state["adopted_strategy_ids"] == ["fa_qkv_two_level_l1_reuse"]
     assert state["current_parent_solution_id"]

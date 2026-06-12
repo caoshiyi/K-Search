@@ -5,7 +5,12 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from k_search.utils.paths import get_run_id, get_run_logs_dir, resolve_output_base, safe_path_component
+from k_search.utils.paths import (
+    get_attempt_dir,
+    get_run_id,
+    resolve_output_base,
+    safe_path_component,
+)
 
 
 @dataclass(frozen=True)
@@ -69,23 +74,31 @@ def _attempt_component(value: int | None) -> str:
 
 
 def build_attempt_dir(context: TelemetryContext, *, root: Path | None = None) -> Path:
-    task_name = safe_path_component(context.task_name or context.definition, default="__unknown__")
+    task_name = safe_path_component(
+        context.task_name or context.definition, default="__unknown__"
+    )
     run_id = safe_path_component(context.run_id or default_run_id(), default="run")
-    action = "action_" + safe_path_component(context.action_node_id, default="unknown")
     if root is None and not os.getenv("KSEARCH_TELEMETRY_DIR", "").strip():
-        base = get_run_logs_dir(task_name=task_name, run_id=run_id) / "telemetry"
-        return (
-            base
-            / _round_component(context.round_index)
-            / action
-            / _attempt_component(context.attempt_index)
+        return get_attempt_dir(
+            task_name=task_name,
+            run_id=run_id,
+            round_num=int(context.round_index or 0),
+            attempt_idx=int(context.attempt_index or 0),
+            action_node_id=context.action_node_id,
         )
+    # Explicit telemetry roots keep a run-like attempt-centric layout under the supplied root.
     return (
         (root or telemetry_root())
         / task_name
         / run_id
-        / "telemetry"
-        / _round_component(context.round_index)
-        / action
-        / _attempt_component(context.attempt_index)
+        / "attempts"
+        / get_attempt_dir(
+            base_dir=".",
+            task_name="_",
+            task_id="_",
+            run_id="_",
+            round_num=int(context.round_index or 0),
+            attempt_idx=int(context.attempt_index or 0),
+            action_node_id=context.action_node_id,
+        ).name
     )

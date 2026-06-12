@@ -11,12 +11,16 @@ from k_search.kernel_generators.ascendc_agentic_codegen import (
     AscendCAgenticCodegenResult,
     AscendCAgenticCodegenRunner,
 )
-from k_search.kernel_generators.claude_agent_project_editor import ClaudeProjectEditResult
+from k_search.kernel_generators.claude_agent_project_editor import (
+    ClaudeProjectEditResult,
+)
 from k_search.tasks.ascendc_task import AscendCTask
 from k_search.tasks.task_base import EvalResult
 
 
-def _request(*, run_id: str = "lifecycle", attempt_idx: int = 1, mode: str = "action") -> AscendCAgenticCodegenRequest:
+def _request(
+    *, run_id: str = "lifecycle", attempt_idx: int = 1, mode: str = "action"
+) -> AscendCAgenticCodegenRequest:
     return AscendCAgenticCodegenRequest(
         definition_text="spec",
         action_text="change kernel",
@@ -37,12 +41,20 @@ def _make_task(tmp_path: Path, *, statuses: list[str] | None = None) -> AscendCT
     status_queue = list(statuses or ["passed"])
 
     class LifecycleTask(AscendCTask):
-        def run_benchmark_in_project_dir(self, *, project_dir, round_num=None, dump_traces=False):
+        def run_benchmark_in_project_dir(
+            self, *, project_dir, round_num=None, dump_traces=False
+        ):
             del project_dir, round_num, dump_traces
             status = status_queue.pop(0) if status_queue else "passed"
-            return EvalResult(status=status, log_excerpt=f"{status} log", metrics={"score": 1.0})
+            return EvalResult(
+                status=status, log_excerpt=f"{status} log", metrics={"score": 1.0}
+            )
 
-    return LifecycleTask(task_path=task_dir, definition_name="x", artifacts_dir=str(tmp_path / "artifacts"))
+    return LifecycleTask(
+        task_path=task_dir,
+        definition_name="x",
+        artifacts_dir=str(tmp_path / "artifacts"),
+    )
 
 
 class FakeWorktree:
@@ -98,23 +110,39 @@ class FakeSessionClient:
         root = Path(session.project_dir)
         first_line = prompt.splitlines()[0] if prompt else ""
         if "Stage 1/" in first_line and "code-reader" in first_line:
-            (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h\n", encoding="utf-8")
+            (root / "CODE_MAP.md").write_text(
+                "# CODE_MAP\nkernel/foo.h\n", encoding="utf-8"
+            )
             text = "reader"
         elif "Stage 2/" in first_line and "designer" in first_line:
             (root / "ASCENDC_DESIGN.md").write_text("# design\n", encoding="utf-8")
             text = "design"
         elif "codegen" in first_line:
-            (root / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
-            (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h updated\n", encoding="utf-8")
-            (root / "IMPLEMENTATION_EXECUTION_PLAN.md").write_text("# execution\n", encoding="utf-8")
-            (root / "IMPLEMENTATION_HANDOFF.md").write_text("# handoff\n", encoding="utf-8")
+            (root / "kernel" / "foo.h").write_text(
+                "alpha\nBETA\ngamma\n", encoding="utf-8"
+            )
+            (root / "CODE_MAP.md").write_text(
+                "# CODE_MAP\nkernel/foo.h updated\n", encoding="utf-8"
+            )
+            (root / "IMPLEMENTATION_EXECUTION_PLAN.md").write_text(
+                "# execution\n", encoding="utf-8"
+            )
+            (root / "IMPLEMENTATION_HANDOFF.md").write_text(
+                "# handoff\n", encoding="utf-8"
+            )
             text = "codegen"
         elif "bug-fixer" in first_line:
-            (root / "kernel" / "foo.h").write_text("alpha\nBETA\nGAMMA\n", encoding="utf-8")
-            (root / "CODE_MAP.md").write_text("# CODE_MAP\nkernel/foo.h fixed\n", encoding="utf-8")
+            (root / "kernel" / "foo.h").write_text(
+                "alpha\nBETA\nGAMMA\n", encoding="utf-8"
+            )
+            (root / "CODE_MAP.md").write_text(
+                "# CODE_MAP\nkernel/foo.h fixed\n", encoding="utf-8"
+            )
             text = "fix"
         elif "reviewer" in first_line:
-            (root / "REVIEW_NOTES.md").write_text("status: ok\neval_ready: true\n", encoding="utf-8")
+            (root / "REVIEW_NOTES.md").write_text(
+                "status: ok\neval_ready: true\n", encoding="utf-8"
+            )
             text = "review"
         else:
             raise AssertionError(first_line)
@@ -140,14 +168,18 @@ def lifecycle_env(monkeypatch):
 def _install_fake_worktree(monkeypatch, tmp_path: Path) -> FakeWorktree:
     worktree_dir = tmp_path / "worktree"
     (worktree_dir / "kernel").mkdir(parents=True)
-    (worktree_dir / "kernel" / "foo.h").write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    (worktree_dir / "kernel" / "foo.h").write_text(
+        "alpha\nbeta\ngamma\n", encoding="utf-8"
+    )
     worktree = FakeWorktree(worktree_dir)
     monkeypatch.setattr(
         codegen,
         "create_agentic_worktree",
         lambda *, task_path, worktree_parent_dir=None: worktree,
     )
-    monkeypatch.setattr(codegen, "_materialize_native_assets_baseline", lambda wt_session: None)
+    monkeypatch.setattr(
+        codegen, "_materialize_native_assets_baseline", lambda wt_session: None
+    )
     return worktree
 
 
@@ -158,7 +190,9 @@ def test_result_dataclass_does_not_hold_live_resources():
     assert "worktree_session" not in fields
 
 
-def test_run_one_shot_closed_closes_session_and_cleans_worktree_on_success(tmp_path, monkeypatch, lifecycle_env):
+def test_run_one_shot_closed_closes_session_and_cleans_worktree_on_success(
+    tmp_path, monkeypatch, lifecycle_env
+):
     worktree = _install_fake_worktree(monkeypatch, tmp_path)
     client = FakeSessionClient()
     runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
@@ -177,7 +211,9 @@ def test_run_one_shot_closed_closes_session_and_cleans_worktree_on_success(tmp_p
     assert worktree.cleaned is True
 
 
-def test_run_one_shot_closed_closes_session_and_cleans_worktree_on_exception(tmp_path, monkeypatch, lifecycle_env):
+def test_run_one_shot_closed_closes_session_and_cleans_worktree_on_exception(
+    tmp_path, monkeypatch, lifecycle_env
+):
     monkeypatch.setenv("KSEARCH_TASK_ID", "taskid")
     worktree = _install_fake_worktree(monkeypatch, tmp_path)
     client = FakeSessionClient(fail_flow=True)
@@ -202,9 +238,8 @@ def test_run_one_shot_closed_closes_session_and_cleans_worktree_on_exception(tmp
         / "taskid"
         / "runs"
         / "lifecycle"
-        / "artifacts"
-        / "candidates"
-        / "round_0001_attempt_01"
+        / "attempts"
+        / "r0001_a01_action_unknown"
         / "manifest.json"
     )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -215,12 +250,16 @@ def test_run_one_shot_closed_closes_session_and_cleans_worktree_on_exception(tmp
     assert manifest["stage_prompt_paths"]
 
 
-def test_open_cycle_reuses_session_until_context_exit(tmp_path, monkeypatch, lifecycle_env):
+def test_open_cycle_reuses_session_until_context_exit(
+    tmp_path, monkeypatch, lifecycle_env
+):
     worktree = _install_fake_worktree(monkeypatch, tmp_path)
     client = FakeSessionClient()
     runner = AscendCAgenticCodegenRunner(model_name="claude", editor_client=client)
 
-    with runner.open_cycle(task=_make_task(tmp_path), request=_request(), base_solution=None) as cycle:
+    with runner.open_cycle(
+        task=_make_task(tmp_path), request=_request(), base_solution=None
+    ) as cycle:
         first = cycle.run_initial()
         second = cycle.continue_fix("raw compile fix context")
         assert first.eval_result.status == "passed"

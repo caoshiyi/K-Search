@@ -147,7 +147,9 @@ def test_openai_provider_requires_api_key(monkeypatch):
         OpenAICompatibleLLMClient(model_name="gpt-5.2")
 
 
-def test_llm_interaction_logger_writes_hierarchical_human_readable_logs(monkeypatch, tmp_path):
+def test_llm_interaction_logger_writes_hierarchical_human_readable_logs(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("KSEARCH_LLM_LOG_DIR", str(tmp_path))
     monkeypatch.setenv("KSEARCH_LLM_LOG_JSON", "1")
 
@@ -225,7 +227,9 @@ def test_llm_interaction_logger_defaults_under_task_run_logs(monkeypatch, tmp_pa
     )
 
 
-def test_llm_interaction_logger_uses_unknown_hierarchy_without_context(monkeypatch, tmp_path):
+def test_llm_interaction_logger_uses_unknown_hierarchy_without_context(
+    monkeypatch, tmp_path
+):
     monkeypatch.setenv("KSEARCH_LLM_LOG_DIR", str(tmp_path))
     monkeypatch.setenv("KSEARCH_LLM_LOG_JSON", "1")
 
@@ -339,7 +343,9 @@ def test_claude_agent_client_passes_model_and_disables_tools(monkeypatch):
     assert seen["options"].kwargs["permission_mode"] == "dontAsk"
 
 
-def test_claude_agent_client_extracts_assistant_content_when_result_is_absent(monkeypatch):
+def test_claude_agent_client_extracts_assistant_content_when_result_is_absent(
+    monkeypatch,
+):
     async def fake_query(prompt, options):
         yield SimpleNamespace(
             content=[
@@ -411,7 +417,9 @@ def test_claude_agent_timeout_defaults_from_api_timeout_ms(monkeypatch):
     assert client.timeout_seconds == 123.0
 
 
-def test_claude_agent_timeout_reports_clear_error_when_sdk_child_is_cancelled(monkeypatch):
+def test_claude_agent_timeout_reports_clear_error_when_sdk_child_is_cancelled(
+    monkeypatch,
+):
     async def fake_query(prompt, options):
         try:
             await asyncio.sleep(60)
@@ -841,7 +849,9 @@ def test_world_model_debug_prompt_uses_applied_code_after_patch_response():
     class FakeTask:
         name = "mqa"
 
-        def get_definition_text(self, language, include_sources=True, include_format=True):
+        def get_definition_text(
+            self, language, include_sources=True, include_format=True
+        ):
             return "spec"
 
         def get_baseline_targets_text(self):
@@ -937,12 +947,16 @@ def test_baseline_ascendc_agentic_failure_can_fallback_to_legacy(monkeypatch, tm
     from k_search.tasks.ascendc_task import AscendCTask, format_ascendc_project_files
 
     class FailingRunner:
-        def run_one_shot_closed(self, *, task, request, base_solution, max_fix_rounds=0):
+        def run_one_shot_closed(
+            self, *, task, request, base_solution, max_fix_rounds=0
+        ):
             del max_fix_rounds
             raise RuntimeError("agentic unavailable")
 
         def run(self, *, task, request, base_solution):
-            return self.run_one_shot_closed(task=task, request=request, base_solution=base_solution)
+            return self.run_one_shot_closed(
+                task=task, request=request, base_solution=base_solution
+            )
 
     class LegacyClient:
         def __init__(self):
@@ -972,12 +986,16 @@ def test_baseline_ascendc_agentic_failure_can_fallback_to_legacy(monkeypatch, tm
     assert "<ascendc_project>" in legacy_client.prompts[0]
 
 
-def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construction(tmp_path):
+def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construction(
+    tmp_path,
+):
     from types import SimpleNamespace
     from k_search.kernel_generators.kernel_generator_world_model import (
         WorldModelKernelGeneratorWithBaseline,
     )
-    from k_search.kernel_generators.ascendc_agentic_codegen import AscendCAgenticCodegenResult
+    from k_search.kernel_generators.ascendc_agentic_codegen import (
+        AscendCAgenticCodegenResult,
+    )
     from k_search.tasks.ascendc_task import AscendCTask
     from k_search.tasks.task_base import EvalResult
 
@@ -993,7 +1011,9 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
         def run(self, *, task, request, base_solution):
             self.requests.append(request)
             attempt_no = len(self.requests)
-            (tmp_path / "kernel" / "foo.h").write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+            (tmp_path / "kernel" / "foo.h").write_text(
+                "alpha\nBETA\ngamma\n", encoding="utf-8"
+            )
             solution = task.make_solution_from_project_dir(
                 project_dir=tmp_path,
                 changed_paths=["kernel/foo.h"],
@@ -1014,7 +1034,10 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
                         "workdir": str(tmp_path),
                     },
                 ),
-                raw=task.code_for_world_model_from_raw(raw={src.path: src.content for src in solution.sources}, language="ascendc"),
+                raw=task.code_for_world_model_from_raw(
+                    raw={src.path: src.content for src in solution.sources},
+                    language="ascendc",
+                ),
                 cleaned={src.path: src.content for src in solution.sources},
                 transcript="edited",
                 prompt="compact prompt",
@@ -1023,7 +1046,9 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
                 diff_text="diff",
                 project_path=str(tmp_path),
                 candidate_patch=SimpleNamespace(candidate_id=f"candidate-{attempt_no}"),
-                artifact_paths={"manifest_path": str(tmp_path / f"candidate-{attempt_no}.json")},
+                artifact_paths={
+                    "manifest_path": str(tmp_path / f"candidate-{attempt_no}.json")
+                },
             )
 
         def run_multi_turn(self, *, task, request, base_solution, max_fix_rounds=0):
@@ -1043,17 +1068,23 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
                     return False
 
                 def run_initial(self):
-                    return runner.run(task=task, request=self.request, base_solution=base_solution)
+                    return runner.run(
+                        task=task, request=self.request, base_solution=base_solution
+                    )
 
                 def continue_fix(self, fix_prompt):
                     del fix_prompt
                     runner.continuation_modes.append("fix")
-                    return runner.run(task=task, request=self.request, base_solution=None)
+                    return runner.run(
+                        task=task, request=self.request, base_solution=None
+                    )
 
                 def continue_improve(self, improve_prompt):
                     del improve_prompt
                     runner.continuation_modes.append("improve")
-                    return runner.run(task=task, request=self.request, base_solution=None)
+                    return runner.run(
+                        task=task, request=self.request, base_solution=None
+                    )
 
             return FakeCycle()
 
@@ -1131,7 +1162,9 @@ def test_world_model_ascendc_codegen_uses_agentic_runner_before_prompt_construct
         run_id="wm-effective-run",
     )
 
-    assert "BETA" in next(src.content for src in solution.sources if src.path == "kernel/foo.h")
+    assert "BETA" in next(
+        src.content for src in solution.sources if src.path == "kernel/foo.h"
+    )
     assert len(fake_runner.requests) == 2
     assert fake_runner.continuation_modes == ["improve"]
     assert fake_runner.requests[0].action_text
@@ -1209,7 +1242,6 @@ def test_world_model_narrative_logger_uses_effective_run_id(tmp_path, monkeypatc
         / "task-lineage"
         / "runs"
         / "effective-run"
-        / "logs"
     )
 
 
@@ -1270,7 +1302,6 @@ def test_world_model_snapshot_uses_generated_effective_run_id(tmp_path, monkeypa
         / "task-lineage"
         / "runs"
         / "effective-run"
-        / "artifacts"
         / "world_model"
         / "world_model.json"
     )
@@ -1281,7 +1312,6 @@ def test_world_model_snapshot_uses_generated_effective_run_id(tmp_path, monkeypa
         / "task-lineage"
         / "runs"
         / "late-run"
-        / "artifacts"
         / "world_model"
         / "world_model.json"
     )
@@ -1291,9 +1321,17 @@ def test_world_model_snapshot_uses_generated_effective_run_id(tmp_path, monkeypa
 
 def test_baseline_agentic_memory_writeback_only_for_new_best(tmp_path, monkeypatch):
     from k_search.kernel_generators.kernel_generator import KernelGenerator
-    from k_search.kernel_generators.ascendc_agentic_codegen import AscendCAgenticCodegenResult
+    from k_search.kernel_generators.ascendc_agentic_codegen import (
+        AscendCAgenticCodegenResult,
+    )
     from k_search.kernel_generators.memory import CODE_MAP, MemoryStore
-    from k_search.tasks.task_base import BuildSpec, EvalResult, Solution, SourceFile, SupportedLanguages
+    from k_search.tasks.task_base import (
+        BuildSpec,
+        EvalResult,
+        Solution,
+        SourceFile,
+        SupportedLanguages,
+    )
 
     monkeypatch.setenv("KSEARCH_ENABLE_CODE_MAP", "1")
     monkeypatch.setenv("KSEARCH_ENABLE_CURATOR", "0")
@@ -1368,7 +1406,9 @@ def test_baseline_agentic_memory_writeback_only_for_new_best(tmp_path, monkeypat
         def run_multi_turn(self, *, task, request, base_solution, max_fix_rounds=0):
             return self.run(task=task, request=request, base_solution=base_solution)
 
-        def run_one_shot_closed(self, *, task, request, base_solution, max_fix_rounds=0):
+        def run_one_shot_closed(
+            self, *, task, request, base_solution, max_fix_rounds=0
+        ):
             return self.run(task=task, request=request, base_solution=base_solution)
 
     task = FakeTask()
@@ -1383,5 +1423,8 @@ def test_baseline_agentic_memory_writeback_only_for_new_best(tmp_path, monkeypat
 
     result = generator.generate(task=task, max_opt_rounds=2)
 
-    assert next(src.content for src in result.sources if src.path == "kernel/foo.h") == "best\n"
+    assert (
+        next(src.content for src in result.sources if src.path == "kernel/foo.h")
+        == "best\n"
+    )
     assert MemoryStore.for_task(task).load(CODE_MAP) == "# CODE_MAP\nbest\n"
